@@ -42,7 +42,7 @@ import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.*
 
-const val APP_VERSION = "1.4 \u00b7 iteration 1"
+const val APP_VERSION = "1.5 \u00b7 iteration 2"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0)
 val InvItemListSaver: Saver<List<InvItem>, String> = Saver(
@@ -168,7 +168,8 @@ fun InvoiceScreen(isQuote: Boolean) {
     var payMode by rememberSaveable { mutableStateOf("") }; var delNote by rememberSaveable { mutableStateOf("") }
     var bName by rememberSaveable { mutableStateOf("") }
     var bAddr1 by rememberSaveable { mutableStateOf("") }; var bAddr2 by rememberSaveable { mutableStateOf("") }
-    var bLandmark by rememberSaveable { mutableStateOf("") }; var bPhone by rememberSaveable { mutableStateOf("") }
+    var bLandmark by rememberSaveable { mutableStateOf("") }; var bPincode by rememberSaveable { mutableStateOf("") }
+    var bPhone by rememberSaveable { mutableStateOf("") }
     var bGst by rememberSaveable { mutableStateOf("") }; var bState by rememberSaveable { mutableStateOf("") }
     var iDesc by rememberSaveable { mutableStateOf("") }; var iSerial by rememberSaveable { mutableStateOf("") }
     var iHsn by rememberSaveable { mutableStateOf("") }; var iQty by rememberSaveable { mutableStateOf("1") }
@@ -185,7 +186,7 @@ fun InvoiceScreen(isQuote: Boolean) {
 
     fun clearBill() {
         invNo = nextInvoiceNo(prefs)
-        bName=""; bAddr1=""; bAddr2=""; bLandmark=""; bPhone=""; bGst=""; bState=""
+        bName=""; bAddr1=""; bAddr2=""; bLandmark=""; bPincode=""; bPhone=""; bGst=""; bState=""
         items = emptyList()
         billDisc=""; exchange=""; cash=""; upi=""; card=""; finance=""
         payMode=""; delNote=""
@@ -209,6 +210,7 @@ fun InvoiceScreen(isQuote: Boolean) {
             OutlinedTextField(bAddr1, {bAddr1=it}, label={Text("Address Line 1")}, modifier=Modifier.fillMaxWidth())
             OutlinedTextField(bAddr2, {bAddr2=it}, label={Text("Address Line 2")}, modifier=Modifier.fillMaxWidth())
             OutlinedTextField(bLandmark, {bLandmark=it}, label={Text("Landmark")}, modifier=Modifier.fillMaxWidth())
+            OutlinedTextField(bPincode, {bPincode=it}, label={Text("Pincode")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.fillMaxWidth())
             OutlinedTextField(bPhone, {bPhone=it}, label={Text("Phone")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Phone), modifier=Modifier.fillMaxWidth())
             Row { OutlinedTextField(bGst, {bGst=it}, label={Text("GSTIN")}, modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(bState, {bState=it}, label={Text("State Code")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)) }
             if(calc.interState) Text("Other state: IGST will be charged", fontSize=10.sp, color=Color(0xFF2E7D32))
@@ -263,21 +265,21 @@ fun InvoiceScreen(isQuote: Boolean) {
                 // Snapshot everything now: the form is cleared once the PDF is written.
                 val snapInv = invNo; val snapDate = date; val snapPay = payMode; val snapNote = delNote
                 val snapItems = items; val snapCalc = calc
-                val snapBuyer = listOf(bName, bAddr1, bAddr2, bLandmark, bPhone, bGst, bState)
+                val snapBuyer = listOf(bName, bAddr1, bAddr2, bLandmark, bPincode, bPhone, bGst, bState)
                 val snapFinance = finance
                 val seller = listOf(
                     sName,
                     listOf(prefs.getString("sAddr1","")?:"", prefs.getString("sAddr2","")?:"").filter{it.isNotBlank()}.joinToString("\n"),
-                    prefs.getString("sPhone","")?:"", prefs.getString("sEmail","")?:"", prefs.getString("sLandmark","")?:"",
+                    prefs.getString("sPhone","")?:"", prefs.getString("sEmail","")?:"", prefs.getString("sLandmark","")?:"", prefs.getString("sPincode","")?:"",
                     prefs.getString("sGst","")?:"", prefs.getString("sBank","")?:"", prefs.getString("sIfsc","")?:"", prefs.getString("sJuris","")?:"" )
                 busy = true
                 scope.launch {
                     val file = try {
                         withContext(Dispatchers.IO) {
-                            if(!isQuote) saveInvoiceData(ctx, snapInv, snapBuyer[0], snapBuyer[5], snapCalc)
-                            createPdf(ctx, isQuote, snapInv, snapDate, snapPay, snapNote, seller[0], seller[1], seller[2], seller[3], seller[4],
-                                seller[5], seller[6], seller[7], seller[8], snapBuyer[0], snapBuyer[1], snapBuyer[2], snapBuyer[3],
-                                snapBuyer[4], snapBuyer[5], snapBuyer[6], snapItems, snapCalc, snapFinance)
+                            if(!isQuote) saveInvoiceData(ctx, snapInv, snapBuyer[0], snapBuyer[6], snapCalc)
+                            createPdf(ctx, isQuote, snapInv, snapDate, snapPay, snapNote, seller[0], seller[1], seller[2], seller[3], seller[4], seller[5],
+                                seller[6], seller[7], seller[8], seller[9], snapBuyer[0], snapBuyer[1], snapBuyer[2], snapBuyer[3],
+                                snapBuyer[4], snapBuyer[5], snapBuyer[6], snapBuyer[7], snapItems, snapCalc, snapFinance)
                         }
                     } catch(e: Exception) {
                         null
@@ -359,7 +361,7 @@ fun InvoiceScreen(isQuote: Boolean) {
     }
 }
 @Composable fun FileHistoryScreen() { val ctx=LocalContext.current; val d=ctx.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS); var f by remember{mutableStateOf(d?.listFiles()?.filter{it.extension=="pdf"}?.sortedByDescending{it.lastModified()}?:emptyList())}; LazyColumn(Modifier.padding(16.dp)){items(f){fl->Row(Modifier.fillMaxWidth().padding(8.dp),verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f).clickable{ctx.startActivity(Intent(Intent.ACTION_VIEW).apply{setDataAndType(FileProvider.getUriForFile(ctx,"${ctx.packageName}.provider",fl),"application/pdf");addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)})}){Text(fl.name,fontWeight=FontWeight.Bold);Text(SimpleDateFormat("dd MMM HH:mm").format(Date(fl.lastModified())),fontSize=10.sp)}; IconButton(onClick={if(fl.delete())f=d?.listFiles()?.filter{it.extension=="pdf"}?.sortedByDescending{it.lastModified()}?:emptyList()}){Icon(Icons.Default.Delete,"Del",tint=Color.Red)}};Divider()}} }
-@Composable fun SettingsScreen(currentPin: String, onPinSave: (String)->Unit) { val ctx=LocalContext.current; val prefs=remember{ctx.getSharedPreferences("penkhata_data",Context.MODE_PRIVATE)}; var sName by remember{mutableStateOf(prefs.getString("sName","")?:"")}; var sState by remember{mutableStateOf(prefs.getString("sState","21")?:"21")}; var sPrefix by remember{mutableStateOf(prefs.getString("sPrefix","INV")?:"INV")}; var sAddr1 by remember{mutableStateOf(prefs.getString("sAddr1","")?:(prefs.getString("sAddr","")?:"").lineSequence().firstOrNull()?.trim()?:"")}; var sAddr2 by remember{mutableStateOf(prefs.getString("sAddr2","")?:(prefs.getString("sAddr","")?:"").lineSequence().drop(1).joinToString(" ").trim())}; var sPhone by remember{mutableStateOf(prefs.getString("sPhone","")?:"")}; var sEmail by remember{mutableStateOf(prefs.getString("sEmail","")?:"")}; var sLandmark by remember{mutableStateOf(prefs.getString("sLandmark","")?:"")}; var sGst by remember{mutableStateOf(prefs.getString("sGst","")?:"")}; var sBank by remember{mutableStateOf(prefs.getString("sBank","")?:"")}; var sIfsc by remember{mutableStateOf(prefs.getString("sIfsc","")?:"")}; var sJuris by remember{mutableStateOf(prefs.getString("sJuris","")?:"")}; var defTax by remember{mutableStateOf(prefs.getString("defTax","18")?:"18")}; var newPin by remember{mutableStateOf(currentPin)}; Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())){Text("SETTINGS",fontSize=24.sp,fontWeight=FontWeight.Bold); OutlinedTextField(newPin,{newPin=it},label={Text("Set Login PIN")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.NumberPassword),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sName,{sName=it},label={Text("Firm Name")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sState,{sState=it},label={Text("My State Code (GST, e.g. 21)")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sPrefix,{sPrefix=it},label={Text("Invoice Prefix")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sAddr1,{sAddr1=it},label={Text("Address Line 1")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sAddr2,{sAddr2=it},label={Text("Address Line 2")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sPhone,{sPhone=it},label={Text("Phone")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Phone),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sEmail,{sEmail=it},label={Text("Email")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Email),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sLandmark,{sLandmark=it},label={Text("Landmark")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sGst,{sGst=it},label={Text("GSTIN")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sBank,{sBank=it},label={Text("Bank Name & Acc")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sIfsc,{sIfsc=it},label={Text("IFSC")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sJuris,{sJuris=it},label={Text("Jurisdiction")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(defTax,{defTax=it},label={Text("Default Tax %")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),modifier=Modifier.fillMaxWidth()); Text("PenKhata "+APP_VERSION, fontSize=10.sp, color=Color.Gray, modifier=Modifier.padding(top=8.dp)); Button(onClick={prefs.edit().putString("sName",sName).putString("sState",sState).putString("sPrefix",sPrefix).putString("sAddr1",sAddr1).putString("sAddr2",sAddr2).putString("sPhone",sPhone).putString("sEmail",sEmail).putString("sLandmark",sLandmark).putString("sGst",sGst).putString("sBank",sBank).putString("sIfsc",sIfsc).putString("sJuris",sJuris).putString("defTax",defTax).apply(); onPinSave(newPin); Toast.makeText(ctx,"Saved",Toast.LENGTH_SHORT).show()},modifier=Modifier.fillMaxWidth()){Text("SAVE")}; Spacer(Modifier.height(60.dp))} }
+@Composable fun SettingsScreen(currentPin: String, onPinSave: (String)->Unit) { val ctx=LocalContext.current; val prefs=remember{ctx.getSharedPreferences("penkhata_data",Context.MODE_PRIVATE)}; var sName by remember{mutableStateOf(prefs.getString("sName","")?:"")}; var sState by remember{mutableStateOf(prefs.getString("sState","21")?:"21")}; var sPrefix by remember{mutableStateOf(prefs.getString("sPrefix","INV")?:"INV")}; var sAddr1 by remember{mutableStateOf(prefs.getString("sAddr1","")?:(prefs.getString("sAddr","")?:"").lineSequence().firstOrNull()?.trim()?:"")}; var sAddr2 by remember{mutableStateOf(prefs.getString("sAddr2","")?:(prefs.getString("sAddr","")?:"").lineSequence().drop(1).joinToString(" ").trim())}; var sPhone by remember{mutableStateOf(prefs.getString("sPhone","")?:"")}; var sEmail by remember{mutableStateOf(prefs.getString("sEmail","")?:"")}; var sLandmark by remember{mutableStateOf(prefs.getString("sLandmark","")?:"")}; var sPincode by remember{mutableStateOf(prefs.getString("sPincode","")?:"")}; var sGst by remember{mutableStateOf(prefs.getString("sGst","")?:"")}; var sBank by remember{mutableStateOf(prefs.getString("sBank","")?:"")}; var sIfsc by remember{mutableStateOf(prefs.getString("sIfsc","")?:"")}; var sJuris by remember{mutableStateOf(prefs.getString("sJuris","")?:"")}; var defTax by remember{mutableStateOf(prefs.getString("defTax","18")?:"18")}; var newPin by remember{mutableStateOf(currentPin)}; Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())){Text("SETTINGS",fontSize=24.sp,fontWeight=FontWeight.Bold); OutlinedTextField(newPin,{newPin=it},label={Text("Set Login PIN")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.NumberPassword),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sName,{sName=it},label={Text("Firm Name")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sState,{sState=it},label={Text("My State Code (GST, e.g. 21)")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sPrefix,{sPrefix=it},label={Text("Invoice Prefix")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sAddr1,{sAddr1=it},label={Text("Address Line 1")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sAddr2,{sAddr2=it},label={Text("Address Line 2")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sPhone,{sPhone=it},label={Text("Phone")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Phone),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sEmail,{sEmail=it},label={Text("Email")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Email),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sLandmark,{sLandmark=it},label={Text("Landmark")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sPincode,{sPincode=it},label={Text("Pincode")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sGst,{sGst=it},label={Text("GSTIN")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sBank,{sBank=it},label={Text("Bank Name & Acc")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sIfsc,{sIfsc=it},label={Text("IFSC")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sJuris,{sJuris=it},label={Text("Jurisdiction")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(defTax,{defTax=it},label={Text("Default Tax %")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),modifier=Modifier.fillMaxWidth()); Text("PenKhata "+APP_VERSION, fontSize=10.sp, color=Color.Gray, modifier=Modifier.padding(top=8.dp)); Button(onClick={prefs.edit().putString("sName",sName).putString("sState",sState).putString("sPrefix",sPrefix).putString("sAddr1",sAddr1).putString("sAddr2",sAddr2).putString("sPhone",sPhone).putString("sEmail",sEmail).putString("sLandmark",sLandmark).putString("sPincode",sPincode).putString("sGst",sGst).putString("sBank",sBank).putString("sIfsc",sIfsc).putString("sJuris",sJuris).putString("defTax",defTax).apply(); onPinSave(newPin); Toast.makeText(ctx,"Saved",Toast.LENGTH_SHORT).show()},modifier=Modifier.fillMaxWidth()){Text("SAVE")}; Spacer(Modifier.height(60.dp))} }
 
 // --- LOGIC ---
 fun writeFileAtomic(f: File, text: String) {
@@ -465,9 +467,9 @@ fun drawBlock(c: Canvas, text: String, x: Float, baseY: Float, p: Paint, width: 
 }
 
 fun createPdf(ctx: Context, isQuote: Boolean, invNo: String, date: String, payMode: String, delNote: String,
-              sName: String, sAddr: String, sPhone: String, sEmail: String, sLandmark: String,
+              sName: String, sAddr: String, sPhone: String, sEmail: String, sLandmark: String, sPincode: String,
               sGst: String, sBank: String, sIfsc: String, sJuris: String,
-              bName: String, bAddr1: String, bAddr2: String, bLandmark: String, bPhone: String,
+              bName: String, bAddr1: String, bAddr2: String, bLandmark: String, bPincode: String, bPhone: String,
               bGst: String, bState: String, items: List<InvItem>, calc: BillCalc, finance: String): File {
     val doc = PdfDocument(); val page = doc.startPage(PdfDocument.PageInfo.Builder(595, 842, 1).create())
     val c = page.canvas; val p = Paint(); val bp = Paint().apply{style=Paint.Style.STROKE; strokeWidth=1f}
@@ -483,13 +485,22 @@ fun createPdf(ctx: Context, isQuote: Boolean, invNo: String, date: String, payMo
     val qX=midX+(m+w-midX)/2; val labX=midX+4f; val labW=qX-labX-4f; val valX=qX+4f; val valW=(m+w)-valX-6f
     val nameP=Paint(p).apply{textSize=12f; isFakeBoldText=true; textAlign=Paint.Align.LEFT}
     val bodyP=Paint(p).apply{textSize=9f; isFakeBoldText=false; textAlign=Paint.Align.LEFT}
-    val contact=listOf(sPhone,sEmail,sLandmark).filter{it.isNotBlank()}.joinToString("  |  ")
+    val sDetail=listOf(
+        if(sLandmark.isBlank()) "" else "Landmark: $sLandmark",
+        if(sPincode.isBlank()) "" else "Pincode: $sPincode",
+        if(sPhone.isBlank()) "" else "Ph: $sPhone",
+        sEmail
+    )
     val sGstLine=if(sGst.isBlank()) "" else "GSTIN: $sGst"
     val bGstLine=if(bGst.isBlank()) "" else "GSTIN: $bGst"
     val bStateLine=if(bState.isBlank()) "" else "State: $bState"
-    val bAddr=listOf(bAddr1, bAddr2, if(bLandmark.isBlank()) "" else "Landmark: $bLandmark", if(bPhone.isBlank()) "" else "Ph: $bPhone").filter{it.isNotBlank()}.joinToString("\n")
-    val sellerH=blockHeight(sName,nameP,leftW)+2f+blockHeight(sAddr,bodyP,leftW)+blockHeight(contact,bodyP,leftW)+blockHeight(sGstLine,bodyP,leftW)+pad
-    val buyerH=blockHeight("Buyer: $bName",nameP,leftW)+2f+blockHeight(bAddr,bodyP,leftW)+blockHeight(bGstLine,bodyP,leftW)+blockHeight(bStateLine,bodyP,leftW)+pad
+    val bDetail=listOf(bAddr1, bAddr2,
+        if(bLandmark.isBlank()) "" else "Landmark: $bLandmark",
+        if(bPincode.isBlank()) "" else "Pincode: $bPincode",
+        if(bPhone.isBlank()) "" else "Ph: $bPhone")
+    fun linesH(lines: List<String>): Float = lines.fold(0f) { acc, t -> acc + blockHeight(t, bodyP, leftW) }
+    val sellerH=blockHeight(sName,nameP,leftW)+2f+blockHeight(sAddr,bodyP,leftW)+linesH(sDetail)+blockHeight(sGstLine,bodyP,leftW)+pad
+    val buyerH=blockHeight("Buyer: $bName",nameP,leftW)+2f+linesH(bDetail)+blockHeight(bGstLine,bodyP,leftW)+blockHeight(bStateLine,bodyP,leftW)+pad
     val rows=listOf("No" to invNo, "Date" to date, "Del. Note" to delNote, "Pay Mode" to payMode)
     val rowHs=rows.map{ (l,v) -> maxOf(blockHeight(l,bodyP,labW), blockHeight(v,bodyP,valW))+4f }
     val topH=maxOf(sellerH, rowHs[0]+rowHs[1])+pad
@@ -499,11 +510,11 @@ fun createPdf(ctx: Context, isQuote: Boolean, invNo: String, date: String, payMo
     var ty=r1+pad+nameP.textSize
     ty=drawBlock(c,sName,leftX,ty,nameP,leftW)+2f
     ty=drawBlock(c,sAddr,leftX,ty,bodyP,leftW)
-    ty=drawBlock(c,contact,leftX,ty,bodyP,leftW)
+    for(l in sDetail) ty=drawBlock(c,l,leftX,ty,bodyP,leftW)
     drawBlock(c,sGstLine,leftX,ty,bodyP,leftW)
     var buyY=midY+pad+nameP.textSize
     buyY=drawBlock(c,"Buyer: $bName",leftX,buyY,nameP,leftW)+2f
-    buyY=drawBlock(c,bAddr,leftX,buyY,bodyP,leftW)
+    for(l in bDetail) buyY=drawBlock(c,l,leftX,buyY,bodyP,leftW)
     buyY=drawBlock(c,bGstLine,leftX,buyY,bodyP,leftW)
     drawBlock(c,bStateLine,leftX,buyY,bodyP,leftW)
     val topSplit=r1+topH*(rowHs[0]/(rowHs[0]+rowHs[1])); val botSplit=midY+botH*(rowHs[2]/(rowHs[2]+rowHs[3]))
@@ -562,7 +573,8 @@ fun createPdf(ctx: Context, isQuote: Boolean, invNo: String, date: String, payMo
     }
     p.isFakeBoldText=true
     c.drawText("Grand Total",tX-10,ry+17,p); c.drawText("\u20b9 "+fmt(calc.grand),m+w-5,ry+17,p)
-    c.drawLine(tX,fTop,tX,ry+24f,bp)
+    val dy=700f
+    c.drawLine(tX,fTop,tX,dy,bp)
     p.isFakeBoldText=false; p.textAlign=Paint.Align.LEFT
     val leftLimit=tX-10-(m+5)-4f
     var ly=fTop+16f
@@ -580,7 +592,6 @@ fun createPdf(ctx: Context, isQuote: Boolean, invNo: String, date: String, payMo
     if(calc.exchange>0.004) { ly+=13f; c.drawText("Exchange adjusted: \u20b9 "+fmt(calc.exchange),m+5,ly,p) }
     if(finance.isNotBlank()) { ly+=13f; drawAmountInWords(c, "Finance: "+finance, m+5, ly, p, leftLimit) }
     p.textSize=10f
-    val dy=740f
     if(sBank.isNotEmpty()) {
         val bankY=Math.min(ly+30f, dy-16f)
         if(bankY>ly+12f) {
