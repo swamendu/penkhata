@@ -54,7 +54,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "2.1 \u00b7 iteration 8"
+const val APP_VERSION = "2.2 \u00b7 iteration 9"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0)
 val InvItemListSaver: Saver<List<InvItem>, String> = Saver(
@@ -381,43 +381,99 @@ fun InvoiceScreen(isQuote: Boolean) {
 // --- SECONDARY SCREENS ---
 @Composable fun LedgerScreen() {
     val ctx = LocalContext.current
+    val prefs = remember { ctx.getSharedPreferences("penkhata_data", android.content.Context.MODE_PRIVATE) }
+    val scope = rememberCoroutineScope()
     var p by rememberSaveable { mutableStateOf("") }; var t by rememberSaveable { mutableStateOf("DEBIT") }
     var a by rememberSaveable { mutableStateOf("") }; var d by rememberSaveable { mutableStateOf("") }
+    var filter by rememberSaveable { mutableStateOf("") }
     var reload by remember { mutableStateOf(0) }
     val entries by produceState(initialValue = emptyList<LedgerEntry>(), reload) {
         value = withContext(Dispatchers.IO) { loadLedger(ctx) }
     }
+    val invoices by produceState(initialValue = emptyList<InvoiceRec>(), reload) {
+        value = withContext(Dispatchers.IO) { loadInvoices(ctx) }
+    }
+    val accounts = partyAccounts(entries, invoices)
+    val outstanding = accounts.sumOf { it.net }
+    val shown = entries.filter { filter.isBlank() || it.party.trim().equals(filter, true) }.reversed()
     Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
         Text("LEDGER", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-        Card(Modifier.padding(vertical = 10.dp)) { Column(Modifier.padding(10.dp)) {
+        Card(Modifier.padding(vertical = 10.dp)) { Column(Modifier.padding(16.dp)) {
+            Text("Outstanding", fontWeight = FontWeight.Bold)
+            Divider(Modifier.padding(vertical = 5.dp))
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
+                Text("Total receivable")
+                Text("\u20b9${fmt(outstanding)}", fontWeight = FontWeight.Bold, color = if(outstanding > 0.004) Color.Red else Color(0xFF2E7D32))
+            }
+            Text("Manual khata plus unpaid balances on bills", fontSize = 10.sp)
+        }}
+        if(accounts.isNotEmpty()) Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(16.dp)) {
+            Text("Parties", fontWeight = FontWeight.Bold)
+            Divider(Modifier.padding(vertical = 5.dp))
+            accounts.forEach { acc ->
+                Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f).clickable { filter = if(filter == acc.party) "" else acc.party }) {
+                        Text(acc.party, fontWeight = FontWeight.Bold, maxLines = 1)
+                        Text("Bills due \u20b9${fmt(acc.billDue)}  \u00b7  khata \u20b9${fmt(acc.manual)}", fontSize = 10.sp)
+                    }
+                    Text("\u20b9${fmt(acc.net)}", color = if(acc.net > 0.004) Color.Red else Color(0xFF2E7D32), fontWeight = FontWeight.Bold)
+                    if(acc.net > 0.004) IconButton(onClick = { shareReminder(ctx, acc.party, acc.net, prefs.getString("sName","") ?: "") }) {
+                        Icon(Icons.Default.Share, "Remind")
+                    }
+                }
+                Divider()
+            }
+        }}
+        Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(10.dp)) {
+            Text("Add Entry", fontWeight = FontWeight.Bold)
             OutlinedTextField(p, {p=it}, label={Text("Party")}, modifier=Modifier.fillMaxWidth())
             Row {
-                Button(onClick={t="DEBIT"}, colors=ButtonDefaults.buttonColors(containerColor=if(t=="DEBIT")Color.Red else Color.Gray), modifier=Modifier.weight(1f)){Text("DEBIT")}
+                Button(onClick={t="DEBIT"}, colors=ButtonDefaults.buttonColors(containerColor=if(t=="DEBIT")Color.Red else Color.Gray), modifier=Modifier.weight(1f)){Text("OWES (DEBIT)")}
                 Spacer(Modifier.width(5.dp))
-                Button(onClick={t="CREDIT"}, colors=ButtonDefaults.buttonColors(containerColor=if(t=="CREDIT")Color.Green else Color.Gray), modifier=Modifier.weight(1f)){Text("CREDIT")}
+                Button(onClick={t="CREDIT"}, colors=ButtonDefaults.buttonColors(containerColor=if(t=="CREDIT")Color.Green else Color.Gray), modifier=Modifier.weight(1f)){Text("PAID (CREDIT)")}
             }
             OutlinedTextField(a, {a=it}, label={Text("Amount")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.fillMaxWidth())
             OutlinedTextField(d, {d=it}, label={Text("Note")}, modifier=Modifier.fillMaxWidth())
             Button(onClick={
-                if(p.isNotEmpty() && a.isNotEmpty()) {
-                    val en = LedgerEntry(System.currentTimeMillis(), SimpleDateFormat("dd-MM", Locale.ENGLISH).format(Date()), p, t, a.toDoubleOrNull() ?: 0.0, d)
-                    saveLedgerEntry(ctx, en); reload++; p=""; a=""
+                val amt = a.toDoubleOrNull() ?: 0.0
+                if(p.isNotBlank() && amt > 0.0) {
+                    val en = LedgerEntry(System.currentTimeMillis(), SimpleDateFormat("dd-MM", Locale.ENGLISH).format(Date()), p.trim(), t, amt, d.trim())
+                    scope.launch {
+                        withContext(Dispatchers.IO) { saveLedgerEntry(ctx, en) }
+                        reload++; p=""; a=""; d=""
+                    }
                 }
             }, modifier=Modifier.fillMaxWidth()) { Text("ADD") }
         }}
-        entries.reversed().forEach {
-            Row(Modifier.padding(8.dp).fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Column { Text(it.party, fontWeight=FontWeight.Bold); Text(it.desc, fontSize=10.sp) }
+        if(filter.isNotBlank()) {
+            Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text("Showing: $filter", fontWeight = FontWeight.Bold)
+                TextButton(onClick = { filter = "" }) { Text("SHOW ALL") }
+            }
+        }
+        shown.forEach {
+            Row(Modifier.padding(8.dp).fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(it.party, fontWeight=FontWeight.Bold)
+                    Text(if(it.desc.isBlank()) it.date else it.date + "  \u00b7  " + it.desc, fontSize=10.sp)
+                }
                 Column(horizontalAlignment = Alignment.End) {
-                    Text(it.type, color=if(it.type=="DEBIT") Color.Red else Color.Green, fontSize=10.sp)
+                    Text(if(it.type=="DEBIT") "OWES" else "PAID", color=if(it.type=="DEBIT") Color.Red else Color.Green, fontSize=10.sp)
                     Text("\u20b9${fmt(it.amount)}", fontWeight=FontWeight.Bold)
                 }
+                IconButton(onClick = {
+                    scope.launch {
+                        withContext(Dispatchers.IO) { File(ctx.filesDir, "led_${it.id}.json").delete() }
+                        reload++
+                    }
+                }) { Icon(Icons.Default.Delete, "Del", tint = Color.Gray) }
             }
             Divider()
         }
         Spacer(Modifier.height(50.dp))
     }
 }
+
 @Composable fun StockScreen() {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -633,6 +689,7 @@ fun InvoiceScreen(isQuote: Boolean) {
 data class InvoiceRec(val invNo: String, val date: String, val whenMs: Long, val buyer: String, val buyerGst: String,
                       val total: Double, val taxable: Double, val cgst: Double, val sgst: Double, val igst: Double,
                       val tax: Double, val cogs: Double, val profit: Double, val interState: Boolean,
+                      val paid: Double, val balance: Double,
                       val rates: Map<Double, Pair<Double, Double>>)
 data class Expense(val id: Long, val ms: Long, val note: String, val amount: Double)
 
@@ -654,7 +711,7 @@ fun loadInvoices(ctx: Context): List<InvoiceRec> {
         out.add(InvoiceRec(o.optString("inv"), o.optString("d"), ms, o.optString("buyer"), o.optString("bgst"),
             o.optDouble("total", 0.0), o.optDouble("taxable", 0.0), o.optDouble("cgst", 0.0), o.optDouble("sgst", 0.0),
             o.optDouble("igst", 0.0), o.optDouble("tax", 0.0), o.optDouble("cogs", 0.0), o.optDouble("profit", 0.0),
-            o.optBoolean("interState", false), rates))
+            o.optBoolean("interState", false), o.optDouble("paid", 0.0), o.optDouble("balance", 0.0), rates))
     }
     return out
 }
@@ -686,6 +743,33 @@ fun monthLabel(offset: Int): String {
     return SimpleDateFormat("MMM yyyy", Locale.ENGLISH).format(c.time)
 }
 
+// What a party owes: manual khata entries (debit - credit) plus the unpaid balance
+// of their bills. A negative figure means they are in advance.
+data class PartyAccount(val party: String, val manualDebit: Double, val manualCredit: Double, val billDue: Double) {
+    val manual: Double get() = manualDebit - manualCredit
+    val net: Double get() = manual + billDue
+}
+fun partyAccounts(entries: List<LedgerEntry>, invoices: List<InvoiceRec>): List<PartyAccount> {
+    val names = (entries.map { it.party.trim() } + invoices.filter { it.balance > 0.004 }.map { it.buyer.trim() })
+        .filter { it.isNotBlank() }.distinct()
+    return names.map { name ->
+        val mine = entries.filter { it.party.trim().equals(name, true) }
+        PartyAccount(name,
+            mine.filter { it.type == "DEBIT" }.sumOf { it.amount },
+            mine.filter { it.type == "CREDIT" }.sumOf { it.amount },
+            invoices.filter { it.buyer.trim().equals(name, true) }.sumOf { it.balance })
+    }.sortedByDescending { it.net }
+}
+fun shareReminder(ctx: Context, party: String, amount: Double, firm: String) {
+    val who = if(firm.isBlank()) "us" else firm
+    val text = "Hello $party, your outstanding balance with $who is \u20b9" + fmt(amount) + ". Kindly clear it at your convenience. Thank you."
+    try {
+        val send = Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, text) }
+        ctx.startActivity(Intent.createChooser(send, "Send reminder"))
+    } catch(e: Exception) {
+        Toast.makeText(ctx, "No app to send the reminder", Toast.LENGTH_SHORT).show()
+    }
+}
 fun loadStock(ctx: Context): List<StockEntry> {
     val f = File(ctx.filesDir, "stock.json")
     if(!f.exists()) return emptyList()
@@ -859,6 +943,7 @@ fun saveInvoiceData(ctx: Context, invNo: String, bName: String, bGst: String, ca
     j.put("total",calc.grand); j.put("taxable",calc.taxable); j.put("tax",calc.totalTax)
     j.put("cgst",calc.cgst); j.put("sgst",calc.sgst); j.put("igst",calc.igst); j.put("interState",calc.interState)
     j.put("cogs",cogs); j.put("profit",calc.taxable-cogs)
+    j.put("paid",calc.paid); j.put("balance",calc.balance)
     // per-line figures, scaled by the bill discount, so rate-wise summaries add up
     var baseSum = 0.0
     for(i in items) { val g=i.qty*i.rate; val net=g-(g*(i.discount.coerceIn(0.0,100.0)/100.0)); baseSum += net/(1+i.taxRate.coerceIn(0.0,100.0)/100.0) }
@@ -875,12 +960,21 @@ fun saveInvoiceData(ctx: Context, invNo: String, bName: String, bGst: String, ca
     j.put("lines", lines)
     writeFileAtomic(File(ctx.filesDir,"inv_${System.currentTimeMillis()}.json"), j.toString())
 }
-fun saveLedgerEntry(ctx: Context, e: LedgerEntry) { val j=JSONObject(); j.put("date",e.date); j.put("party",e.party); j.put("type",e.type); j.put("amt",e.amount); j.put("desc",e.desc); writeFileAtomic(File(ctx.filesDir,"led_${System.currentTimeMillis()}.json"), j.toString()) }
+fun saveLedgerEntry(ctx: Context, e: LedgerEntry) {
+    val ms = System.currentTimeMillis()
+    val j = JSONObject()
+    j.put("id", ms); j.put("date", e.date); j.put("party", e.party); j.put("type", e.type); j.put("amt", e.amount); j.put("desc", e.desc)
+    writeFileAtomic(File(ctx.filesDir, "led_${ms}.json"), j.toString())
+}
 fun loadLedger(ctx: Context): List<LedgerEntry> {
     val l=mutableListOf<LedgerEntry>()
     ctx.filesDir.listFiles()?.filter{it.name.startsWith("led_")}?.forEach { f ->
         val j = try { JSONObject(f.readText()) } catch(e: Exception) { null }
-        if(j != null) l.add(LedgerEntry(0, j.optString("date"), j.optString("party"), j.optString("type"), j.optDouble("amt",0.0), j.optString("desc")))
+        if(j != null) {
+            // the id is needed to delete the right file; older entries carry it only in the name
+            val id = if(j.has("id")) j.optLong("id") else (Regex("\\d+").find(f.name.removePrefix("led_"))?.value?.toLongOrNull() ?: 0L)
+            l.add(LedgerEntry(id, j.optString("date"), j.optString("party"), j.optString("type"), j.optDouble("amt",0.0), j.optString("desc")))
+        }
     }
     return l
 }
