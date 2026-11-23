@@ -127,7 +127,7 @@ fun InvoiceScreen(isQuote: Boolean) {
             if(sName.isEmpty()) Toast.makeText(ctx, "Setup Settings First!", Toast.LENGTH_SHORT).show()
             else {
                 if(!isQuote) saveInvoiceData(ctx, invNo, bName, bGst, items)
-                createPdf(ctx, isQuote, invNo, date, payMode, delNote, sName, prefs.getString("sAddr","")?:"", prefs.getString("sGst","")?:"", prefs.getString("sBank","")?:"", prefs.getString("sIfsc","")?:"", prefs.getString("sJuris","")?:"", bName, bAddr, bGst, bState, items)
+                createPdf(ctx, isQuote, invNo, date, payMode, delNote, sName, prefs.getString("sAddr","")?:"", prefs.getString("sPhone","")?:"", prefs.getString("sEmail","")?:"", prefs.getString("sLandmark","")?:"", prefs.getString("sGst","")?:"", prefs.getString("sBank","")?:"", prefs.getString("sIfsc","")?:"", prefs.getString("sJuris","")?:"", bName, bAddr, bGst, bState, items)
             }
         }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor = Color(0xFF2E7D32))) { Text("GENERATE PDF") }
         Spacer(Modifier.height(60.dp))
@@ -138,7 +138,7 @@ fun InvoiceScreen(isQuote: Boolean) {
 @Composable fun LedgerScreen() { val ctx=LocalContext.current; var p by remember{mutableStateOf("")}; var t by remember{mutableStateOf("DEBIT")}; var a by remember{mutableStateOf("")}; var d by remember{mutableStateOf("")}; var e by remember{mutableStateOf(loadLedger(ctx))}; Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())){ Text("LEDGER",fontSize=24.sp,fontWeight=FontWeight.Bold); Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ OutlinedTextField(p,{p=it},label={Text("Party")},modifier=Modifier.fillMaxWidth()); Row{Button(onClick={t="DEBIT"},colors=ButtonDefaults.buttonColors(containerColor=if(t=="DEBIT")Color.Red else Color.Gray),modifier=Modifier.weight(1f)){Text("DEBIT")}; Spacer(Modifier.width(5.dp)); Button(onClick={t="CREDIT"},colors=ButtonDefaults.buttonColors(containerColor=if(t=="CREDIT")Color.Green else Color.Gray),modifier=Modifier.weight(1f)){Text("CREDIT")}}; OutlinedTextField(a,{a=it},label={Text("Amount")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),modifier=Modifier.fillMaxWidth()); OutlinedTextField(d,{d=it},label={Text("Note")},modifier=Modifier.fillMaxWidth()); Button(onClick={if(p.isNotEmpty()&&a.isNotEmpty()){val en=LedgerEntry(System.currentTimeMillis(),SimpleDateFormat("dd-MM").format(Date()),p,t,a.toDouble(),d); saveLedgerEntry(ctx,en); e=loadLedger(ctx); p="";a=""}},modifier=Modifier.fillMaxWidth()){Text("ADD")}}}; e.reversed().forEach{Row(Modifier.padding(8.dp).fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){Column{Text(it.party,fontWeight=FontWeight.Bold);Text(it.desc,fontSize=10.sp)}; Column(horizontalAlignment=Alignment.End){Text(it.type,color=if(it.type=="DEBIT")Color.Red else Color.Green,fontSize=10.sp);Text("₹${it.amount}",fontWeight=FontWeight.Bold)}};Divider()}; Spacer(Modifier.height(50.dp))}}
 @Composable fun GSTReportScreen() { val ctx=LocalContext.current; val d=remember{loadGstData(ctx)}; Column(Modifier.padding(16.dp)){ Text("GST DASHBOARD",fontSize=24.sp,fontWeight=FontWeight.Bold); Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(16.dp)){ Text("Summary",fontWeight=FontWeight.Bold); Divider(Modifier.padding(vertical=5.dp)); Row(Modifier.fillMaxWidth(),Arrangement.SpaceBetween){Text("Sales:");Text("₹${d["total"]}")}; Row(Modifier.fillMaxWidth(),Arrangement.SpaceBetween){Text("Tax:");Text("₹${d["tax"]}")}}}}}
 @Composable fun FileHistoryScreen() { val ctx=LocalContext.current; val d=ctx.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS); var f by remember{mutableStateOf(d?.listFiles()?.filter{it.extension=="pdf"}?.sortedByDescending{it.lastModified()}?:emptyList())}; LazyColumn(Modifier.padding(16.dp)){items(f){fl->Row(Modifier.fillMaxWidth().padding(8.dp),verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f).clickable{ctx.startActivity(Intent(Intent.ACTION_VIEW).apply{setDataAndType(FileProvider.getUriForFile(ctx,"${ctx.packageName}.provider",fl),"application/pdf");addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)})}){Text(fl.name,fontWeight=FontWeight.Bold);Text(SimpleDateFormat("dd MMM HH:mm").format(Date(fl.lastModified())),fontSize=10.sp)}; IconButton(onClick={if(fl.delete())f=d?.listFiles()?.filter{it.extension=="pdf"}?.sortedByDescending{it.lastModified()}?:emptyList()}){Icon(Icons.Default.Delete,"Del",tint=Color.Red)}};Divider()}} }
-@Composable fun SettingsScreen(currentPin: String, onPinSave: (String)->Unit) { val ctx=LocalContext.current; val prefs=remember{ctx.getSharedPreferences("penkhata_data",Context.MODE_PRIVATE)}; var sName by remember{mutableStateOf(prefs.getString("sName","")?:"")}; var sAddr by remember{mutableStateOf(prefs.getString("sAddr","")?:"")}; var sGst by remember{mutableStateOf(prefs.getString("sGst","")?:"")}; var sBank by remember{mutableStateOf(prefs.getString("sBank","")?:"")}; var sIfsc by remember{mutableStateOf(prefs.getString("sIfsc","")?:"")}; var sJuris by remember{mutableStateOf(prefs.getString("sJuris","")?:"")}; var defTax by remember{mutableStateOf(prefs.getString("defTax","18")?:"18")}; var newPin by remember{mutableStateOf(currentPin)}; Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())){Text("SETTINGS",fontSize=24.sp,fontWeight=FontWeight.Bold); OutlinedTextField(newPin,{newPin=it},label={Text("Set Login PIN")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.NumberPassword),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sName,{sName=it},label={Text("Firm Name")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sAddr,{sAddr=it},label={Text("Address")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sGst,{sGst=it},label={Text("GSTIN")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sBank,{sBank=it},label={Text("Bank Name & Acc")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sIfsc,{sIfsc=it},label={Text("IFSC")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sJuris,{sJuris=it},label={Text("Jurisdiction")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(defTax,{defTax=it},label={Text("Default Tax %")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),modifier=Modifier.fillMaxWidth()); Button(onClick={prefs.edit().putString("sName",sName).putString("sAddr",sAddr).putString("sGst",sGst).putString("sBank",sBank).putString("sIfsc",sIfsc).putString("sJuris",sJuris).putString("defTax",defTax).apply(); onPinSave(newPin); Toast.makeText(ctx,"Saved",Toast.LENGTH_SHORT).show()},modifier=Modifier.fillMaxWidth()){Text("SAVE")}; Spacer(Modifier.height(60.dp))} }
+@Composable fun SettingsScreen(currentPin: String, onPinSave: (String)->Unit) { val ctx=LocalContext.current; val prefs=remember{ctx.getSharedPreferences("penkhata_data",Context.MODE_PRIVATE)}; var sName by remember{mutableStateOf(prefs.getString("sName","")?:"")}; var sAddr by remember{mutableStateOf(prefs.getString("sAddr","")?:"")}; var sPhone by remember{mutableStateOf(prefs.getString("sPhone","")?:"")}; var sEmail by remember{mutableStateOf(prefs.getString("sEmail","")?:"")}; var sLandmark by remember{mutableStateOf(prefs.getString("sLandmark","")?:"")}; var sGst by remember{mutableStateOf(prefs.getString("sGst","")?:"")}; var sBank by remember{mutableStateOf(prefs.getString("sBank","")?:"")}; var sIfsc by remember{mutableStateOf(prefs.getString("sIfsc","")?:"")}; var sJuris by remember{mutableStateOf(prefs.getString("sJuris","")?:"")}; var defTax by remember{mutableStateOf(prefs.getString("defTax","18")?:"18")}; var newPin by remember{mutableStateOf(currentPin)}; Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())){Text("SETTINGS",fontSize=24.sp,fontWeight=FontWeight.Bold); OutlinedTextField(newPin,{newPin=it},label={Text("Set Login PIN")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.NumberPassword),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sName,{sName=it},label={Text("Firm Name")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sAddr,{sAddr=it},label={Text("Address (one line per row)")},minLines=3,modifier=Modifier.fillMaxWidth()); OutlinedTextField(sPhone,{sPhone=it},label={Text("Phone")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Phone),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sEmail,{sEmail=it},label={Text("Email")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Email),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sLandmark,{sLandmark=it},label={Text("Landmark")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sGst,{sGst=it},label={Text("GSTIN")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sBank,{sBank=it},label={Text("Bank Name & Acc")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sIfsc,{sIfsc=it},label={Text("IFSC")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sJuris,{sJuris=it},label={Text("Jurisdiction")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(defTax,{defTax=it},label={Text("Default Tax %")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),modifier=Modifier.fillMaxWidth()); Button(onClick={prefs.edit().putString("sName",sName).putString("sAddr",sAddr).putString("sPhone",sPhone).putString("sEmail",sEmail).putString("sLandmark",sLandmark).putString("sGst",sGst).putString("sBank",sBank).putString("sIfsc",sIfsc).putString("sJuris",sJuris).putString("defTax",defTax).apply(); onPinSave(newPin); Toast.makeText(ctx,"Saved",Toast.LENGTH_SHORT).show()},modifier=Modifier.fillMaxWidth()){Text("SAVE")}; Spacer(Modifier.height(60.dp))} }
 
 // --- LOGIC ---
 fun loadGstData(ctx: Context): Map<String,String> { var total=0.0; var tax=0.0; ctx.filesDir.listFiles()?.filter{it.name.startsWith("inv_")}?.forEach{val j=JSONObject(it.readText()); total+=j.getDouble("total"); tax+=j.getDouble("tax")}; return mapOf("total" to String.format("%.2f",total),"tax" to String.format("%.2f",tax)) }
@@ -159,16 +159,46 @@ fun convertToWords(num: Long): String {
     }
     return rec(num).trim() + " Rupees Only"
 }
-fun drawMultiLineText(c: Canvas, text: String, x: Float, y: Float, p: Paint, width: Float): Float {
-    if(p.measureText(text)<width){c.drawText(text,x,y,p);return y+p.textSize+2f}
-    val words=text.split(" "); var line=""; var cy=y
-    for(w in words){ if(p.measureText(line+w)<width) line+="$w " else { c.drawText(line,x,cy,p); line="$w "; cy+=p.textSize+2f } }
-    if(line.isNotEmpty()) c.drawText(line,x,cy,p)
-    return cy+p.textSize+2f
+// Breaks text into lines that fit 'width': honours explicit newlines, wraps on spaces,
+// and hard-splits a single word longer than the cell. Canvas.drawText never breaks on a
+// newline character, so every multi-line value must go through this.
+fun wrapLines(text: String, p: Paint, width: Float): List<String> {
+    val out = mutableListOf<String>()
+    if(text.isBlank()) return out
+    for(raw in text.replace("\r\n", "\n").split("\n")) {
+        val words = raw.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if(words.isEmpty()) continue
+        var line = ""
+        for(w0 in words) {
+            var word = w0
+            while(p.measureText(word) > width && word.length > 1) {
+                var cut = word.length
+                while(cut > 1 && p.measureText(word.substring(0, cut)) > width) cut--
+                if(line.isNotEmpty()) { out.add(line); line = "" }
+                out.add(word.substring(0, cut)); word = word.substring(cut)
+            }
+            line = if(line.isEmpty()) word else "$line $word"
+            if(p.measureText(line) > width && line.contains(' ')) {
+                out.add(line.substringBeforeLast(' ')); line = line.substringAfterLast(' ')
+            }
+        }
+        if(line.isNotEmpty()) out.add(line)
+    }
+    return out
+}
+fun blockHeight(text: String, p: Paint, width: Float, gap: Float = 2f): Float {
+    val n = wrapLines(text, p, width).size
+    return if(n == 0) 0f else n * (p.textSize + gap)
+}
+fun drawBlock(c: Canvas, text: String, x: Float, baseY: Float, p: Paint, width: Float, gap: Float = 2f): Float {
+    var y = baseY
+    for(l in wrapLines(text, p, width)) { c.drawText(l, x, y, p); y += p.textSize + gap }
+    return y
 }
 
 fun createPdf(ctx: Context, isQuote: Boolean, invNo: String, date: String, payMode: String, delNote: String,
-              sName: String, sAddr: String, sGst: String, sBank: String, sIfsc: String, sJuris: String,
+              sName: String, sAddr: String, sPhone: String, sEmail: String, sLandmark: String,
+              sGst: String, sBank: String, sIfsc: String, sJuris: String,
               bName: String, bAddr: String, bGst: String, bState: String, items: List<InvItem>) {
     val doc = PdfDocument(); val page = doc.startPage(PdfDocument.PageInfo.Builder(595, 842, 1).create())
     val c = page.canvas; val p = Paint(); val bp = Paint().apply{style=Paint.Style.STROKE; strokeWidth=1f}
@@ -177,24 +207,43 @@ fun createPdf(ctx: Context, isQuote: Boolean, invNo: String, date: String, payMo
     p.isFakeBoldText=true; p.textAlign=Paint.Align.CENTER; p.textSize=14f
     c.drawText(if(isQuote) "QUOTATION" else "TAX INVOICE", midX, m+15, p)
     c.drawLine(m, m+20, m+w, m+20, bp)
-    val r1=m+20; val rH=145f
-    c.drawLine(midX, r1, midX, r1+rH, bp); c.drawLine(m, r1+rH/2, m+w, r1+rH/2, bp)
-    p.textAlign=Paint.Align.LEFT; p.textSize=12f; p.isFakeBoldText=true
-    c.drawText(sName, m+5, r1+15, p); p.isFakeBoldText=false; p.textSize=10f
-    c.drawText(sAddr, m+5, r1+30, p); c.drawText("GSTIN: $sGst", m+5, r1+45, p)
+    // Seller (top) and buyer (bottom) cells: every value is wrapped inside its own cell and the
+    // cell heights are measured from the wrapped text, so nothing crosses a divider or the page edge.
+    val r1=m+20; val pad=8f
+    val leftX=m+5; val leftW=midX-leftX-8f
+    val qX=midX+(m+w-midX)/2; val labX=midX+4f; val labW=qX-labX-4f; val valX=qX+4f; val valW=(m+w)-valX-6f
+    val nameP=Paint(p).apply{textSize=12f; isFakeBoldText=true; textAlign=Paint.Align.LEFT}
+    val bodyP=Paint(p).apply{textSize=9f; isFakeBoldText=false; textAlign=Paint.Align.LEFT}
+    val contact=listOf(sPhone,sEmail,sLandmark).filter{it.isNotBlank()}.joinToString("  |  ")
+    val sGstLine=if(sGst.isBlank()) "" else "GSTIN: $sGst"
+    val bGstLine=if(bGst.isBlank()) "" else "GSTIN: $bGst"
+    val bStateLine=if(bState.isBlank()) "" else "State: $bState"
+    val sellerH=blockHeight(sName,nameP,leftW)+2f+blockHeight(sAddr,bodyP,leftW)+blockHeight(contact,bodyP,leftW)+blockHeight(sGstLine,bodyP,leftW)+pad
+    val buyerH=blockHeight("Buyer: $bName",nameP,leftW)+2f+blockHeight(bAddr,bodyP,leftW)+blockHeight(bGstLine,bodyP,leftW)+blockHeight(bStateLine,bodyP,leftW)+pad
+    val rows=listOf("No" to invNo, "Date" to date, "Note" to delNote, "Terms" to payMode)
+    val rowHs=rows.map{ (l,v) -> maxOf(blockHeight(l,bodyP,labW), blockHeight(v,bodyP,valW))+4f }
+    val topH=maxOf(sellerH, rowHs[0]+rowHs[1])+pad
+    val botH=maxOf(buyerH, rowHs[2]+rowHs[3])+pad
+    val midY=r1+topH; val r1End=midY+botH
+    c.drawLine(midX,r1,midX,r1End,bp); c.drawLine(m,midY,m+w,midY,bp)
+    var ty=r1+pad+nameP.textSize
+    ty=drawBlock(c,sName,leftX,ty,nameP,leftW)+2f
+    ty=drawBlock(c,sAddr,leftX,ty,bodyP,leftW)
+    ty=drawBlock(c,contact,leftX,ty,bodyP,leftW)
+    drawBlock(c,sGstLine,leftX,ty,bodyP,leftW)
+    var buyY=midY+pad+nameP.textSize
+    buyY=drawBlock(c,"Buyer: $bName",leftX,buyY,nameP,leftW)+2f
+    buyY=drawBlock(c,bAddr,leftX,buyY,bodyP,leftW)
+    buyY=drawBlock(c,bGstLine,leftX,buyY,bodyP,leftW)
+    drawBlock(c,bStateLine,leftX,buyY,bodyP,leftW)
+    val topSplit=r1+topH*(rowHs[0]/(rowHs[0]+rowHs[1])); val botSplit=midY+botH*(rowHs[2]/(rowHs[2]+rowHs[3]))
+    c.drawLine(midX,topSplit,m+w,topSplit,bp); c.drawLine(midX,botSplit,m+w,botSplit,bp); c.drawLine(qX,r1,qX,r1End,bp)
+    fun rightRow(l:String, v:String, top:Float) { val base=top+4f+bodyP.textSize; drawBlock(c,l,labX,base,bodyP,labW); drawBlock(c,v,valX,base,bodyP,valW) }
+    rightRow(rows[0].first,rows[0].second,r1); rightRow(rows[1].first,rows[1].second,topSplit)
+    rightRow(rows[2].first,rows[2].second,midY); rightRow(rows[3].first,rows[3].second,botSplit)
+    p.textSize=10f; p.textAlign=Paint.Align.LEFT; p.isFakeBoldText=false
 
-    var currY = r1+rH/2+15
-    c.drawText("Buyer: $bName", m+5, currY, p); currY += 15
-    currY = drawMultiLineText(c, bAddr, m+5, currY, p, w/2-10)
-    if(bGst.isNotEmpty()) { c.drawText("GSTIN: $bGst", m+5, currY, p); currY += 15 }
-    if(bState.isNotEmpty()) { c.drawText("State: $bState", m+5, currY, p) }
-
-    val qX=midX+w/4; val line1=r1+rH/4; val line2=r1+2*rH/4; val line3=r1+3*rH/4
-    c.drawLine(midX,line1,m+w,line1,bp); c.drawLine(midX,line2,m+w,line2,bp); c.drawLine(midX,line3,m+w,line3,bp); c.drawLine(qX,r1,qX,r1+rH,bp)
-    fun cell(l:String, v:String, x:Float, y:Float) { c.drawText(l,x+2,y+12,p); p.isFakeBoldText=true; c.drawText(v,qX+2,y+12,p); p.isFakeBoldText=false }
-    cell("No",invNo,midX,r1); cell("Date",date,midX,line1); cell("Note",delNote,midX,line2); cell("Terms",payMode,midX,line3)
-
-    val tTop=r1+rH; val hH=20f; c.drawLine(m,tTop,m+w,tTop,bp); c.drawLine(m,tTop+hH,m+w,tTop+hH,bp)
+    val tTop=r1End; val hH=20f; c.drawLine(m,tTop,m+w,tTop,bp); c.drawLine(m,tTop+hH,m+w,tTop+hH,bp)
     val c1=m;val w1=30f;val c2=c1+w1;val w2=200f;val c3=c2+w2;val w3=50f;val c4=c3+w3;val w4=60f;val c5=c4+w4;val w5=70f;val c6=c5+w5;val w6=50f;val c7=c6+w6;val w7=95f
     fun vLine(top:Float,bot:Float){c.drawLine(c2,top,c2,bot,bp);c.drawLine(c3,top,c3,bot,bp);c.drawLine(c4,top,c4,bot,bp);c.drawLine(c5,top,c5,bot,bp);c.drawLine(c6,top,c6,bot,bp);c.drawLine(c7,top,c7,bot,bp)}
     vLine(tTop,tTop+hH); p.isFakeBoldText=true; p.textAlign=Paint.Align.CENTER
