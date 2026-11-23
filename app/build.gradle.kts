@@ -13,7 +13,7 @@ android {
     signingConfigs {
         create("release") {
             val ks = System.getenv("KEYSTORE_PATH")
-            if (ks != null && file(ks).exists()) {
+            if (!ks.isNullOrBlank() && file(ks).exists()) {
                 storeFile = file(ks)
                 storePassword = System.getenv("KEYSTORE_PASSWORD")
                 keyAlias = System.getenv("KEY_ALIAS")
@@ -30,7 +30,7 @@ android {
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             // Signed with your keystore when the secrets are present, otherwise with the
             // debug key so the APK still installs for testing.
-            signingConfig = if (System.getenv("KEYSTORE_PATH") != null) signingConfigs.getByName("release") else signingConfigs.getByName("debug")
+            signingConfig = if (!System.getenv("KEYSTORE_PATH").isNullOrBlank()) signingConfigs.getByName("release") else signingConfigs.getByName("debug")
         }
         getByName("debug") { isMinifyEnabled = false }
     }
