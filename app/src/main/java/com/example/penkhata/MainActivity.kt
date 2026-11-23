@@ -41,11 +41,18 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.BufferedInputStream
+import java.io.ByteArrayInputStream
 import java.io.FileOutputStream
+import java.io.InputStream
+import java.io.OutputStream
 import java.text.SimpleDateFormat
 import java.util.*
+import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
+import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "1.8 \u00b7 iteration 5"
+const val APP_VERSION = "1.9 \u00b7 iteration 6"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0)
 val InvItemListSaver: Saver<List<InvItem>, String> = Saver(
@@ -59,6 +66,14 @@ val InvItemListSaver: Saver<List<InvItem>, String> = Saver(
 )
 data class StockEntry(val id: Long, val model: String, val imei: String, val hsn: String,
                       val cost: Double, val mrp: Double, val qty: Int, val supplier: String, val addedOn: String)
+// A stock line can hold several IMEIs (one per handset), stored newline-separated.
+fun StockEntry.imeiList(): List<String> =
+    imei.split("\n", ",", " ").map{ it.trim() }.filter{ it.isNotBlank() }.distinct()
+fun StockEntry.imeiLabel(): String {
+    val l = imeiList()
+    if(l.isEmpty()) return ""
+    return "IMEI: " + l.take(3).joinToString(", ") + (if(l.size > 3) "  +${l.size - 3} more" else "")
+}
 data class LedgerEntry(val id: Long, val date: String, val party: String, val type: String, val amount: Double, val desc: String)
 
 data class BillCalc(
@@ -375,14 +390,17 @@ fun InvoiceScreen(isQuote: Boolean) {
         Card(Modifier.padding(vertical = 10.dp)) { Column(Modifier.padding(10.dp)) {
             Text("Add Stock", fontWeight = FontWeight.Bold)
             OutlinedTextField(model, {model=it}, label={Text("Model / Item Name")}, modifier=Modifier.fillMaxWidth())
-            OutlinedTextField(imei, {imei=it}, label={Text("IMEI / Serial (optional)")}, modifier=Modifier.fillMaxWidth())
+            OutlinedTextField(imei, {imei=it}, label={Text("IMEI / Serial - one per line (optional)")}, minLines=2, modifier=Modifier.fillMaxWidth())
             Row { OutlinedTextField(hsn, {hsn=it}, label={Text("HSN")}, modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(qty, {qty=it}, label={Text("Qty")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)) }
             Row { OutlinedTextField(cost, {cost=it}, label={Text("Purchase \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(mrp, {mrp=it}, label={Text("MRP \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)) }
             OutlinedTextField(supplier, {supplier=it}, label={Text("Supplier")}, modifier=Modifier.fillMaxWidth())
             Button(onClick = {
                 if(model.isNotBlank()) {
-                    val entry = StockEntry(System.currentTimeMillis(), model.trim(), imei.trim(), hsn.trim(),
-                        cost.toDoubleOrNull() ?: 0.0, mrp.toDoubleOrNull() ?: 0.0, (qty.toIntOrNull() ?: 1).coerceAtLeast(0),
+                    val imeis = imei.split("\n", ",", " ").map{ it.trim() }.filter{ it.isNotBlank() }.distinct()
+                    // one IMEI = one handset, so the IMEI count wins over the typed quantity
+                    val units = if(imeis.isNotEmpty()) imeis.size else (qty.toIntOrNull() ?: 1).coerceAtLeast(0)
+                    val entry = StockEntry(System.currentTimeMillis(), model.trim(), imeis.joinToString("\n"), hsn.trim(),
+                        cost.toDoubleOrNull() ?: 0.0, mrp.toDoubleOrNull() ?: 0.0, units,
                         supplier.trim(), SimpleDateFormat("dd-MMM-yyyy", Locale.ENGLISH).format(Date()))
                     scope.launch {
                         withContext(Dispatchers.IO) { saveStock(ctx, loadStock(ctx) + entry) }
@@ -404,11 +422,12 @@ fun InvoiceScreen(isQuote: Boolean) {
         stock.sortedBy { it.model.lowercase() }.forEach { e ->
             Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text(e.model, fontWeight = FontWeight.Bold)
-                    if(e.imei.isNotBlank()) Text("IMEI: ${e.imei}", fontSize = 10.sp)
-                    Text("Cost \u20b9${fmt(e.cost)}  MRP \u20b9${fmt(e.mrp)}" + (if(e.supplier.isBlank()) "" else "  \u00b7  ${e.supplier}"), fontSize = 10.sp)
+                    Text(e.model, fontWeight = FontWeight.Bold, maxLines = 2)
+                    if(e.imeiLabel().isNotBlank()) Text(e.imeiLabel(), fontSize = 10.sp, maxLines = 2)
+                    Text("Cost \u20b9${fmt(e.cost)}  \u00b7  MRP \u20b9${fmt(e.mrp)}", fontSize = 10.sp, maxLines = 1)
+                    if(e.supplier.isNotBlank()) Text(e.supplier, fontSize = 10.sp, maxLines = 1)
                 }
-                Column(horizontalAlignment = Alignment.End) {
+                Column(horizontalAlignment = Alignment.End, modifier = Modifier.width(56.dp)) {
                     Text("Qty ${e.qty}", color = if(e.qty <= 1) Color.Red else Color(0xFF2E7D32), fontWeight = FontWeight.Bold)
                     if(e.qty <= 1) Text("LOW", fontSize = 10.sp, color = Color.Red)
                 }
@@ -451,10 +470,10 @@ fun InvoiceScreen(isQuote: Boolean) {
 @Composable fun SettingsScreen(currentPin: String, onPinSave: (String)->Unit) {
     val ctx=LocalContext.current
     val prefs=remember{ctx.getSharedPreferences("penkhata_data",Context.MODE_PRIVATE)}
-    val backupLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+    val backupLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
         if(uri != null) {
             try {
-                ctx.contentResolver.openOutputStream(uri)?.use { it.write(backupJson(ctx).toByteArray()) }
+                ctx.contentResolver.openOutputStream(uri)?.use { backupZip(ctx, it) }
                 Toast.makeText(ctx, "Backup saved", Toast.LENGTH_LONG).show()
             } catch(e: Exception) {
                 Toast.makeText(ctx, "Backup failed: " + (e.message ?: "unknown error"), Toast.LENGTH_LONG).show()
@@ -464,14 +483,16 @@ fun InvoiceScreen(isQuote: Boolean) {
     val restoreLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if(uri != null) {
             try {
-                val text = ctx.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""
-                Toast.makeText(ctx, restoreJson(ctx, text), Toast.LENGTH_LONG).show()
+                val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: ByteArray(0)
+                val isZip = bytes.size > 2 && bytes[0] == 'P'.code.toByte() && bytes[1] == 'K'.code.toByte()
+                val msg = if(isZip) restoreZip(ctx, ByteArrayInputStream(bytes)) else restoreJson(ctx, String(bytes, Charsets.UTF_8))
+                Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
             } catch(e: Exception) {
                 Toast.makeText(ctx, "Restore failed: " + (e.message ?: "unknown error"), Toast.LENGTH_LONG).show()
             }
         }
     }
-    var sName by remember{mutableStateOf(prefs.getString("sName","")?:"")}; var sState by remember{mutableStateOf(prefs.getString("sState","21")?:"21")}; var sPrefix by remember{mutableStateOf(prefs.getString("sPrefix","INV")?:"INV")}; var sAddr1 by remember{mutableStateOf(prefs.getString("sAddr1","")?:(prefs.getString("sAddr","")?:"").lineSequence().firstOrNull()?.trim()?:"")}; var sAddr2 by remember{mutableStateOf(prefs.getString("sAddr2","")?:(prefs.getString("sAddr","")?:"").lineSequence().drop(1).joinToString(" ").trim())}; var sPhone by remember{mutableStateOf(prefs.getString("sPhone","")?:"")}; var sEmail by remember{mutableStateOf(prefs.getString("sEmail","")?:"")}; var sLandmark by remember{mutableStateOf(prefs.getString("sLandmark","")?:"")}; var sPincode by remember{mutableStateOf(prefs.getString("sPincode","")?:"")}; var sGst by remember{mutableStateOf(prefs.getString("sGst","")?:"")}; var sBank by remember{mutableStateOf(prefs.getString("sBank","")?:"")}; var sIfsc by remember{mutableStateOf(prefs.getString("sIfsc","")?:"")}; var sJuris by remember{mutableStateOf(prefs.getString("sJuris","")?:"")}; var defTax by remember{mutableStateOf(prefs.getString("defTax","18")?:"18")}; var newPin by remember{mutableStateOf(currentPin)}; Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())){Text("SETTINGS",fontSize=24.sp,fontWeight=FontWeight.Bold); OutlinedTextField(newPin,{newPin=it},label={Text("Set Login PIN")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.NumberPassword),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sName,{sName=it},label={Text("Firm Name")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sState,{sState=it},label={Text("My State Code (GST, e.g. 21)")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sPrefix,{sPrefix=it},label={Text("Invoice Prefix")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sAddr1,{sAddr1=it},label={Text("Address Line 1")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sAddr2,{sAddr2=it},label={Text("Address Line 2")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sPhone,{sPhone=it},label={Text("Phone")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Phone),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sEmail,{sEmail=it},label={Text("Email")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Email),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sLandmark,{sLandmark=it},label={Text("Landmark")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sPincode,{sPincode=it},label={Text("Pincode")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sGst,{sGst=it},label={Text("GSTIN")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sBank,{sBank=it},label={Text("Bank Name & Acc")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sIfsc,{sIfsc=it},label={Text("IFSC")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sJuris,{sJuris=it},label={Text("Jurisdiction")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(defTax,{defTax=it},label={Text("Default Tax %")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),modifier=Modifier.fillMaxWidth()); Text("PenKhata "+APP_VERSION, fontSize=10.sp, color=Color.Gray, modifier=Modifier.padding(top=8.dp)); Button(onClick={prefs.edit().putString("sName",sName).putString("sState",sState).putString("sPrefix",sPrefix).putString("sAddr1",sAddr1).putString("sAddr2",sAddr2).putString("sPhone",sPhone).putString("sEmail",sEmail).putString("sLandmark",sLandmark).putString("sPincode",sPincode).putString("sGst",sGst).putString("sBank",sBank).putString("sIfsc",sIfsc).putString("sJuris",sJuris).putString("defTax",defTax).apply(); onPinSave(newPin); Toast.makeText(ctx,"Saved",Toast.LENGTH_SHORT).show()},modifier=Modifier.fillMaxWidth()){Text("SAVE")}; Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Backup & Restore", fontWeight=FontWeight.Bold); Text("Saves settings, invoices and ledger to a file you choose, so a reinstall does not mean re-typing everything. The app PIN is not included.", fontSize=10.sp); Spacer(Modifier.height(8.dp)); Button(onClick={ backupLauncher.launch("penkhata-backup-"+SimpleDateFormat("yyyyMMdd-HHmm", Locale.ENGLISH).format(Date())+".json") }, modifier=Modifier.fillMaxWidth()){ Text("BACKUP DATA") }; Spacer(Modifier.height(6.dp)); Button(onClick={ restoreLauncher.launch(arrayOf("application/json","text/plain","*/*")) }, modifier=Modifier.fillMaxWidth()){ Text("RESTORE DATA") } }}; Spacer(Modifier.height(60.dp))} }
+    var sName by remember{mutableStateOf(prefs.getString("sName","")?:"")}; var sState by remember{mutableStateOf(prefs.getString("sState","21")?:"21")}; var sPrefix by remember{mutableStateOf(prefs.getString("sPrefix","INV")?:"INV")}; var sAddr1 by remember{mutableStateOf(prefs.getString("sAddr1","")?:(prefs.getString("sAddr","")?:"").lineSequence().firstOrNull()?.trim()?:"")}; var sAddr2 by remember{mutableStateOf(prefs.getString("sAddr2","")?:(prefs.getString("sAddr","")?:"").lineSequence().drop(1).joinToString(" ").trim())}; var sPhone by remember{mutableStateOf(prefs.getString("sPhone","")?:"")}; var sEmail by remember{mutableStateOf(prefs.getString("sEmail","")?:"")}; var sLandmark by remember{mutableStateOf(prefs.getString("sLandmark","")?:"")}; var sPincode by remember{mutableStateOf(prefs.getString("sPincode","")?:"")}; var sGst by remember{mutableStateOf(prefs.getString("sGst","")?:"")}; var sBank by remember{mutableStateOf(prefs.getString("sBank","")?:"")}; var sIfsc by remember{mutableStateOf(prefs.getString("sIfsc","")?:"")}; var sJuris by remember{mutableStateOf(prefs.getString("sJuris","")?:"")}; var defTax by remember{mutableStateOf(prefs.getString("defTax","18")?:"18")}; var newPin by remember{mutableStateOf(currentPin)}; Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())){Text("SETTINGS",fontSize=24.sp,fontWeight=FontWeight.Bold); OutlinedTextField(newPin,{newPin=it},label={Text("Set Login PIN")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.NumberPassword),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sName,{sName=it},label={Text("Firm Name")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sState,{sState=it},label={Text("My State Code (GST, e.g. 21)")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sPrefix,{sPrefix=it},label={Text("Invoice Prefix")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sAddr1,{sAddr1=it},label={Text("Address Line 1")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sAddr2,{sAddr2=it},label={Text("Address Line 2")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sPhone,{sPhone=it},label={Text("Phone")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Phone),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sEmail,{sEmail=it},label={Text("Email")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Email),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sLandmark,{sLandmark=it},label={Text("Landmark")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sPincode,{sPincode=it},label={Text("Pincode")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sGst,{sGst=it},label={Text("GSTIN")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sBank,{sBank=it},label={Text("Bank Name & Acc")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sIfsc,{sIfsc=it},label={Text("IFSC")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sJuris,{sJuris=it},label={Text("Jurisdiction")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(defTax,{defTax=it},label={Text("Default Tax %")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),modifier=Modifier.fillMaxWidth()); Text("PenKhata "+APP_VERSION, fontSize=10.sp, color=Color.Gray, modifier=Modifier.padding(top=8.dp)); Button(onClick={prefs.edit().putString("sName",sName).putString("sState",sState).putString("sPrefix",sPrefix).putString("sAddr1",sAddr1).putString("sAddr2",sAddr2).putString("sPhone",sPhone).putString("sEmail",sEmail).putString("sLandmark",sLandmark).putString("sPincode",sPincode).putString("sGst",sGst).putString("sBank",sBank).putString("sIfsc",sIfsc).putString("sJuris",sJuris).putString("defTax",defTax).apply(); onPinSave(newPin); Toast.makeText(ctx,"Saved",Toast.LENGTH_SHORT).show()},modifier=Modifier.fillMaxWidth()){Text("SAVE")}; Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Backup & Restore", fontWeight=FontWeight.Bold); Text("Saves settings, invoices, ledger and the PDF bills to one file you choose, so a reinstall does not mean re-typing everything. The app PIN is not included.", fontSize=10.sp); Spacer(Modifier.height(8.dp)); Button(onClick={ backupLauncher.launch("penkhata-backup-"+SimpleDateFormat("yyyyMMdd-HHmm", Locale.ENGLISH).format(Date())+".zip") }, modifier=Modifier.fillMaxWidth()){ Text("BACKUP DATA") }; Spacer(Modifier.height(6.dp)); Button(onClick={ restoreLauncher.launch(arrayOf("application/json","text/plain","*/*")) }, modifier=Modifier.fillMaxWidth()){ Text("RESTORE DATA") } }}; Spacer(Modifier.height(60.dp))} }
 
 // --- LOGIC ---
 fun loadStock(ctx: Context): List<StockEntry> {
@@ -500,7 +521,7 @@ fun saveStock(ctx: Context, list: List<StockEntry>) {
 }
 // Purchase cost of a sold item: matched on IMEI first, then on model name. 0 when unknown.
 fun stockCostFor(list: List<StockEntry>, item: InvItem): Double {
-    list.firstOrNull { it.imei.isNotBlank() && it.imei == item.serial }?.let { return it.cost }
+    list.firstOrNull { it.imeiList().contains(item.serial) }?.let { return it.cost }
     list.firstOrNull { it.model.isNotBlank() && item.desc.lowercase().contains(it.model.lowercase()) }?.let { return it.cost }
     return 0.0
 }
@@ -511,12 +532,19 @@ fun deductStock(ctx: Context, items: List<InvItem>) {
     for(item in items) {
         val sold = item.qty.toInt().coerceAtLeast(0)
         if(sold == 0) continue
-        var idx = list.indexOfFirst { it.imei.isNotBlank() && it.imei == item.serial }
-        if(idx < 0) idx = list.indexOfFirst { it.model.isNotBlank() && item.desc.lowercase().contains(it.model.lowercase()) }
-        if(idx >= 0) {
-            val e = list[idx]
-            list[idx] = e.copy(qty = (e.qty - sold).coerceAtLeast(0))
+        val byImei = list.indexOfFirst { it.imeiList().contains(item.serial) }
+        if(byImei >= 0) {
+            // the exact handset leaves stock: drop its IMEI and one unit
+            val e = list[byImei]
+            list[byImei] = e.copy(imei = e.imeiList().filter { it != item.serial }.joinToString("\n"),
+                                  qty = (e.qty - 1).coerceAtLeast(0))
             changed = true
+        } else {
+            val idx = list.indexOfFirst { it.model.isNotBlank() && item.desc.lowercase().contains(it.model.lowercase()) }
+            if(idx >= 0) {
+                list[idx] = list[idx].copy(qty = (list[idx].qty - sold).coerceAtLeast(0))
+                changed = true
+            }
         }
     }
     if(changed) saveStock(ctx, list)
@@ -550,6 +578,45 @@ fun backupJson(ctx: Context): String {
     root.put("invoices", invoices)
     root.put("ledger", ledger)
     return root.toString(2)
+}
+
+// Backup is a zip: backup.json plus every generated PDF, so a restore brings the
+// bills back into the Files tab, not just the settings.
+fun backupZip(ctx: Context, out: OutputStream) {
+    ZipOutputStream(out).use { zos ->
+        zos.putNextEntry(ZipEntry("backup.json"))
+        zos.write(backupJson(ctx).toByteArray(Charsets.UTF_8))
+        zos.closeEntry()
+        ctx.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)?.listFiles()
+            ?.filter { it.extension.equals("pdf", true) }
+            ?.forEach { f ->
+                zos.putNextEntry(ZipEntry("pdf/" + f.name))
+                f.inputStream().use { it.copyTo(zos) }
+                zos.closeEntry()
+            }
+    }
+}
+
+fun restoreZip(ctx: Context, input: InputStream): String {
+    var summary = ""
+    var pdfs = 0
+    val dir = ctx.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)
+    dir?.mkdirs()
+    ZipInputStream(BufferedInputStream(input)).use { zis ->
+        var entry = zis.nextEntry
+        while(entry != null) {
+            val name = entry.name
+            if(name == "backup.json") {
+                summary = restoreJson(ctx, zis.readBytes().toString(Charsets.UTF_8))
+            } else if(name.startsWith("pdf/") && dir != null) {
+                val target = File(dir, name.removePrefix("pdf/"))
+                if(!target.exists()) { FileOutputStream(target).use { zis.copyTo(it) }; pdfs++ }
+            }
+            zis.closeEntry()
+            entry = zis.nextEntry
+        }
+    }
+    return if(summary.isEmpty()) "That zip has no backup.json inside" else "$summary PDFs restored: $pdfs."
 }
 
 fun restoreJson(ctx: Context, text: String): String {
