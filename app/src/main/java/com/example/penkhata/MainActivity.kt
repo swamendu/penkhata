@@ -45,7 +45,7 @@ import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.*
 
-const val APP_VERSION = "1.7 \u00b7 iteration 4"
+const val APP_VERSION = "1.8 \u00b7 iteration 5"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0)
 val InvItemListSaver: Saver<List<InvItem>, String> = Saver(
@@ -57,6 +57,8 @@ val InvItemListSaver: Saver<List<InvItem>, String> = Saver(
         }
     }
 )
+data class StockEntry(val id: Long, val model: String, val imei: String, val hsn: String,
+                      val cost: Double, val mrp: Double, val qty: Int, val supplier: String, val addedOn: String)
 data class LedgerEntry(val id: Long, val date: String, val party: String, val type: String, val amount: Double, val desc: String)
 
 data class BillCalc(
@@ -138,6 +140,7 @@ fun MainAppScreen() {
         bottomBar = { NavigationBar {
             NavigationBarItem(selected = currentScreen=="dashboard", onClick = { currentScreen="dashboard" }, icon = { Icon(Icons.Default.EditNote, "Bill") }, label = { Text("Entry") })
             NavigationBarItem(selected = currentScreen=="ledger", onClick = { currentScreen="ledger" }, icon = { Icon(Icons.Default.AccountBalanceWallet, "Ledger") }, label = { Text("Ledger") })
+            NavigationBarItem(selected = currentScreen=="stock", onClick = { currentScreen="stock" }, icon = { Icon(Icons.Default.Inventory, "Stock") }, label = { Text("Stock") })
             NavigationBarItem(selected = currentScreen=="reports", onClick = { currentScreen="reports" }, icon = { Icon(Icons.Default.Assessment, "GST") }, label = { Text("GST") })
             NavigationBarItem(selected = currentScreen=="history", onClick = { currentScreen="history" }, icon = { Icon(Icons.Default.History, "Files") }, label = { Text("Files") })
             NavigationBarItem(selected = currentScreen=="settings", onClick = { currentScreen="settings" }, icon = { Icon(Icons.Default.Settings, "Set") }, label = { Text("Set") })
@@ -145,6 +148,7 @@ fun MainAppScreen() {
     ) { p -> Box(Modifier.padding(p)) { when(currentScreen) {
         "dashboard" -> InvoiceScreen(false)
         "ledger" -> LedgerScreen()
+        "stock" -> StockScreen()
         "reports" -> GSTReportScreen()
         "history" -> FileHistoryScreen()
         else -> SettingsScreen(savedPin) { new -> prefs.edit().putString("appPin", new).apply(); savedPin = new }
@@ -288,7 +292,7 @@ fun InvoiceScreen(isQuote: Boolean) {
                 scope.launch {
                     val file = try {
                         withContext(Dispatchers.IO) {
-                            if(!isQuote) saveInvoiceData(ctx, snapInv, snapBuyer[0], snapBuyer[6], snapCalc)
+                            if(!isQuote) saveInvoiceData(ctx, snapInv, snapBuyer[0], snapBuyer[6], snapCalc, snapItems)
                             createPdf(ctx, isQuote, snapInv, snapDate, snapPay, snapNote, seller[0], seller[1], seller[2], seller[3], seller[4], seller[5],
                                 seller[6], seller[7], seller[8], seller[9], snapBuyer[0], snapBuyer[1], snapBuyer[2], snapBuyer[3],
                                 snapBuyer[4], snapBuyer[5], snapBuyer[6], snapBuyer[7], snapItems, snapCalc, snapFinance)
@@ -299,7 +303,10 @@ fun InvoiceScreen(isQuote: Boolean) {
                     busy = false
                     if(file == null) { Toast.makeText(ctx, "Could not write the PDF", Toast.LENGTH_LONG).show() }
                     else {
-                        if(!isQuote) { bumpInvoiceNo(prefs); clearBill() }
+                        if(!isQuote) {
+                            bumpInvoiceNo(prefs); clearBill()
+                            scope.launch { withContext(Dispatchers.IO) { deductStock(ctx, snapItems) } }
+                        }
                         openPdf(ctx, file)
                     }
                 }
@@ -343,6 +350,74 @@ fun InvoiceScreen(isQuote: Boolean) {
                     Text(it.type, color=if(it.type=="DEBIT") Color.Red else Color.Green, fontSize=10.sp)
                     Text("\u20b9${fmt(it.amount)}", fontWeight=FontWeight.Bold)
                 }
+            }
+            Divider()
+        }
+        Spacer(Modifier.height(50.dp))
+    }
+}
+@Composable fun StockScreen() {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var reload by remember { mutableStateOf(0) }
+    val stock by produceState(initialValue = emptyList<StockEntry>(), reload) {
+        value = withContext(Dispatchers.IO) { loadStock(ctx) }
+    }
+    var model by rememberSaveable { mutableStateOf("") }; var imei by rememberSaveable { mutableStateOf("") }
+    var hsn by rememberSaveable { mutableStateOf("") }; var cost by rememberSaveable { mutableStateOf("") }
+    var mrp by rememberSaveable { mutableStateOf("") }; var qty by rememberSaveable { mutableStateOf("1") }
+    var supplier by rememberSaveable { mutableStateOf("") }
+    val totalUnits = stock.sumOf { it.qty }
+    val totalValue = stock.sumOf { it.cost * it.qty }
+    val lowCount = stock.count { it.qty <= 1 }
+    Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
+        Text("STOCK", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+        Card(Modifier.padding(vertical = 10.dp)) { Column(Modifier.padding(10.dp)) {
+            Text("Add Stock", fontWeight = FontWeight.Bold)
+            OutlinedTextField(model, {model=it}, label={Text("Model / Item Name")}, modifier=Modifier.fillMaxWidth())
+            OutlinedTextField(imei, {imei=it}, label={Text("IMEI / Serial (optional)")}, modifier=Modifier.fillMaxWidth())
+            Row { OutlinedTextField(hsn, {hsn=it}, label={Text("HSN")}, modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(qty, {qty=it}, label={Text("Qty")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)) }
+            Row { OutlinedTextField(cost, {cost=it}, label={Text("Purchase \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(mrp, {mrp=it}, label={Text("MRP \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)) }
+            OutlinedTextField(supplier, {supplier=it}, label={Text("Supplier")}, modifier=Modifier.fillMaxWidth())
+            Button(onClick = {
+                if(model.isNotBlank()) {
+                    val entry = StockEntry(System.currentTimeMillis(), model.trim(), imei.trim(), hsn.trim(),
+                        cost.toDoubleOrNull() ?: 0.0, mrp.toDoubleOrNull() ?: 0.0, (qty.toIntOrNull() ?: 1).coerceAtLeast(0),
+                        supplier.trim(), SimpleDateFormat("dd-MMM-yyyy", Locale.ENGLISH).format(Date()))
+                    scope.launch {
+                        withContext(Dispatchers.IO) { saveStock(ctx, loadStock(ctx) + entry) }
+                        reload++
+                        model=""; imei=""; hsn=""; cost=""; mrp=""; qty="1"; supplier=""
+                        Toast.makeText(ctx, "Added to stock", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }, modifier = Modifier.fillMaxWidth()) { Text("ADD TO STOCK") }
+        }}
+        Card(Modifier.padding(vertical = 10.dp)) { Column(Modifier.padding(16.dp)) {
+            Text("Summary", fontWeight = FontWeight.Bold)
+            Divider(Modifier.padding(vertical = 5.dp))
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Models"); Text("${stock.size}") }
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Units in hand"); Text("$totalUnits") }
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Stock value (cost)"); Text("\u20b9${fmt(totalValue)}") }
+            if(lowCount > 0) Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Low stock (1 or less)", color = Color.Red); Text("$lowCount", color = Color.Red) }
+        }}
+        stock.sortedBy { it.model.lowercase() }.forEach { e ->
+            Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(e.model, fontWeight = FontWeight.Bold)
+                    if(e.imei.isNotBlank()) Text("IMEI: ${e.imei}", fontSize = 10.sp)
+                    Text("Cost \u20b9${fmt(e.cost)}  MRP \u20b9${fmt(e.mrp)}" + (if(e.supplier.isBlank()) "" else "  \u00b7  ${e.supplier}"), fontSize = 10.sp)
+                }
+                Column(horizontalAlignment = Alignment.End) {
+                    Text("Qty ${e.qty}", color = if(e.qty <= 1) Color.Red else Color(0xFF2E7D32), fontWeight = FontWeight.Bold)
+                    if(e.qty <= 1) Text("LOW", fontSize = 10.sp, color = Color.Red)
+                }
+                IconButton(onClick = {
+                    scope.launch {
+                        withContext(Dispatchers.IO) { saveStock(ctx, loadStock(ctx).filter { it.id != e.id }) }
+                        reload++
+                    }
+                }) { Icon(Icons.Default.Delete, "Del", tint = Color.Red) }
             }
             Divider()
         }
@@ -399,6 +474,53 @@ fun InvoiceScreen(isQuote: Boolean) {
     var sName by remember{mutableStateOf(prefs.getString("sName","")?:"")}; var sState by remember{mutableStateOf(prefs.getString("sState","21")?:"21")}; var sPrefix by remember{mutableStateOf(prefs.getString("sPrefix","INV")?:"INV")}; var sAddr1 by remember{mutableStateOf(prefs.getString("sAddr1","")?:(prefs.getString("sAddr","")?:"").lineSequence().firstOrNull()?.trim()?:"")}; var sAddr2 by remember{mutableStateOf(prefs.getString("sAddr2","")?:(prefs.getString("sAddr","")?:"").lineSequence().drop(1).joinToString(" ").trim())}; var sPhone by remember{mutableStateOf(prefs.getString("sPhone","")?:"")}; var sEmail by remember{mutableStateOf(prefs.getString("sEmail","")?:"")}; var sLandmark by remember{mutableStateOf(prefs.getString("sLandmark","")?:"")}; var sPincode by remember{mutableStateOf(prefs.getString("sPincode","")?:"")}; var sGst by remember{mutableStateOf(prefs.getString("sGst","")?:"")}; var sBank by remember{mutableStateOf(prefs.getString("sBank","")?:"")}; var sIfsc by remember{mutableStateOf(prefs.getString("sIfsc","")?:"")}; var sJuris by remember{mutableStateOf(prefs.getString("sJuris","")?:"")}; var defTax by remember{mutableStateOf(prefs.getString("defTax","18")?:"18")}; var newPin by remember{mutableStateOf(currentPin)}; Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())){Text("SETTINGS",fontSize=24.sp,fontWeight=FontWeight.Bold); OutlinedTextField(newPin,{newPin=it},label={Text("Set Login PIN")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.NumberPassword),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sName,{sName=it},label={Text("Firm Name")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sState,{sState=it},label={Text("My State Code (GST, e.g. 21)")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sPrefix,{sPrefix=it},label={Text("Invoice Prefix")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sAddr1,{sAddr1=it},label={Text("Address Line 1")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sAddr2,{sAddr2=it},label={Text("Address Line 2")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sPhone,{sPhone=it},label={Text("Phone")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Phone),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sEmail,{sEmail=it},label={Text("Email")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Email),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sLandmark,{sLandmark=it},label={Text("Landmark")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sPincode,{sPincode=it},label={Text("Pincode")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sGst,{sGst=it},label={Text("GSTIN")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sBank,{sBank=it},label={Text("Bank Name & Acc")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sIfsc,{sIfsc=it},label={Text("IFSC")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sJuris,{sJuris=it},label={Text("Jurisdiction")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(defTax,{defTax=it},label={Text("Default Tax %")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),modifier=Modifier.fillMaxWidth()); Text("PenKhata "+APP_VERSION, fontSize=10.sp, color=Color.Gray, modifier=Modifier.padding(top=8.dp)); Button(onClick={prefs.edit().putString("sName",sName).putString("sState",sState).putString("sPrefix",sPrefix).putString("sAddr1",sAddr1).putString("sAddr2",sAddr2).putString("sPhone",sPhone).putString("sEmail",sEmail).putString("sLandmark",sLandmark).putString("sPincode",sPincode).putString("sGst",sGst).putString("sBank",sBank).putString("sIfsc",sIfsc).putString("sJuris",sJuris).putString("defTax",defTax).apply(); onPinSave(newPin); Toast.makeText(ctx,"Saved",Toast.LENGTH_SHORT).show()},modifier=Modifier.fillMaxWidth()){Text("SAVE")}; Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Backup & Restore", fontWeight=FontWeight.Bold); Text("Saves settings, invoices and ledger to a file you choose, so a reinstall does not mean re-typing everything. The app PIN is not included.", fontSize=10.sp); Spacer(Modifier.height(8.dp)); Button(onClick={ backupLauncher.launch("penkhata-backup-"+SimpleDateFormat("yyyyMMdd-HHmm", Locale.ENGLISH).format(Date())+".json") }, modifier=Modifier.fillMaxWidth()){ Text("BACKUP DATA") }; Spacer(Modifier.height(6.dp)); Button(onClick={ restoreLauncher.launch(arrayOf("application/json","text/plain","*/*")) }, modifier=Modifier.fillMaxWidth()){ Text("RESTORE DATA") } }}; Spacer(Modifier.height(60.dp))} }
 
 // --- LOGIC ---
+fun loadStock(ctx: Context): List<StockEntry> {
+    val f = File(ctx.filesDir, "stock.json")
+    if(!f.exists()) return emptyList()
+    val out = mutableListOf<StockEntry>()
+    try {
+        val arr = JSONArray(f.readText())
+        for(i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            out.add(StockEntry(o.optLong("id"), o.optString("model"), o.optString("imei"), o.optString("hsn"),
+                o.optDouble("cost", 0.0), o.optDouble("mrp", 0.0), o.optInt("qty", 0), o.optString("supplier"), o.optString("addedOn")))
+        }
+    } catch(e: Exception) { }
+    return out
+}
+fun saveStock(ctx: Context, list: List<StockEntry>) {
+    val arr = JSONArray()
+    for(e in list) {
+        val o = JSONObject()
+        o.put("id", e.id); o.put("model", e.model); o.put("imei", e.imei); o.put("hsn", e.hsn)
+        o.put("cost", e.cost); o.put("mrp", e.mrp); o.put("qty", e.qty); o.put("supplier", e.supplier); o.put("addedOn", e.addedOn)
+        arr.put(o)
+    }
+    writeFileAtomic(File(ctx.filesDir, "stock.json"), arr.toString())
+}
+// Purchase cost of a sold item: matched on IMEI first, then on model name. 0 when unknown.
+fun stockCostFor(list: List<StockEntry>, item: InvItem): Double {
+    list.firstOrNull { it.imei.isNotBlank() && it.imei == item.serial }?.let { return it.cost }
+    list.firstOrNull { it.model.isNotBlank() && item.desc.lowercase().contains(it.model.lowercase()) }?.let { return it.cost }
+    return 0.0
+}
+// Takes sold quantities out of stock. Unknown items are left alone rather than guessed at.
+fun deductStock(ctx: Context, items: List<InvItem>) {
+    val list = loadStock(ctx).toMutableList()
+    var changed = false
+    for(item in items) {
+        val sold = item.qty.toInt().coerceAtLeast(0)
+        if(sold == 0) continue
+        var idx = list.indexOfFirst { it.imei.isNotBlank() && it.imei == item.serial }
+        if(idx < 0) idx = list.indexOfFirst { it.model.isNotBlank() && item.desc.lowercase().contains(it.model.lowercase()) }
+        if(idx >= 0) {
+            val e = list[idx]
+            list[idx] = e.copy(qty = (e.qty - sold).coerceAtLeast(0))
+            changed = true
+        }
+    }
+    if(changed) saveStock(ctx, list)
+}
 fun writeFileAtomic(f: File, text: String) {
     val tmp = File(f.parentFile, f.name + ".tmp")
     tmp.writeText(text)
@@ -470,11 +592,15 @@ fun loadGstData(ctx: Context): Map<String,String> {
     }
     return mapOf("total" to String.format("%.2f",total),"tax" to String.format("%.2f",tax),"skipped" to skipped.toString())
 }
-fun saveInvoiceData(ctx: Context, invNo: String, bName: String, bGst: String, calc: BillCalc) {
+fun saveInvoiceData(ctx: Context, invNo: String, bName: String, bGst: String, calc: BillCalc, items: List<InvItem>) {
+    val stock = loadStock(ctx)
+    var cogs = 0.0
+    for(i in items) cogs += stockCostFor(stock, i) * i.qty
     val j=JSONObject()
     j.put("d",Date().toString()); j.put("inv",invNo); j.put("buyer",bName); j.put("bgst",bGst)
     j.put("total",calc.grand); j.put("taxable",calc.taxable); j.put("tax",calc.totalTax)
     j.put("cgst",calc.cgst); j.put("sgst",calc.sgst); j.put("igst",calc.igst); j.put("interState",calc.interState)
+    j.put("cogs",cogs); j.put("profit",calc.taxable-cogs)
     writeFileAtomic(File(ctx.filesDir,"inv_${System.currentTimeMillis()}.json"), j.toString())
 }
 fun saveLedgerEntry(ctx: Context, e: LedgerEntry) { val j=JSONObject(); j.put("date",e.date); j.put("party",e.party); j.put("type",e.type); j.put("amt",e.amount); j.put("desc",e.desc); writeFileAtomic(File(ctx.filesDir,"led_${System.currentTimeMillis()}.json"), j.toString()) }
