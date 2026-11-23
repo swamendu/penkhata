@@ -168,17 +168,21 @@ fun InvoiceScreen(isQuote: Boolean) {
     var cash by rememberSaveable { mutableStateOf("") }; var upi by rememberSaveable { mutableStateOf("") }
     var card by rememberSaveable { mutableStateOf("") }; var finance by rememberSaveable { mutableStateOf("") }
 
+    fun clearBill() {
+        invNo = nextInvoiceNo(prefs)
+        bName=""; bAddr1=""; bAddr2=""; bLandmark=""; bPhone=""; bGst=""; bState=""
+        items = emptyList()
+        billDisc=""; exchange=""; cash=""; upi=""; card=""; finance=""
+        payMode=""; delNote=""
+    }
+
     val calc = computeBill(items, billDisc.toDoubleOrNull() ?: 0.0, exchange.toDoubleOrNull() ?: 0.0,
         cash.toDoubleOrNull() ?: 0.0, upi.toDoubleOrNull() ?: 0.0, card.toDoubleOrNull() ?: 0.0, sellerState, bState)
 
     Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
         Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
             Text(if(isQuote) "QUOTATION" else "TAX INVOICE", fontSize = 24.sp, fontWeight = FontWeight.Bold, color=Color.Blue)
-            TextButton(onClick = {
-                invNo = nextInvoiceNo(prefs); bName=""; bAddr1=""; bAddr2=""; bLandmark=""; bPhone=""; bGst=""; bState=""
-                items=emptyList(); billDisc=""; exchange=""; cash=""; upi=""; card=""; finance=""
-                Toast.makeText(ctx, "Cleared", Toast.LENGTH_SHORT).show()
-            }) { Text("RESET", color = Color.Red) }
+            TextButton(onClick = { clearBill(); Toast.makeText(ctx, "Cleared", Toast.LENGTH_SHORT).show() }) { Text("RESET", color = Color.Red) }
         }
         Card(Modifier.padding(vertical=5.dp)) { Column(Modifier.padding(10.dp)) {
             Row { OutlinedTextField(invNo, {invNo=it}, label={Text("Inv No")}, modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(date, {date=it}, label={Text("Date")}, modifier=Modifier.weight(1f)) }
@@ -246,7 +250,7 @@ fun InvoiceScreen(isQuote: Boolean) {
                     prefs.getString("sPhone","")?:"", prefs.getString("sEmail","")?:"", prefs.getString("sLandmark","")?:"",
                     prefs.getString("sGst","")?:"", prefs.getString("sBank","")?:"", prefs.getString("sIfsc","")?:"", prefs.getString("sJuris","")?:"",
                     bName, bAddr1, bAddr2, bLandmark, bPhone, bGst, bState, items, calc, finance)
-                if(!isQuote) { bumpInvoiceNo(prefs); invNo = nextInvoiceNo(prefs) }
+                if(!isQuote) { bumpInvoiceNo(prefs); clearBill() }
             }
         }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor = Color(0xFF2E7D32))) { Text(if(isQuote) "GENERATE QUOTE" else "GENERATE PDF") }
         Spacer(Modifier.height(60.dp))
