@@ -45,7 +45,7 @@ import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.*
 
-const val APP_VERSION = "1.6 \u00b7 iteration 3"
+const val APP_VERSION = "1.7 \u00b7 iteration 4"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0)
 val InvItemListSaver: Saver<List<InvItem>, String> = Saver(
@@ -195,6 +195,14 @@ fun InvoiceScreen(isQuote: Boolean) {
         payMode=""; delNote=""
     }
 
+    // Pay Mode follows the Cash / UPI / Card amounts, so it never contradicts them.
+    val autoPayMode = listOf(
+        if((cash.toDoubleOrNull() ?: 0.0) > 0.0) "CASH" else "",
+        if((upi.toDoubleOrNull() ?: 0.0) > 0.0) "UPI" else "",
+        if((card.toDoubleOrNull() ?: 0.0) > 0.0) "CARD" else ""
+    ).filter{it.isNotBlank()}.joinToString(", ")
+    LaunchedEffect(autoPayMode) { if(autoPayMode.isNotBlank() && payMode != autoPayMode) payMode = autoPayMode }
+
     val calc = computeBill(items, billDisc.toDoubleOrNull() ?: 0.0, exchange.toDoubleOrNull() ?: 0.0,
         cash.toDoubleOrNull() ?: 0.0, upi.toDoubleOrNull() ?: 0.0, card.toDoubleOrNull() ?: 0.0, sellerState, bState)
 
@@ -206,6 +214,7 @@ fun InvoiceScreen(isQuote: Boolean) {
         Card(Modifier.padding(vertical=5.dp)) { Column(Modifier.padding(10.dp)) {
             Row { OutlinedTextField(invNo, {invNo=it}, label={Text("Inv No")}, modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(date, {date=it}, label={Text("Date")}, modifier=Modifier.weight(1f)) }
             Row { OutlinedTextField(payMode, {payMode=it}, label={Text("Pay Mode")}, modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(delNote, {delNote=it}, label={Text("Delivery Note")}, modifier=Modifier.weight(1f)) }
+            Text(if(autoPayMode.isBlank()) "Pay Mode fills itself from Cash / UPI / Card below" else "Pay Mode: $autoPayMode", fontSize=10.sp, color=Color(0xFF2E7D32))
         }}
         Card(Modifier.padding(vertical=5.dp)) { Column(Modifier.padding(10.dp)) {
             Text("Buyer Details", fontWeight=FontWeight.Bold)
