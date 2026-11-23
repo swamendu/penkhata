@@ -35,6 +35,8 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
+import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -52,7 +54,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "1.9 \u00b7 iteration 6"
+const val APP_VERSION = "2.0 \u00b7 iteration 7"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0)
 val InvItemListSaver: Saver<List<InvItem>, String> = Saver(
@@ -202,6 +204,16 @@ fun InvoiceScreen(isQuote: Boolean) {
     var billDisc by rememberSaveable { mutableStateOf("") }; var exchange by rememberSaveable { mutableStateOf("") }
     var cash by rememberSaveable { mutableStateOf("") }; var upi by rememberSaveable { mutableStateOf("") }
     var card by rememberSaveable { mutableStateOf("") }; var finance by rememberSaveable { mutableStateOf("") }
+    val stockList by produceState(initialValue = emptyList<StockEntry>(), ctx) {
+        value = withContext(Dispatchers.IO) { loadStock(ctx) }
+    }
+    var showStock by rememberSaveable { mutableStateOf(false) }
+    // one row per handset: a stock line holding 3 IMEIs offers 3 choices
+    val stockUnits: List<Pair<StockEntry, String>> = stockList.filter { it.qty > 0 }.flatMap { e ->
+        val ims = e.imeiList()
+        if(ims.isEmpty()) listOf(e to "") else ims.map { e to it }
+    }
+    val scanClient = remember { GmsBarcodeScanning.getClient(ctx, GmsBarcodeScannerOptions.Builder().build()) }
 
     val scope = rememberCoroutineScope()
     var busy by remember { mutableStateOf(false) }
@@ -247,9 +259,44 @@ fun InvoiceScreen(isQuote: Boolean) {
             if(calc.interState) Text("Other state: IGST will be charged", fontSize=10.sp, color=Color(0xFF2E7D32))
         }}
         Card(Modifier.padding(vertical=5.dp)) { Column(Modifier.padding(10.dp)) {
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text("From Stock (${stockUnits.size})", fontWeight = FontWeight.Bold)
+                TextButton(onClick = { showStock = !showStock }) { Text(if(showStock) "HIDE" else "PICK") }
+            }
+            if(stockUnits.isEmpty()) Text("No stock yet - add it in the Stock tab", fontSize = 10.sp)
+            if(showStock) stockUnits.forEach { pair ->
+                val entry = pair.first; val imeiNo = pair.second
+                Column(Modifier.fillMaxWidth().clickable {
+                    iDesc = entry.model
+                    iSerial = imeiNo
+                    iHsn = entry.hsn
+                    if(entry.mrp > 0.0) iRate = if(entry.mrp == entry.mrp.toLong().toDouble()) entry.mrp.toLong().toString() else entry.mrp.toString()
+                    iQty = "1"
+                    showStock = false
+                    Toast.makeText(ctx, "Filled from stock", Toast.LENGTH_SHORT).show()
+                }.padding(vertical = 6.dp)) {
+                    Text(entry.model, fontWeight = FontWeight.Bold, maxLines = 3)
+                    if(imeiNo.isNotBlank()) Text("IMEI: $imeiNo", fontSize = 10.sp)
+                    Text("MRP \u20b9${fmt(entry.mrp)}" + (if(entry.supplier.isBlank()) "" else "  \u00b7  ${entry.supplier}"), fontSize = 10.sp)
+                }
+                Divider()
+            }
+        }}
+        Card(Modifier.padding(vertical=5.dp)) { Column(Modifier.padding(10.dp)) {
             Text("Add Item", fontWeight=FontWeight.Bold)
             OutlinedTextField(iDesc, {iDesc=it}, label={Text("Item Name")}, modifier=Modifier.fillMaxWidth())
-            OutlinedTextField(iSerial, {iSerial=it}, label={Text("Serial / IMEI")}, modifier=Modifier.fillMaxWidth())
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(iSerial, {iSerial=it}, label={Text("Serial / IMEI")}, modifier=Modifier.weight(1f))
+                IconButton(onClick = {
+                    try {
+                        scanClient.startScan()
+                            .addOnSuccessListener { b -> val v = b.rawValue; if(v != null) { iSerial = v; Toast.makeText(ctx, "Scanned", Toast.LENGTH_SHORT).show() } }
+                            .addOnFailureListener { e -> Toast.makeText(ctx, "Scanner unavailable: " + (e.message ?: "Play Services needed"), Toast.LENGTH_LONG).show() }
+                    } catch(e: Exception) {
+                        Toast.makeText(ctx, "Scanner unavailable: " + (e.message ?: "Play Services needed"), Toast.LENGTH_LONG).show()
+                    }
+                }) { Icon(Icons.Default.QrCodeScanner, "Scan IMEI") }
+            }
             Row { OutlinedTextField(iHsn, {iHsn=it}, label={Text("HSN")}, modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(iUnit, {iUnit=it}, label={Text("Unit")}, modifier=Modifier.weight(1f)) }
             Row { OutlinedTextField(iQty, {iQty=it}, label={Text("Qty")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(iRate, {iRate=it}, label={Text("Rate (Inc. Tax)")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)) }
             Row(Modifier.padding(top=5.dp)) { OutlinedTextField(iTax, {iTax=it}, label={Text("GST %")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(iDisc, {iDisc=it}, label={Text("Disc %")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)) }
@@ -382,6 +429,7 @@ fun InvoiceScreen(isQuote: Boolean) {
     var hsn by rememberSaveable { mutableStateOf("") }; var cost by rememberSaveable { mutableStateOf("") }
     var mrp by rememberSaveable { mutableStateOf("") }; var qty by rememberSaveable { mutableStateOf("1") }
     var supplier by rememberSaveable { mutableStateOf("") }
+    val stockScan = remember { GmsBarcodeScanning.getClient(ctx, GmsBarcodeScannerOptions.Builder().build()) }
     val totalUnits = stock.sumOf { it.qty }
     val totalValue = stock.sumOf { it.cost * it.qty }
     val lowCount = stock.count { it.qty <= 1 }
@@ -390,7 +438,18 @@ fun InvoiceScreen(isQuote: Boolean) {
         Card(Modifier.padding(vertical = 10.dp)) { Column(Modifier.padding(10.dp)) {
             Text("Add Stock", fontWeight = FontWeight.Bold)
             OutlinedTextField(model, {model=it}, label={Text("Model / Item Name")}, modifier=Modifier.fillMaxWidth())
-            OutlinedTextField(imei, {imei=it}, label={Text("IMEI / Serial - one per line (optional)")}, minLines=2, modifier=Modifier.fillMaxWidth())
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(imei, {imei=it}, label={Text("IMEI / Serial - one per line (optional)")}, minLines=2, modifier=Modifier.weight(1f))
+                IconButton(onClick = {
+                    try {
+                        stockScan.startScan()
+                            .addOnSuccessListener { b -> val v = b.rawValue; if(v != null) { imei = if(imei.isBlank()) v else imei.trimEnd() + "\n" + v } }
+                            .addOnFailureListener { e -> Toast.makeText(ctx, "Scanner unavailable: " + (e.message ?: "Play Services needed"), Toast.LENGTH_LONG).show() }
+                    } catch(e: Exception) {
+                        Toast.makeText(ctx, "Scanner unavailable: " + (e.message ?: "Play Services needed"), Toast.LENGTH_LONG).show()
+                    }
+                }) { Icon(Icons.Default.QrCodeScanner, "Scan IMEI") }
+            }
             Row { OutlinedTextField(hsn, {hsn=it}, label={Text("HSN")}, modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(qty, {qty=it}, label={Text("Qty")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)) }
             Row { OutlinedTextField(cost, {cost=it}, label={Text("Purchase \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(mrp, {mrp=it}, label={Text("MRP \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)) }
             OutlinedTextField(supplier, {supplier=it}, label={Text("Supplier")}, modifier=Modifier.fillMaxWidth())
