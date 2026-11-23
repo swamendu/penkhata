@@ -77,14 +77,20 @@ fun computeBill(items: List<InvItem>, billDiscount: Double, exchange: Double, ca
         gross += g; itemDisc += d; taxable += base; tax += (net - base)
     }
     val bd = billDiscount.coerceIn(0.0, taxable + tax)
-    val beforeRound = taxable + tax - bd
+    // The bill discount is spread over taxable value and tax in proportion, so the
+    // printed rows add up: Gross - Discount = Taxable Value + CGST + SGST.
+    val netBeforeBillDisc = taxable + tax
+    val keepFactor = if(netBeforeBillDisc > 0.0) (netBeforeBillDisc - bd) / netBeforeBillDisc else 0.0
+    val taxableAfter = taxable * keepFactor
+    val taxAfter = tax * keepFactor
+    val beforeRound = taxableAfter + taxAfter
     val rounded = Math.round(beforeRound).toDouble()
     val roundOff = rounded - beforeRound
     val paid = cash + upi + card
     val interState = sellerState.isNotBlank() && buyerState.isNotBlank() && sellerState.trim() != buyerState.trim()
     val grand = rounded - exchange
-    return BillCalc(gross, itemDisc, bd, taxable,
-        if(interState) 0.0 else tax / 2, if(interState) 0.0 else tax / 2, if(interState) tax else 0.0, tax,
+    return BillCalc(gross, itemDisc, bd, taxableAfter,
+        if(interState) 0.0 else taxAfter / 2, if(interState) 0.0 else taxAfter / 2, if(interState) taxAfter else 0.0, taxAfter,
         roundOff, grand, exchange, cash, upi, card, paid, grand - paid, interState)
 }
 
@@ -235,9 +241,10 @@ fun InvoiceScreen(isQuote: Boolean) {
         }}
         Card(Modifier.padding(vertical=5.dp)) { Column(Modifier.padding(10.dp)) {
             Text("Summary", fontWeight=FontWeight.Bold)
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Gross Value"); Text("\u20b9${fmt(calc.gross)}") }
+            val shownDiscount = calc.itemDiscount + calc.billDiscount
+            if(shownDiscount>0.004) Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Less Discount"); Text("-\u20b9${fmt(shownDiscount)}") }
             Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Taxable Value"); Text("\u20b9${fmt(calc.taxable)}") }
-            if(calc.itemDiscount>0.004) Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Item Discount"); Text("-\u20b9${fmt(calc.itemDiscount)}") }
-            if(calc.billDiscount>0.004) Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Bill Discount"); Text("-\u20b9${fmt(calc.billDiscount)}") }
             if(calc.interState) Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("IGST"); Text("\u20b9${fmt(calc.igst)}") }
             else { Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("CGST"); Text("\u20b9${fmt(calc.cgst)}") }; Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("SGST"); Text("\u20b9${fmt(calc.sgst)}") } }
             if(Math.abs(calc.roundOff)>=0.005) Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Round Off"); Text("\u20b9${fmt(calc.roundOff)}") }
@@ -508,7 +515,7 @@ fun createPdf(ctx: Context, isQuote: Boolean, invNo: String, date: String, payMo
     val c1=m;val w1=30f;val c2=c1+w1;val w2=200f;val c3=c2+w2;val w3=50f;val c4=c3+w3;val w4=60f;val c5=c4+w4;val w5=70f;val c6=c5+w5;val w6=50f;val c7=c6+w6;val w7=95f
     fun vLine(top:Float,bot:Float){c.drawLine(c2,top,c2,bot,bp);c.drawLine(c3,top,c3,bot,bp);c.drawLine(c4,top,c4,bot,bp);c.drawLine(c5,top,c5,bot,bp);c.drawLine(c6,top,c6,bot,bp);c.drawLine(c7,top,c7,bot,bp)}
     vLine(tTop,tTop+hH); p.isFakeBoldText=true; p.textAlign=Paint.Align.CENTER
-    c.drawText("SI",c1+w1/2,tTop+14,p); c.drawText("Desc",c2+w2/2,tTop+14,p); c.drawText("HSN",c3+w3/2,tTop+14,p); c.drawText("Qty",c4+w4/2,tTop+14,p); c.drawText("Rate",c5+w5/2,tTop+14,p); c.drawText("Per",c6+w6/2,tTop+14,p); c.drawText("Amt",c7+w7/2,tTop+14,p)
+    c.drawText("SI",c1+w1/2,tTop+14,p); c.drawText("Desc",c2+w2/2,tTop+14,p); c.drawText("HSN",c3+w3/2,tTop+14,p); c.drawText("Qty",c4+w4/2,tTop+14,p); c.drawText("Rate Incl.",c5+w5/2,tTop+14,p); c.drawText("Per",c6+w6/2,tTop+14,p); c.drawText("Amt",c7+w7/2,tTop+14,p)
     p.isFakeBoldText=false; var y=tTop+hH
     items.forEachIndexed{i,it->
         val rh=if(it.serial.isNotEmpty()) 30f else 20f
@@ -516,16 +523,17 @@ fun createPdf(ctx: Context, isQuote: Boolean, invNo: String, date: String, payMo
         c.drawText("${i+1}",c1+w1/2,y+14,p); p.textAlign=Paint.Align.LEFT
         c.drawText(if(it.discount>0.004) "${it.desc} (-${fmt(it.discount)}% off)" else it.desc,c2+5,y+14,p); if(it.serial.isNotEmpty()){val ps=Paint(p);ps.textSize=8f;c.drawText("SR/IMEI: ${it.serial}",c2+5,y+26,ps)}
         p.textAlign=Paint.Align.CENTER; c.drawText(it.hsn,c3+w3/2,y+14,p); c.drawText(qtyText(it.qty),c4+w4/2,y+14,p)
-        c.drawText(String.format("%.2f",rowBase),c5+w5/2,y+14,p); c.drawText(it.unit,c6+w6/2,y+14,p)
-        p.textAlign=Paint.Align.RIGHT; c.drawText(fmt(rowBase*it.qty),m+w-5,y+14,p); y+=rh
+        c.drawText(fmt(it.rate),c5+w5/2,y+14,p); c.drawText(it.unit,c6+w6/2,y+14,p)
+        p.textAlign=Paint.Align.RIGHT; c.drawText(fmt(it.rate*it.qty),m+w-5,y+14,p); y+=rh
     }
     // Totals block grows upward from a fixed bottom line, so the extra rows a GST bill
     // needs (discount, IGST, round-off, payment) can never push into the declaration area.
     val tX=c7; val rowH=18f; val totalsBottom=700f
     val totalRows=mutableListOf<Pair<String,String>>()
+    totalRows.add("Gross Value" to fmt(calc.gross))
+    val totalDiscount=calc.itemDiscount+calc.billDiscount
+    if(totalDiscount>0.004) totalRows.add("Less Discount" to "-"+fmt(totalDiscount))
     totalRows.add("Taxable Value" to fmt(calc.taxable))
-    if(calc.itemDiscount>0.004) totalRows.add("Item Discount" to "-"+fmt(calc.itemDiscount))
-    if(calc.billDiscount>0.004) totalRows.add("Bill Discount" to "-"+fmt(calc.billDiscount))
     if(calc.interState) totalRows.add("IGST" to fmt(calc.igst))
     else { totalRows.add("CGST" to fmt(calc.cgst)); totalRows.add("SGST" to fmt(calc.sgst)) }
     if(Math.abs(calc.roundOff)>=0.005) totalRows.add("Round Off" to (if(calc.roundOff>0) "+" else "")+fmt(calc.roundOff))
