@@ -56,7 +56,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "2.4 \u00b7 iteration 11"
+const val APP_VERSION = "2.5 \u00b7 iteration 12"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0)
 val InvItemListSaver: Saver<List<InvItem>, String> = Saver(
@@ -251,7 +251,8 @@ fun InvoiceScreen(isQuote: Boolean) {
             TextButton(onClick = { clearBill(); Toast.makeText(ctx, "Cleared", Toast.LENGTH_SHORT).show() }) { Text("RESET", color = Color.Red) }
         }
         Card(Modifier.padding(vertical=5.dp)) { Column(Modifier.padding(10.dp)) {
-            Row { OutlinedTextField(invNo, {invNo=it}, label={Text("Inv No")}, modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(date, {date=it}, label={Text("Date")}, modifier=Modifier.weight(1f)) }
+            OutlinedTextField(invNo, {invNo=it}, label={Text("Inv No")}, modifier=Modifier.fillMaxWidth())
+            OutlinedTextField(date, {date=it}, label={Text("Date")}, modifier=Modifier.fillMaxWidth())
             Row { OutlinedTextField(payMode, {payMode=it}, label={Text("Pay Mode")}, modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(delNote, {delNote=it}, label={Text("Delivery Note")}, modifier=Modifier.weight(1f)) }
             Text(if(autoPayMode.isBlank()) "Pay Mode fills itself from Cash / UPI / Card below" else "Pay Mode: $autoPayMode", fontSize=10.sp, color=Color(0xFF2E7D32))
         }}
@@ -1217,8 +1218,8 @@ fun createPdf(ctx: Context, isQuote: Boolean, invNo: String, date: String, payMo
               sGst: String, sBank: String, sIfsc: String, sJuris: String,
               bName: String, bAddr1: String, bAddr2: String, bLandmark: String, bPincode: String, bPhone: String,
               bGst: String, bState: String, items: List<InvItem>, calc: BillCalc, finance: String, ms: Long, sUpi: String): File {
-    val doc = PdfDocument(); val page = doc.startPage(PdfDocument.PageInfo.Builder(595, 842, 1).create())
-    val c = page.canvas; val p = Paint(); val bp = Paint().apply{style=Paint.Style.STROKE; strokeWidth=1f}
+    val doc = PdfDocument(); var page = doc.startPage(PdfDocument.PageInfo.Builder(595, 842, 1).create())
+    var c = page.canvas; val p = Paint(); val bp = Paint().apply{style=Paint.Style.STROKE; strokeWidth=1f}
     val m=20f; val w=555f; val h=800f; val midX=m+w/2
     c.drawRect(m, m, m+w, m+h, bp)
     p.isFakeBoldText=true; p.textAlign=Paint.Align.CENTER; p.textSize=14f
@@ -1270,36 +1271,112 @@ fun createPdf(ctx: Context, isQuote: Boolean, invNo: String, date: String, payMo
     rightRow(rows[2].first,rows[2].second,midY); rightRow(rows[3].first,rows[3].second,botSplit)
     p.textSize=10f; p.textAlign=Paint.Align.LEFT; p.isFakeBoldText=false
 
-    val tTop=r1End; val hH=20f; c.drawLine(m,tTop,m+w,tTop,bp); c.drawLine(m,tTop+hH,m+w,tTop+hH,bp)
+    val tTop=r1End; val hH=20f
     val c1=m;val w1=30f;val c2=c1+w1;val w2=200f;val c3=c2+w2;val w3=50f;val c4=c3+w3;val w4=60f;val c5=c4+w4;val w5=70f;val c6=c5+w5;val w6=50f;val c7=c6+w6;val w7=95f
     fun vLine(top:Float,bot:Float){c.drawLine(c2,top,c2,bot,bp);c.drawLine(c3,top,c3,bot,bp);c.drawLine(c4,top,c4,bot,bp);c.drawLine(c5,top,c5,bot,bp);c.drawLine(c6,top,c6,bot,bp);c.drawLine(c7,top,c7,bot,bp)}
-    vLine(tTop,tTop+hH); p.isFakeBoldText=true; p.textAlign=Paint.Align.CENTER
-    c.drawText("SI",c1+w1/2,tTop+14,p); c.drawText("Desc",c2+w2/2,tTop+14,p); c.drawText("HSN",c3+w3/2,tTop+14,p); c.drawText("Qty",c4+w4/2,tTop+14,p); c.drawText("Rate Incl.",c5+w5/2,tTop+14,p); c.drawText("Per",c6+w6/2,tTop+14,p); c.drawText("Amt",c7+w7/2,tTop+14,p)
-    p.isFakeBoldText=false; var y=tTop+hH
     val descW=w2-10f
-    items.forEachIndexed{i,it->
-        // The description wraps inside its own column and the row grows to fit, so it can
-        // never run into HSN. Discount and serial go on the small line underneath.
-        val descLines=wrapLines(it.desc, p, descW).take(3)
-        val discNote=if(it.discount>0.004) "Disc ${fmt(it.discount)}%  -${fmt(it.qty*it.rate*it.discount/100.0)}" else ""
-        val detailPaint=Paint(p).apply{ textSize=8f; textAlign=Paint.Align.LEFT }
-        // serial and discount each get their own small line, so neither can straddle the column edge
-        val detailLines=listOf(if(it.serial.isNotEmpty()) "SR/IMEI: ${it.serial}" else "", discNote)
-            .filter{it.isNotBlank()}
-            .flatMap{ wrapLines(it, detailPaint, descW).take(1) }
-        val rh=Math.max(20f, 6f+descLines.size*12f+detailLines.size*10f)
-        val taxRate=it.taxRate.coerceIn(0.0,100.0); val rowInc=it.qty*it.rate; val rowTax=rowInc*(it.discount.coerceIn(0.0,100.0)/100.0); val netInc=rowInc-rowTax; val taxF=1+(taxRate/100); val rowBase=netInc/taxF
-        c.drawText("${i+1}",c1+w1/2,y+14,p); p.textAlign=Paint.Align.LEFT
-        var lineY=y+14f
-        for(l in descLines) { c.drawText(l,c2+5,lineY,p); lineY+=12f }
-        for(l in detailLines) { c.drawText(l,c2+5,lineY+1f,detailPaint); lineY+=10f }
-        p.textAlign=Paint.Align.CENTER; c.drawText(it.hsn,c3+w3/2,y+14,p); c.drawText(qtyText(it.qty),c4+w4/2,y+14,p)
-        c.drawText(fmt(it.rate),c5+w5/2,y+14,p); c.drawText(it.unit,c6+w6/2,y+14,p)
-        p.textAlign=Paint.Align.RIGHT; c.drawText(fmt(it.rate*it.qty),m+w-5,y+14,p); y+=rh
+    val detailPaint=Paint(p).apply{ textSize=8f; textAlign=Paint.Align.LEFT }
+    fun rowLines(it: InvItem): Pair<List<String>, List<String>> {
+        val descLines = wrapLines(it.desc, p, descW).take(3)
+        val discNote = if(it.discount>0.004) "Disc ${fmt(it.discount)}%  -${fmt(it.qty*it.rate*it.discount/100.0)}" else ""
+        val detailLines = listOf(if(it.serial.isNotEmpty()) "SR/IMEI: ${it.serial}" else "", discNote)
+            .filter{it.isNotBlank()}.flatMap{ wrapLines(it, detailPaint, descW).take(1) }
+        return descLines to detailLines
     }
+    fun rowHeight(it: InvItem): Float {
+        val (d, det) = rowLines(it)
+        return Math.max(20f, 6f + d.size*12f + det.size*10f)
+    }
+    val rowHeights = items.map { rowHeight(it) }
+    val totalsRowH = 18f; val totalsBottom = 700f
+    var totalsRowCount = 2
+    if(calc.itemDiscount + calc.billDiscount > 0.004) totalsRowCount++
+    totalsRowCount += if(calc.interState) 1 else 2
+    if(Math.abs(calc.roundOff) >= 0.005) totalsRowCount++
+    val limitLast = totalsBottom - (totalsRowCount*totalsRowH + 26f) - 6f
+    val limitMid = m + h - 40f
+    // work out how the rows fall across pages before drawing anything
+    val pages = mutableListOf<MutableList<Int>>()
+    var idx = 0
+    var firstPage = true
+    while(idx < items.size) {
+        val top = if(firstPage) tTop+hH else m+50f+hH
+        var rest = 0f
+        for(k in idx until items.size) rest += rowHeights[k]
+        val limit = if(top + rest <= limitLast) limitLast else limitMid
+        val pg = mutableListOf<Int>()
+        var used = 0f
+        while(idx < items.size && (pg.isEmpty() || top + used + rowHeights[idx] <= limit)) {
+            pg.add(idx); used += rowHeights[idx]; idx++
+        }
+        pages.add(pg); firstPage = false
+    }
+    if(pages.isEmpty()) pages.add(mutableListOf())
+    // The greedy fill can leave the last page taller than the space above the totals block.
+    // Move the overflowing tail down to a fresh page until every page fits.
+    while(pages.isNotEmpty()) {
+        val li = pages.size - 1
+        val topL = if(li == 0) tTop+hH else m+50f+hH
+        var used = 0f
+        val keep = mutableListOf<Int>(); val move = mutableListOf<Int>()
+        for(k in pages[li]) {
+            if(topL + used + rowHeights[k] <= limitLast) { keep.add(k); used += rowHeights[k] } else move.add(k)
+        }
+        if(move.isEmpty()) break
+        if(keep.isEmpty()) {
+            keep.add(move.removeAt(0))
+            if(move.isEmpty()) { pages[li] = keep; break }
+        }
+        pages[li] = keep
+        pages.add(move)
+    }
+    val totalPages = pages.size
+    var pageNo = 1
+    var y = tTop+hH
+    var tableTop = tTop
+    for(pgIdx in pages.indices) {
+        if(pgIdx > 0) {
+            c.drawLine(m,y,m+w,y,bp)
+            p.textSize=8f; p.isFakeBoldText=false; p.textAlign=Paint.Align.RIGHT
+            c.drawText("Page $pageNo of $totalPages", m+w-5, m+h+15, p)
+            doc.finishPage(page)
+            pageNo++
+            page = doc.startPage(PdfDocument.PageInfo.Builder(595, 842, pageNo).create())
+            c = page.canvas
+            c.drawRect(m, m, m+w, m+h, bp)
+            p.isFakeBoldText=true; p.textAlign=Paint.Align.CENTER; p.textSize=14f
+            c.drawText(if(isQuote) "QUOTATION" else "TAX INVOICE", midX, m+15, p)
+            c.drawLine(m, m+20, m+w, m+20, bp)
+            p.isFakeBoldText=false; p.textSize=9f; p.textAlign=Paint.Align.LEFT
+            c.drawText("Continued  \u00b7  No: $invNo  \u00b7  $date", m+5, m+36, p)
+            tableTop = m+50f
+        }
+        c.drawLine(m,tableTop,m+w,tableTop,bp); c.drawLine(m,tableTop+hH,m+w,tableTop+hH,bp)
+        vLine(tableTop,tableTop+hH)
+        p.isFakeBoldText=true; p.textAlign=Paint.Align.CENTER; p.textSize=10f
+        c.drawText("SI",c1+w1/2,tableTop+14,p); c.drawText("Desc",c2+w2/2,tableTop+14,p); c.drawText("HSN",c3+w3/2,tableTop+14,p)
+        c.drawText("Qty",c4+w4/2,tableTop+14,p); c.drawText("Rate Incl.",c5+w5/2,tableTop+14,p); c.drawText("Per",c6+w6/2,tableTop+14,p); c.drawText("Amt",c7+w7/2,tableTop+14,p)
+        p.isFakeBoldText=false
+        y = tableTop+hH
+        for(i in pages[pgIdx]) {
+            val it = items[i]
+            val (descLines, detailLines) = rowLines(it)
+            c.drawText("${i+1}",c1+w1/2,y+14,p); p.textAlign=Paint.Align.LEFT
+            var lineY=y+14f
+            for(l in descLines) { c.drawText(l,c2+5,lineY,p); lineY+=12f }
+            for(l in detailLines) { c.drawText(l,c2+5,lineY+1f,detailPaint); lineY+=10f }
+            p.textAlign=Paint.Align.CENTER; c.drawText(it.hsn,c3+w3/2,y+14,p); c.drawText(qtyText(it.qty),c4+w4/2,y+14,p)
+            c.drawText(fmt(it.rate),c5+w5/2,y+14,p); c.drawText(it.unit,c6+w6/2,y+14,p)
+            p.textAlign=Paint.Align.RIGHT; c.drawText(fmt(it.rate*it.qty),m+w-5,y+14,p)
+            y += rowHeights[i]
+        }
+    }
+    c.drawLine(m,y,m+w,y,bp)
+    p.textSize=8f; p.isFakeBoldText=false; p.textAlign=Paint.Align.RIGHT
+    c.drawText("Page $pageNo of $totalPages", m+w-5, m+h+15, p)
     // Totals block grows upward from a fixed bottom line, so the extra rows a GST bill
     // needs (discount, IGST, round-off, payment) can never push into the declaration area.
-    val tX=c7; val rowH=18f; val totalsBottom=700f
+    val tX=c7; val rowH=totalsRowH
     val totalRows=mutableListOf<Pair<String,String>>()
     totalRows.add("Gross Value" to fmt(calc.gross))
     val totalDiscount=calc.itemDiscount+calc.billDiscount
@@ -1310,7 +1387,7 @@ fun createPdf(ctx: Context, isQuote: Boolean, invNo: String, date: String, payMo
     if(Math.abs(calc.roundOff)>=0.005) totalRows.add("Round Off" to (if(calc.roundOff>0) "+" else "")+fmt(calc.roundOff))
     val totalsH=totalRows.size*rowH+26f
     val fTop=totalsBottom-totalsH
-    vLine(tTop+hH,fTop); c.drawLine(m,fTop,m+w,fTop,bp)
+    c.drawLine(m,fTop,m+w,fTop,bp)
     p.textAlign=Paint.Align.RIGHT; p.textSize=10f; p.isFakeBoldText=false
     var ry=fTop
     for((l,v) in totalRows) {
