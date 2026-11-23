@@ -448,19 +448,19 @@ fun createPdf(ctx: Context, isQuote: Boolean, invNo: String, date: String, payMo
     // Totals block grows upward from a fixed bottom line, so the extra rows a GST bill
     // needs (discount, IGST, round-off, payment) can never push into the declaration area.
     val tX=c7; val rowH=18f; val totalsBottom=700f
-    val rows=mutableListOf<Pair<String,String>>()
-    rows.add("Taxable Value" to fmt(calc.taxable))
-    if(calc.itemDiscount>0.004) rows.add("Item Discount" to "-"+fmt(calc.itemDiscount))
-    if(calc.billDiscount>0.004) rows.add("Bill Discount" to "-"+fmt(calc.billDiscount))
-    if(calc.interState) rows.add("IGST" to fmt(calc.igst))
-    else { rows.add("CGST" to fmt(calc.cgst)); rows.add("SGST" to fmt(calc.sgst)) }
-    if(Math.abs(calc.roundOff)>=0.005) rows.add("Round Off" to (if(calc.roundOff>0) "+" else "")+fmt(calc.roundOff))
-    val totalsH=rows.size*rowH+26f
+    val totalRows=mutableListOf<Pair<String,String>>()
+    totalRows.add("Taxable Value" to fmt(calc.taxable))
+    if(calc.itemDiscount>0.004) totalRows.add("Item Discount" to "-"+fmt(calc.itemDiscount))
+    if(calc.billDiscount>0.004) totalRows.add("Bill Discount" to "-"+fmt(calc.billDiscount))
+    if(calc.interState) totalRows.add("IGST" to fmt(calc.igst))
+    else { totalRows.add("CGST" to fmt(calc.cgst)); totalRows.add("SGST" to fmt(calc.sgst)) }
+    if(Math.abs(calc.roundOff)>=0.005) totalRows.add("Round Off" to (if(calc.roundOff>0) "+" else "")+fmt(calc.roundOff))
+    val totalsH=totalRows.size*rowH+26f
     val fTop=totalsBottom-totalsH
     vLine(tTop+hH,fTop); c.drawLine(m,fTop,m+w,fTop,bp)
     p.textAlign=Paint.Align.RIGHT; p.textSize=10f; p.isFakeBoldText=false
     var ry=fTop
-    for((l,v) in rows) {
+    for((l,v) in totalRows) {
         c.drawText(l,tX-10,ry+13,p); c.drawText(v,m+w-5,ry+13,p)
         c.drawLine(tX,ry,tX,ry+rowH,bp); c.drawLine(tX,ry+rowH,m+w,ry+rowH,bp); ry+=rowH
     }
