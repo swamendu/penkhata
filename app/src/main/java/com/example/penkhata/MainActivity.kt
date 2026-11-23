@@ -54,7 +54,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "2.0 \u00b7 iteration 7"
+const val APP_VERSION = "2.1 \u00b7 iteration 8"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0)
 val InvItemListSaver: Saver<List<InvItem>, String> = Saver(
@@ -504,27 +504,103 @@ fun InvoiceScreen(isQuote: Boolean) {
 }
 @Composable fun GSTReportScreen() {
     val ctx = LocalContext.current
-    // Reading every saved invoice on the main thread made this tab stutter; load on IO.
-    val d by produceState(initialValue = emptyMap<String, String>(), ctx) {
-        value = withContext(Dispatchers.IO) { loadGstData(ctx) }
+    val scope = rememberCoroutineScope()
+    var offset by rememberSaveable { mutableStateOf(0) }
+    var reload by remember { mutableStateOf(0) }
+    val invoices by produceState(initialValue = emptyList<InvoiceRec>(), reload) {
+        value = withContext(Dispatchers.IO) { loadInvoices(ctx) }
     }
-    Column(Modifier.padding(16.dp)) {
-        Text("GST DASHBOARD", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-        Card(Modifier.padding(vertical = 10.dp)) {
-            Column(Modifier.padding(16.dp)) {
-                Text("Summary", fontWeight = FontWeight.Bold)
-                Divider(Modifier.padding(vertical = 5.dp))
-                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Sales:"); Text("\u20b9${d["total"] ?: "0.00"}") }
-                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Tax:"); Text("\u20b9${d["tax"] ?: "0.00"}") }
-                val sk = (d["skipped"] ?: "0").toIntOrNull() ?: 0
-                if (sk > 0) {
-                    Spacer(Modifier.height(8.dp))
-                    Text("$sk invoice file(s) could not be read and are left out of these totals.", fontSize = 10.sp, color = Color.Red)
+    val expenses by produceState(initialValue = emptyList<Expense>(), reload) {
+        value = withContext(Dispatchers.IO) { loadExpenses(ctx) }
+    }
+    var expNote by rememberSaveable { mutableStateOf("") }
+    var expAmount by rememberSaveable { mutableStateOf("") }
+    val (startMs, endMs) = monthRange(offset)
+    val monthInv = invoices.filter { it.whenMs in startMs until endMs }.sortedBy { it.whenMs }
+    val monthExp = expenses.filter { it.ms in startMs until endMs }
+    val grossSales = monthInv.sumOf { it.total }
+    val taxable = monthInv.sumOf { it.taxable }
+    val cgst = monthInv.sumOf { it.cgst }
+    val sgst = monthInv.sumOf { it.sgst }
+    val igst = monthInv.sumOf { it.igst }
+    val totalTax = monthInv.sumOf { it.tax }
+    val profit = monthInv.sumOf { it.profit }
+    val expenseTotal = monthExp.sumOf { it.amount }
+    val b2b = monthInv.filter { it.buyerGst.isNotBlank() }
+    val b2c = monthInv.filter { it.buyerGst.isBlank() }
+    val rateBuckets = mutableMapOf<Double, Pair<Double, Double>>()
+    monthInv.forEach { rec -> rec.rates.forEach { (r, v) ->
+        val prev = rateBuckets[r] ?: (0.0 to 0.0)
+        rateBuckets[r] = (prev.first + v.first) to (prev.second + v.second)
+    } }
+    val dayTotals = monthInv.groupBy { SimpleDateFormat("dd", Locale.ENGLISH).format(Date(it.whenMs)) }.toSortedMap()
+
+    Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
+        Text("REPORTS", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+        Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = { offset -= 1 }) { Text("\u2039  Prev") }
+            Text(monthLabel(offset), fontWeight = FontWeight.Bold)
+            TextButton(enabled = offset < 0, onClick = { offset += 1 }) { Text("Next  \u203a") }
+        }
+        Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(16.dp)) {
+            Text("Month summary", fontWeight = FontWeight.Bold)
+            Divider(Modifier.padding(vertical = 5.dp))
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Bills"); Text("${monthInv.size}") }
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Sales (incl. tax)"); Text("\u20b9${fmt(grossSales)}") }
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Taxable value"); Text("\u20b9${fmt(taxable)}") }
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("CGST"); Text("\u20b9${fmt(cgst)}") }
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("SGST"); Text("\u20b9${fmt(sgst)}") }
+            if(igst > 0.004) Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("IGST"); Text("\u20b9${fmt(igst)}") }
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Total tax", fontWeight = FontWeight.Bold); Text("\u20b9${fmt(totalTax)}", fontWeight = FontWeight.Bold) }
+        }}
+        Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(16.dp)) {
+            Text("B2B / B2C", fontWeight = FontWeight.Bold)
+            Divider(Modifier.padding(vertical = 5.dp))
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("B2B (buyer GSTIN)"); Text("${b2b.size} bills  \u20b9${fmt(b2b.sumOf { it.total })}") }
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("B2C"); Text("${b2c.size} bills  \u20b9${fmt(b2c.sumOf { it.total })}") }
+        }}
+        if(rateBuckets.isNotEmpty()) Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(16.dp)) {
+            Text("Rate-wise", fontWeight = FontWeight.Bold)
+            Divider(Modifier.padding(vertical = 5.dp))
+            rateBuckets.toSortedMap().forEach { (rate, v) ->
+                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
+                    Text("GST ${fmt(rate)}%")
+                    Text("\u20b9${fmt(v.first)}  tax \u20b9${fmt(v.second)}")
                 }
             }
-        }
+        }}
+        Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(16.dp)) {
+            Text("Profit & expenses", fontWeight = FontWeight.Bold)
+            Divider(Modifier.padding(vertical = 5.dp))
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Gross profit (taxable - cost)"); Text("\u20b9${fmt(profit)}") }
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Expenses"); Text("\u20b9${fmt(expenseTotal)}") }
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Net", fontWeight = FontWeight.Bold); Text("\u20b9${fmt(profit - expenseTotal)}", fontWeight = FontWeight.Bold) }
+            Spacer(Modifier.height(8.dp))
+            Row { OutlinedTextField(expNote, {expNote=it}, label={Text("Expense note")}, modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(expAmount, {expAmount=it}, label={Text("\u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.width(90.dp)) }
+            Button(onClick = {
+                val amt = expAmount.toDoubleOrNull() ?: 0.0
+                if(expNote.isNotBlank() && amt > 0.0) {
+                    scope.launch {
+                        withContext(Dispatchers.IO) { saveExpense(ctx, expNote.trim(), amt) }
+                        expNote = ""; expAmount = ""; reload++
+                    }
+                }
+            }, modifier = Modifier.fillMaxWidth().padding(top = 5.dp)) { Text("ADD EXPENSE") }
+        }}
+        if(dayTotals.isNotEmpty()) Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(16.dp)) {
+            Text("Day book", fontWeight = FontWeight.Bold)
+            Divider(Modifier.padding(vertical = 5.dp))
+            dayTotals.forEach { (day, list) ->
+                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
+                    Text("Day $day  (${list.size} bill${if(list.size == 1) "" else "s"})")
+                    Text("\u20b9${fmt(list.sumOf { it.total })}")
+                }
+            }
+        }}
+        Spacer(Modifier.height(40.dp))
     }
 }
+
 @Composable fun FileHistoryScreen() { val ctx=LocalContext.current; val d=ctx.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS); var f by remember{mutableStateOf(d?.listFiles()?.filter{it.extension=="pdf"}?.sortedByDescending{it.lastModified()}?:emptyList())}; LazyColumn(Modifier.padding(16.dp)){items(f){fl->Row(Modifier.fillMaxWidth().padding(8.dp),verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f).clickable{ctx.startActivity(Intent(Intent.ACTION_VIEW).apply{setDataAndType(FileProvider.getUriForFile(ctx,"${ctx.packageName}.provider",fl),"application/pdf");addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)})}){Text(fl.name,fontWeight=FontWeight.Bold);Text(SimpleDateFormat("dd MMM HH:mm").format(Date(fl.lastModified())),fontSize=10.sp)}; IconButton(onClick={if(fl.delete())f=d?.listFiles()?.filter{it.extension=="pdf"}?.sortedByDescending{it.lastModified()}?:emptyList()}){Icon(Icons.Default.Delete,"Del",tint=Color.Red)}};Divider()}} }
 @Composable fun SettingsScreen(currentPin: String, onPinSave: (String)->Unit) {
     val ctx=LocalContext.current
@@ -554,6 +630,62 @@ fun InvoiceScreen(isQuote: Boolean) {
     var sName by remember{mutableStateOf(prefs.getString("sName","")?:"")}; var sState by remember{mutableStateOf(prefs.getString("sState","21")?:"21")}; var sPrefix by remember{mutableStateOf(prefs.getString("sPrefix","INV")?:"INV")}; var sAddr1 by remember{mutableStateOf(prefs.getString("sAddr1","")?:(prefs.getString("sAddr","")?:"").lineSequence().firstOrNull()?.trim()?:"")}; var sAddr2 by remember{mutableStateOf(prefs.getString("sAddr2","")?:(prefs.getString("sAddr","")?:"").lineSequence().drop(1).joinToString(" ").trim())}; var sPhone by remember{mutableStateOf(prefs.getString("sPhone","")?:"")}; var sEmail by remember{mutableStateOf(prefs.getString("sEmail","")?:"")}; var sLandmark by remember{mutableStateOf(prefs.getString("sLandmark","")?:"")}; var sPincode by remember{mutableStateOf(prefs.getString("sPincode","")?:"")}; var sGst by remember{mutableStateOf(prefs.getString("sGst","")?:"")}; var sBank by remember{mutableStateOf(prefs.getString("sBank","")?:"")}; var sIfsc by remember{mutableStateOf(prefs.getString("sIfsc","")?:"")}; var sJuris by remember{mutableStateOf(prefs.getString("sJuris","")?:"")}; var defTax by remember{mutableStateOf(prefs.getString("defTax","18")?:"18")}; var newPin by remember{mutableStateOf(currentPin)}; Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())){Text("SETTINGS",fontSize=24.sp,fontWeight=FontWeight.Bold); OutlinedTextField(newPin,{newPin=it},label={Text("Set Login PIN")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.NumberPassword),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sName,{sName=it},label={Text("Firm Name")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sState,{sState=it},label={Text("My State Code (GST, e.g. 21)")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sPrefix,{sPrefix=it},label={Text("Invoice Prefix")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sAddr1,{sAddr1=it},label={Text("Address Line 1")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sAddr2,{sAddr2=it},label={Text("Address Line 2")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sPhone,{sPhone=it},label={Text("Phone")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Phone),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sEmail,{sEmail=it},label={Text("Email")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Email),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sLandmark,{sLandmark=it},label={Text("Landmark")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sPincode,{sPincode=it},label={Text("Pincode")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sGst,{sGst=it},label={Text("GSTIN")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sBank,{sBank=it},label={Text("Bank Name & Acc")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sIfsc,{sIfsc=it},label={Text("IFSC")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sJuris,{sJuris=it},label={Text("Jurisdiction")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(defTax,{defTax=it},label={Text("Default Tax %")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),modifier=Modifier.fillMaxWidth()); Text("PenKhata "+APP_VERSION, fontSize=10.sp, color=Color.Gray, modifier=Modifier.padding(top=8.dp)); Button(onClick={prefs.edit().putString("sName",sName).putString("sState",sState).putString("sPrefix",sPrefix).putString("sAddr1",sAddr1).putString("sAddr2",sAddr2).putString("sPhone",sPhone).putString("sEmail",sEmail).putString("sLandmark",sLandmark).putString("sPincode",sPincode).putString("sGst",sGst).putString("sBank",sBank).putString("sIfsc",sIfsc).putString("sJuris",sJuris).putString("defTax",defTax).apply(); onPinSave(newPin); Toast.makeText(ctx,"Saved",Toast.LENGTH_SHORT).show()},modifier=Modifier.fillMaxWidth()){Text("SAVE")}; Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Backup & Restore", fontWeight=FontWeight.Bold); Text("Saves settings, invoices, ledger and the PDF bills to one file you choose, so a reinstall does not mean re-typing everything. The app PIN is not included.", fontSize=10.sp); Spacer(Modifier.height(8.dp)); Button(onClick={ backupLauncher.launch("penkhata-backup-"+SimpleDateFormat("yyyyMMdd-HHmm", Locale.ENGLISH).format(Date())+".zip") }, modifier=Modifier.fillMaxWidth()){ Text("BACKUP DATA") }; Spacer(Modifier.height(6.dp)); Button(onClick={ restoreLauncher.launch(arrayOf("application/json","text/plain","*/*")) }, modifier=Modifier.fillMaxWidth()){ Text("RESTORE DATA") } }}; Spacer(Modifier.height(60.dp))} }
 
 // --- LOGIC ---
+data class InvoiceRec(val invNo: String, val date: String, val whenMs: Long, val buyer: String, val buyerGst: String,
+                      val total: Double, val taxable: Double, val cgst: Double, val sgst: Double, val igst: Double,
+                      val tax: Double, val cogs: Double, val profit: Double, val interState: Boolean,
+                      val rates: Map<Double, Pair<Double, Double>>)
+data class Expense(val id: Long, val ms: Long, val note: String, val amount: Double)
+
+fun loadInvoices(ctx: Context): List<InvoiceRec> {
+    val out = mutableListOf<InvoiceRec>()
+    ctx.filesDir.listFiles()?.filter { it.name.startsWith("inv_") }?.forEach { f ->
+        val o = try { JSONObject(f.readText()) } catch(e: Exception) { null } ?: return@forEach
+        // older records have no timestamp: the file name carries the epoch millis
+        val ms = if(o.has("ms")) o.optLong("ms") else (Regex("\\d+").find(f.name.removePrefix("inv_"))?.value?.toLongOrNull() ?: 0L)
+        val rates = mutableMapOf<Double, Pair<Double, Double>>()
+        o.optJSONArray("lines")?.let { arr ->
+            for(i in 0 until arr.length()) {
+                val it2 = arr.optJSONObject(i) ?: continue
+                val r = it2.optDouble("taxRate", 0.0)
+                val prev = rates[r] ?: (0.0 to 0.0)
+                rates[r] = (prev.first + it2.optDouble("taxable", 0.0)) to (prev.second + it2.optDouble("tax", 0.0))
+            }
+        }
+        out.add(InvoiceRec(o.optString("inv"), o.optString("d"), ms, o.optString("buyer"), o.optString("bgst"),
+            o.optDouble("total", 0.0), o.optDouble("taxable", 0.0), o.optDouble("cgst", 0.0), o.optDouble("sgst", 0.0),
+            o.optDouble("igst", 0.0), o.optDouble("tax", 0.0), o.optDouble("cogs", 0.0), o.optDouble("profit", 0.0),
+            o.optBoolean("interState", false), rates))
+    }
+    return out
+}
+fun loadExpenses(ctx: Context): List<Expense> {
+    val out = mutableListOf<Expense>()
+    ctx.filesDir.listFiles()?.filter { it.name.startsWith("exp_") }?.forEach { f ->
+        val o = try { JSONObject(f.readText()) } catch(e: Exception) { null } ?: return@forEach
+        out.add(Expense(o.optLong("id"), o.optLong("ms"), o.optString("note"), o.optDouble("amount", 0.0)))
+    }
+    return out
+}
+fun saveExpense(ctx: Context, note: String, amount: Double) {
+    val o = JSONObject()
+    val ms = System.currentTimeMillis()
+    o.put("id", ms); o.put("ms", ms); o.put("note", note); o.put("amount", amount)
+    writeFileAtomic(File(ctx.filesDir, "exp_${ms}.json"), o.toString())
+}
+fun monthRange(offset: Int): Pair<Long, Long> {
+    val c = Calendar.getInstance()
+    c.set(Calendar.DAY_OF_MONTH, 1); c.set(Calendar.HOUR_OF_DAY, 0); c.set(Calendar.MINUTE, 0); c.set(Calendar.SECOND, 0); c.set(Calendar.MILLISECOND, 0)
+    c.add(Calendar.MONTH, offset)
+    val start = c.timeInMillis
+    c.add(Calendar.MONTH, 1)
+    return start to c.timeInMillis
+}
+fun monthLabel(offset: Int): String {
+    val c = Calendar.getInstance()
+    c.set(Calendar.DAY_OF_MONTH, 1); c.add(Calendar.MONTH, offset)
+    return SimpleDateFormat("MMM yyyy", Locale.ENGLISH).format(c.time)
+}
+
 fun loadStock(ctx: Context): List<StockEntry> {
     val f = File(ctx.filesDir, "stock.json")
     if(!f.exists()) return emptyList()
@@ -723,10 +855,24 @@ fun saveInvoiceData(ctx: Context, invNo: String, bName: String, bGst: String, ca
     var cogs = 0.0
     for(i in items) cogs += stockCostFor(stock, i) * i.qty
     val j=JSONObject()
-    j.put("d",Date().toString()); j.put("inv",invNo); j.put("buyer",bName); j.put("bgst",bGst)
+    j.put("d",Date().toString()); j.put("ms",System.currentTimeMillis()); j.put("inv",invNo); j.put("buyer",bName); j.put("bgst",bGst)
     j.put("total",calc.grand); j.put("taxable",calc.taxable); j.put("tax",calc.totalTax)
     j.put("cgst",calc.cgst); j.put("sgst",calc.sgst); j.put("igst",calc.igst); j.put("interState",calc.interState)
     j.put("cogs",cogs); j.put("profit",calc.taxable-cogs)
+    // per-line figures, scaled by the bill discount, so rate-wise summaries add up
+    var baseSum = 0.0
+    for(i in items) { val g=i.qty*i.rate; val net=g-(g*(i.discount.coerceIn(0.0,100.0)/100.0)); baseSum += net/(1+i.taxRate.coerceIn(0.0,100.0)/100.0) }
+    val keep = if(baseSum > 0.0) calc.taxable / baseSum else 1.0
+    val lines = JSONArray()
+    for(i in items) {
+        val g = i.qty*i.rate; val net = g - (g*(i.discount.coerceIn(0.0,100.0)/100.0))
+        val tr = i.taxRate.coerceIn(0.0,100.0); val base = net/(1+tr/100.0)
+        val o = JSONObject()
+        o.put("desc", i.desc); o.put("hsn", i.hsn); o.put("qty", i.qty); o.put("rate", i.rate)
+        o.put("taxRate", tr); o.put("taxable", base*keep); o.put("tax", (net-base)*keep)
+        lines.put(o)
+    }
+    j.put("lines", lines)
     writeFileAtomic(File(ctx.filesDir,"inv_${System.currentTimeMillis()}.json"), j.toString())
 }
 fun saveLedgerEntry(ctx: Context, e: LedgerEntry) { val j=JSONObject(); j.put("date",e.date); j.put("party",e.party); j.put("type",e.type); j.put("amt",e.amount); j.put("desc",e.desc); writeFileAtomic(File(ctx.filesDir,"led_${System.currentTimeMillis()}.json"), j.toString()) }
