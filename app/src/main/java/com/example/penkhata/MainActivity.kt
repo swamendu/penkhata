@@ -20,6 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
@@ -32,6 +33,9 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -168,6 +172,9 @@ fun InvoiceScreen(isQuote: Boolean) {
     var cash by rememberSaveable { mutableStateOf("") }; var upi by rememberSaveable { mutableStateOf("") }
     var card by rememberSaveable { mutableStateOf("") }; var finance by rememberSaveable { mutableStateOf("") }
 
+    val scope = rememberCoroutineScope()
+    var busy by remember { mutableStateOf(false) }
+
     fun clearBill() {
         invNo = nextInvoiceNo(prefs)
         bName=""; bAddr1=""; bAddr2=""; bLandmark=""; bPhone=""; bGst=""; bState=""
@@ -239,37 +246,100 @@ fun InvoiceScreen(isQuote: Boolean) {
             if(Math.abs(calc.balance)>0.004) Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Balance Due", color=Color.Red); Text("\u20b9${fmt(calc.balance)}", color=Color.Red) }
         }}
         Spacer(Modifier.height(10.dp))
-        Button(onClick={
+        Button(enabled = !busy, onClick={
             val sName = prefs.getString("sName", "") ?: ""
             if(sName.isEmpty()) Toast.makeText(ctx, "Setup Settings First!", Toast.LENGTH_SHORT).show()
             else if(items.isEmpty()) Toast.makeText(ctx, "Add at least one item", Toast.LENGTH_SHORT).show()
             else {
-                if(!isQuote) saveInvoiceData(ctx, invNo, bName, bGst, calc)
-                createPdf(ctx, isQuote, invNo, date, payMode, delNote, sName,
+                // Snapshot everything now: the form is cleared once the PDF is written.
+                val snapInv = invNo; val snapDate = date; val snapPay = payMode; val snapNote = delNote
+                val snapItems = items; val snapCalc = calc
+                val snapBuyer = listOf(bName, bAddr1, bAddr2, bLandmark, bPhone, bGst, bState)
+                val snapFinance = finance
+                val seller = listOf(
+                    sName,
                     listOf(prefs.getString("sAddr1","")?:"", prefs.getString("sAddr2","")?:"").filter{it.isNotBlank()}.joinToString("\n"),
                     prefs.getString("sPhone","")?:"", prefs.getString("sEmail","")?:"", prefs.getString("sLandmark","")?:"",
-                    prefs.getString("sGst","")?:"", prefs.getString("sBank","")?:"", prefs.getString("sIfsc","")?:"", prefs.getString("sJuris","")?:"",
-                    bName, bAddr1, bAddr2, bLandmark, bPhone, bGst, bState, items, calc, finance)
-                if(!isQuote) { bumpInvoiceNo(prefs); clearBill() }
+                    prefs.getString("sGst","")?:"", prefs.getString("sBank","")?:"", prefs.getString("sIfsc","")?:"", prefs.getString("sJuris","")?:"" )
+                busy = true
+                scope.launch {
+                    val file = try {
+                        withContext(Dispatchers.IO) {
+                            if(!isQuote) saveInvoiceData(ctx, snapInv, snapBuyer[0], snapBuyer[5], snapCalc)
+                            createPdf(ctx, isQuote, snapInv, snapDate, snapPay, snapNote, seller[0], seller[1], seller[2], seller[3], seller[4],
+                                seller[5], seller[6], seller[7], seller[8], snapBuyer[0], snapBuyer[1], snapBuyer[2], snapBuyer[3],
+                                snapBuyer[4], snapBuyer[5], snapBuyer[6], snapItems, snapCalc, snapFinance)
+                        }
+                    } catch(e: Exception) {
+                        null
+                    }
+                    busy = false
+                    if(file == null) { Toast.makeText(ctx, "Could not write the PDF", Toast.LENGTH_LONG).show() }
+                    else {
+                        if(!isQuote) { bumpInvoiceNo(prefs); clearBill() }
+                        openPdf(ctx, file)
+                    }
+                }
             }
-        }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor = Color(0xFF2E7D32))) { Text(if(isQuote) "GENERATE QUOTE" else "GENERATE PDF") }
+        }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor = Color(0xFF2E7D32))) { Text(if(busy) "GENERATING..." else if(isQuote) "GENERATE QUOTE" else "GENERATE PDF") }
         Spacer(Modifier.height(60.dp))
     }
 }
 
 // --- SECONDARY SCREENS ---
-@Composable fun LedgerScreen() { val ctx=LocalContext.current; var p by remember{mutableStateOf("")}; var t by remember{mutableStateOf("DEBIT")}; var a by remember{mutableStateOf("")}; var d by remember{mutableStateOf("")}; var e by remember{mutableStateOf(loadLedger(ctx))}; Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())){ Text("LEDGER",fontSize=24.sp,fontWeight=FontWeight.Bold); Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ OutlinedTextField(p,{p=it},label={Text("Party")},modifier=Modifier.fillMaxWidth()); Row{Button(onClick={t="DEBIT"},colors=ButtonDefaults.buttonColors(containerColor=if(t=="DEBIT")Color.Red else Color.Gray),modifier=Modifier.weight(1f)){Text("DEBIT")}; Spacer(Modifier.width(5.dp)); Button(onClick={t="CREDIT"},colors=ButtonDefaults.buttonColors(containerColor=if(t=="CREDIT")Color.Green else Color.Gray),modifier=Modifier.weight(1f)){Text("CREDIT")}}; OutlinedTextField(a,{a=it},label={Text("Amount")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),modifier=Modifier.fillMaxWidth()); OutlinedTextField(d,{d=it},label={Text("Note")},modifier=Modifier.fillMaxWidth()); Button(onClick={if(p.isNotEmpty()&&a.isNotEmpty()){val en=LedgerEntry(System.currentTimeMillis(),SimpleDateFormat("dd-MM").format(Date()),p,t,a.toDouble(),d); saveLedgerEntry(ctx,en); e=loadLedger(ctx); p="";a=""}},modifier=Modifier.fillMaxWidth()){Text("ADD")}}}; e.reversed().forEach{Row(Modifier.padding(8.dp).fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){Column{Text(it.party,fontWeight=FontWeight.Bold);Text(it.desc,fontSize=10.sp)}; Column(horizontalAlignment=Alignment.End){Text(it.type,color=if(it.type=="DEBIT")Color.Red else Color.Green,fontSize=10.sp);Text("₹${it.amount}",fontWeight=FontWeight.Bold)}};Divider()}; Spacer(Modifier.height(50.dp))}}
+@Composable fun LedgerScreen() {
+    val ctx = LocalContext.current
+    var p by rememberSaveable { mutableStateOf("") }; var t by rememberSaveable { mutableStateOf("DEBIT") }
+    var a by rememberSaveable { mutableStateOf("") }; var d by rememberSaveable { mutableStateOf("") }
+    var reload by remember { mutableStateOf(0) }
+    val entries by produceState(initialValue = emptyList<LedgerEntry>(), reload) {
+        value = withContext(Dispatchers.IO) { loadLedger(ctx) }
+    }
+    Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
+        Text("LEDGER", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+        Card(Modifier.padding(vertical = 10.dp)) { Column(Modifier.padding(10.dp)) {
+            OutlinedTextField(p, {p=it}, label={Text("Party")}, modifier=Modifier.fillMaxWidth())
+            Row {
+                Button(onClick={t="DEBIT"}, colors=ButtonDefaults.buttonColors(containerColor=if(t=="DEBIT")Color.Red else Color.Gray), modifier=Modifier.weight(1f)){Text("DEBIT")}
+                Spacer(Modifier.width(5.dp))
+                Button(onClick={t="CREDIT"}, colors=ButtonDefaults.buttonColors(containerColor=if(t=="CREDIT")Color.Green else Color.Gray), modifier=Modifier.weight(1f)){Text("CREDIT")}
+            }
+            OutlinedTextField(a, {a=it}, label={Text("Amount")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.fillMaxWidth())
+            OutlinedTextField(d, {d=it}, label={Text("Note")}, modifier=Modifier.fillMaxWidth())
+            Button(onClick={
+                if(p.isNotEmpty() && a.isNotEmpty()) {
+                    val en = LedgerEntry(System.currentTimeMillis(), SimpleDateFormat("dd-MM", Locale.ENGLISH).format(Date()), p, t, a.toDoubleOrNull() ?: 0.0, d)
+                    saveLedgerEntry(ctx, en); reload++; p=""; a=""
+                }
+            }, modifier=Modifier.fillMaxWidth()) { Text("ADD") }
+        }}
+        entries.reversed().forEach {
+            Row(Modifier.padding(8.dp).fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Column { Text(it.party, fontWeight=FontWeight.Bold); Text(it.desc, fontSize=10.sp) }
+                Column(horizontalAlignment = Alignment.End) {
+                    Text(it.type, color=if(it.type=="DEBIT") Color.Red else Color.Green, fontSize=10.sp)
+                    Text("\u20b9${fmt(it.amount)}", fontWeight=FontWeight.Bold)
+                }
+            }
+            Divider()
+        }
+        Spacer(Modifier.height(50.dp))
+    }
+}
 @Composable fun GSTReportScreen() {
     val ctx = LocalContext.current
-    val d = remember { loadGstData(ctx) }
+    // Reading every saved invoice on the main thread made this tab stutter; load on IO.
+    val d by produceState(initialValue = emptyMap<String, String>(), ctx) {
+        value = withContext(Dispatchers.IO) { loadGstData(ctx) }
+    }
     Column(Modifier.padding(16.dp)) {
         Text("GST DASHBOARD", fontSize = 24.sp, fontWeight = FontWeight.Bold)
         Card(Modifier.padding(vertical = 10.dp)) {
             Column(Modifier.padding(16.dp)) {
                 Text("Summary", fontWeight = FontWeight.Bold)
                 Divider(Modifier.padding(vertical = 5.dp))
-                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Sales:"); Text("₹${d["total"]}") }
-                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Tax:"); Text("₹${d["tax"]}") }
+                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Sales:"); Text("\u20b9${d["total"] ?: "0.00"}") }
+                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Tax:"); Text("\u20b9${d["tax"] ?: "0.00"}") }
                 val sk = (d["skipped"] ?: "0").toIntOrNull() ?: 0
                 if (sk > 0) {
                     Spacer(Modifier.height(8.dp))
@@ -389,7 +459,7 @@ fun createPdf(ctx: Context, isQuote: Boolean, invNo: String, date: String, payMo
               sName: String, sAddr: String, sPhone: String, sEmail: String, sLandmark: String,
               sGst: String, sBank: String, sIfsc: String, sJuris: String,
               bName: String, bAddr1: String, bAddr2: String, bLandmark: String, bPhone: String,
-              bGst: String, bState: String, items: List<InvItem>, calc: BillCalc, finance: String) {
+              bGst: String, bState: String, items: List<InvItem>, calc: BillCalc, finance: String): File {
     val doc = PdfDocument(); val page = doc.startPage(PdfDocument.PageInfo.Builder(595, 842, 1).create())
     val c = page.canvas; val p = Paint(); val bp = Paint().apply{style=Paint.Style.STROKE; strokeWidth=1f}
     val m=20f; val w=555f; val h=800f; val midX=m+w/2
@@ -509,5 +579,16 @@ fun createPdf(ctx: Context, isQuote: Boolean, invNo: String, date: String, payMo
     c.drawText("Computer generated invoice.",midX,m+h+15,p)
     doc.finishPage(page); val n=if(isQuote)"Quote" else "Inv"; val f=File(ctx.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS),"${n}_${System.currentTimeMillis()}.pdf")
     doc.writeTo(FileOutputStream(f)); doc.close()
-    ctx.startActivity(Intent.createChooser(Intent(Intent.ACTION_VIEW).apply{setDataAndType(FileProvider.getUriForFile(ctx,"${ctx.packageName}.provider",f),"application/pdf");addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)},"View"))
+    return f
+}
+// Runs on the main thread; kept out of createPdf so drawing and writing can happen on IO.
+fun openPdf(ctx: Context, f: File) {
+    try {
+        ctx.startActivity(Intent.createChooser(Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(FileProvider.getUriForFile(ctx, "${ctx.packageName}.provider", f), "application/pdf")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }, "View"))
+    } catch(e: Exception) {
+        Toast.makeText(ctx, "Saved to Files, but no PDF viewer is installed", Toast.LENGTH_LONG).show()
+    }
 }
