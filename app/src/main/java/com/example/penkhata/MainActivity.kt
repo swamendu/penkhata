@@ -73,7 +73,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "5.1 · iteration 28"
+const val APP_VERSION = "5.2 · master data"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -227,6 +227,96 @@ fun renamePerson(ctx: Context, id: Long, name: String, role: String, phone: Stri
         db(ctx).writableDatabase.update("people", cv, "id=?", arrayOf(id.toString()))
     } catch(e: Exception) { }
 }
+// ---------------------------------------------------------------- master data
+data class Distributor(val id: Long, val name: String, val gstin: String, val phone: String, val address: String,
+                       val creditLimit: Double, val creditDays: Int, val brands: String, val active: Boolean)
+data class Product(val id: Long, val brand: String, val category: String, val model: String, val hsn: String,
+                   val gstRate: Double, val mrp: Double, val warrantyMonths: Int, val serialised: Boolean)
+
+fun loadBrands(ctx: Context): List<String> {
+    val out = mutableListOf<String>()
+    try { db(ctx).readableDatabase.rawQuery("SELECT name FROM brands ORDER BY name", null).use { c -> while(c.moveToNext()) out.add(c.getString(0) ?: "") } } catch(e: Exception) { }
+    return out
+}
+fun addBrand(ctx: Context, name: String) {
+    val n = name.trim().uppercase(); if(n.isBlank()) return
+    try { db(ctx).writableDatabase.execSQL("INSERT OR IGNORE INTO brands(name) VALUES(?)", arrayOf(n)) } catch(e: Exception) { }
+}
+fun deleteBrand(ctx: Context, name: String) {
+    try { db(ctx).writableDatabase.delete("brands", "name=?", arrayOf(name)) } catch(e: Exception) { }
+}
+fun loadCategories(ctx: Context): List<String> {
+    val out = mutableListOf<String>()
+    try { db(ctx).readableDatabase.rawQuery("SELECT name FROM categories ORDER BY name", null).use { c -> while(c.moveToNext()) out.add(c.getString(0) ?: "") } } catch(e: Exception) { }
+    return out
+}
+fun addCategory(ctx: Context, name: String) {
+    val n = name.trim(); if(n.isBlank()) return
+    try { db(ctx).writableDatabase.execSQL("INSERT OR IGNORE INTO categories(name) VALUES(?)", arrayOf(n)) } catch(e: Exception) { }
+}
+fun deleteCategory(ctx: Context, name: String) {
+    try { db(ctx).writableDatabase.delete("categories", "name=?", arrayOf(name)) } catch(e: Exception) { }
+}
+fun loadDistributors(ctx: Context): List<Distributor> {
+    val out = mutableListOf<Distributor>()
+    try {
+        db(ctx).readableDatabase.rawQuery("SELECT id,name,gstin,phone,address,creditLimit,creditDays,brands,active FROM distributors ORDER BY name", null).use { c ->
+            while(c.moveToNext()) out.add(Distributor(c.getLong(0), c.getString(1) ?: "", c.getString(2) ?: "", c.getString(3) ?: "",
+                c.getString(4) ?: "", c.getDouble(5), c.getInt(6), c.getString(7) ?: "", c.getInt(8) != 0))
+        }
+    } catch(e: Exception) { }
+    return out
+}
+fun saveDistributor(ctx: Context, d: Distributor) {
+    val cv = android.content.ContentValues()
+    if(d.id > 0) cv.put("id", d.id)
+    cv.put("name", d.name); cv.put("gstin", d.gstin); cv.put("phone", d.phone); cv.put("address", d.address)
+    cv.put("creditLimit", d.creditLimit); cv.put("creditDays", d.creditDays); cv.put("brands", d.brands)
+    cv.put("active", if(d.active) 1 else 0)
+    db(ctx).writableDatabase.insertWithOnConflict("distributors", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE)
+}
+fun deleteDistributor(ctx: Context, id: Long) {
+    try { db(ctx).writableDatabase.delete("distributors", "id=?", arrayOf(id.toString())) } catch(e: Exception) { }
+}
+fun loadProducts(ctx: Context): List<Product> {
+    val out = mutableListOf<Product>()
+    try {
+        db(ctx).readableDatabase.rawQuery("SELECT id,brand,category,model,hsn,gstRate,mrp,warrantyMonths,serialised FROM products ORDER BY brand, model", null).use { c ->
+            while(c.moveToNext()) out.add(Product(c.getLong(0), c.getString(1) ?: "", c.getString(2) ?: "", c.getString(3) ?: "",
+                c.getString(4) ?: "", c.getDouble(5), c.getDouble(6), c.getInt(7), c.getInt(8) != 0))
+        }
+    } catch(e: Exception) { }
+    return out
+}
+fun saveProduct(ctx: Context, p: Product) {
+    val cv = android.content.ContentValues()
+    if(p.id > 0) cv.put("id", p.id)
+    cv.put("brand", p.brand); cv.put("category", p.category); cv.put("model", p.model); cv.put("hsn", p.hsn)
+    cv.put("gstRate", p.gstRate); cv.put("mrp", p.mrp); cv.put("warrantyMonths", p.warrantyMonths)
+    cv.put("serialised", if(p.serialised) 1 else 0)
+    db(ctx).writableDatabase.insertWithOnConflict("products", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE)
+}
+// Seed once: the categories this shop sells and the brands it is likely to meet.
+fun seedMasterData(ctx: Context) {
+    try {
+        val cats = listOf("Mobile","AC","TV","Refrigerator","Washing Machine","Inverter","Air Purifier","Water Purifier",
+            "Audio","Camera","Watch","Earbuds","Accessories","Spare Part","Service")
+        val brands = listOf("SAMSUNG","LG","SONY","PANASONIC","WHIRLPOOL","GODREJ","HAIER","BOSCH","IFB","VOLTAS","BLUE STAR",
+            "HITACHI","DAIKIN","LLOYD","MIDEA","ONIDA","SHARP","PHILIPS","BAJAJ","HAVELLS","CROMPTON","ORIENT","V-GUARD",
+            "LUMINOUS","MICROTEK","EXIDE","AMARON","XIAOMI","REALME","ONEPLUS","OPPO","VIVO","IQOO","MOTOROLA","NOKIA",
+            "NOTHING","TECNO","INFINIX","ITEL","LAVA","APPLE","GOOGLE","ASUS","HP","DELL","LENOVO","ACER","CANON","NIKON",
+            "GOPRO","JBL","BOAT","MARSHALL","SENNHEISER","NOISE","FIRE-BOLTT","AMAZFIT","GARMIN","TITAN","FASTRACK","CASIO",
+            "SANDISK","KINGSTON","TRANSCEND","PORTRONICS","AMBRANE","KENT","AQUAGUARD","PUREIT","LIVPURE","ATOMBERG","USHA",
+            "SYMPHONY","KENSTAR")
+        db(ctx).writableDatabase.beginTransaction()
+        try {
+            for(c in cats) db(ctx).writableDatabase.execSQL("INSERT OR IGNORE INTO categories(name) VALUES(?)", arrayOf(c))
+            for(b in brands) db(ctx).writableDatabase.execSQL("INSERT OR IGNORE INTO brands(name) VALUES(?)", arrayOf(b))
+            db(ctx).writableDatabase.setTransactionSuccessful()
+        } finally { db(ctx).writableDatabase.endTransaction() }
+    } catch(e: Exception) { }
+}
+
 fun activeBranchCode(prefs: android.content.SharedPreferences): String = prefs.getString("activeBranch", "") ?: ""
 fun activePerson(prefs: android.content.SharedPreferences): String = prefs.getString("activePerson", "Owner") ?: "Owner"
 fun activeRole(prefs: android.content.SharedPreferences): String = prefs.getString("activeRole", "OWNER") ?: "OWNER"
@@ -325,7 +415,7 @@ fun MainAppScreen() {
     // bumped after a restore or a reset: every screen rebuilds and re-reads its data
     var dataVersion by remember { mutableStateOf(0) }
     LaunchedEffect(Unit) {
-        withContext(Dispatchers.IO) { importJsonIfNeeded(ctx); ensureBranch(ctx) }
+        withContext(Dispatchers.IO) { importJsonIfNeeded(ctx); ensureBranch(ctx); seedMasterData(ctx) }
         dataVersion++
     }
 
@@ -797,6 +887,10 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
     var mrp by rememberSaveable { mutableStateOf("") }; var qty by rememberSaveable { mutableStateOf("1") }
     var supplier by rememberSaveable { mutableStateOf("") }
     var brand by rememberSaveable { mutableStateOf("") }
+    var newBrand by rememberSaveable { mutableStateOf("") }
+    var newCat by rememberSaveable { mutableStateOf("") }
+    var newDist by rememberSaveable { mutableStateOf("") }
+    var newDistLimit by rememberSaveable { mutableStateOf("") }
     var cls by rememberSaveable { mutableStateOf("Mobile") }
     val stockScan = remember { GmsBarcodeScanning.getClient(ctx, GmsBarcodeScannerOptions.Builder().build()) }
     var pendingStockScan by remember { mutableStateOf<File?>(null) }
@@ -832,6 +926,57 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
     Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
         Text("STOCK", fontSize = 24.sp, fontWeight = FontWeight.Bold)
         if(loadingStock) LoadingRow("Reading stock...")
+        Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(12.dp)) {
+            var expanded by rememberSaveable { mutableStateOf(false) }
+            Button(onClick = { expanded = !expanded }, modifier = Modifier.fillMaxWidth()) {
+                Text(if(expanded) "HIDE MASTER DATA" else "MASTER DATA  \u00b7  brands, categories, distributors")
+            }
+            if(expanded) {
+                val brands by produceState(initialValue = emptyList<String>(), reload) { value = withContext(Dispatchers.IO) { loadBrands(ctx) } }
+                val cats by produceState(initialValue = emptyList<String>(), reload) { value = withContext(Dispatchers.IO) { loadCategories(ctx) } }
+                val dists by produceState(initialValue = emptyList<Distributor>(), reload) { value = withContext(Dispatchers.IO) { loadDistributors(ctx) } }
+                Divider(Modifier.padding(vertical = 4.dp))
+                Text("Brands (" + brands.size + ")", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                Text(brands.joinToString("  \u00b7  "), fontSize = 9.sp, color = Color.Gray, maxLines = 6)
+                Row {
+                    OutlinedTextField(newBrand, {newBrand=it}, label={Text("Add brand")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+                    Spacer(Modifier.width(4.dp))
+                    Button(onClick = { scope.launch { withContext(Dispatchers.IO) { addBrand(ctx, newBrand) }; newBrand=""; reload++ } }) { Text("ADD") }
+                }
+                Divider(Modifier.padding(vertical = 4.dp))
+                Text("Categories (" + cats.size + ")", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                Text(cats.joinToString("  \u00b7  "), fontSize = 9.sp, color = Color.Gray, maxLines = 4)
+                Row {
+                    OutlinedTextField(newCat, {newCat=it}, label={Text("Add category")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+                    Spacer(Modifier.width(4.dp))
+                    Button(onClick = { scope.launch { withContext(Dispatchers.IO) { addCategory(ctx, newCat) }; newCat=""; reload++ } }) { Text("ADD") }
+                }
+                Divider(Modifier.padding(vertical = 4.dp))
+                Text("Distributors (" + dists.size + ")", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                dists.forEach { d ->
+                    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(d.name, fontSize = 11.sp, maxLines = 1)
+                            Text("limit \u20b9" + fmt(d.creditLimit) + "  \u00b7  " + d.creditDays + " days" + (if(d.brands.isBlank()) "" else "  \u00b7  " + d.brands), fontSize = 9.sp, color = Color.Gray, maxLines = 1)
+                        }
+                        TextButton(onClick = { scope.launch { withContext(Dispatchers.IO) { deleteDistributor(ctx, d.id) }; reload++ } }) { Text("DELETE", fontSize = 9.sp, color = Color.Red) }
+                    }
+                }
+                Row {
+                    OutlinedTextField(newDist, {newDist=it}, label={Text("Distributor name")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+                    Spacer(Modifier.width(4.dp))
+                    OutlinedTextField(newDistLimit, {newDistLimit=it}, label={Text("Credit \u20b9")}, modifier=Modifier.weight(0.7f), keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+                }
+                Button(onClick = {
+                    if(newDist.isNotBlank()) {
+                        scope.launch {
+                            withContext(Dispatchers.IO) { saveDistributor(ctx, Distributor(0, newDist.trim(), "", "", "", newDistLimit.toDoubleOrNull() ?: 0.0, 0, "", true)) }
+                            newDist=""; newDistLimit=""; reload++
+                        }
+                    }
+                }, modifier = Modifier.fillMaxWidth()) { Text("ADD DISTRIBUTOR") }
+            }
+        }}
         Card(Modifier.padding(vertical = 10.dp)) { Column(Modifier.padding(10.dp)) {
             Text("Add Stock", fontWeight = FontWeight.Bold)
             OutlinedTextField(model, {model=it}, label={Text("Model / Item Name")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
@@ -1777,6 +1922,12 @@ class PenDb(ctx: Context) : android.database.sqlite.SQLiteOpenHelper(ctx, "penkh
         db.execSQL("""CREATE TABLE branches(code TEXT PRIMARY KEY, name TEXT, address TEXT, pincode TEXT, gstin TEXT,
             phone TEXT, state TEXT, series TEXT, nextSerial INTEGER DEFAULT 1)""")
         db.execSQL("""CREATE TABLE people(id INTEGER PRIMARY KEY, name TEXT, role TEXT, branch TEXT, phone TEXT, active INTEGER DEFAULT 1)""")
+        db.execSQL("""CREATE TABLE brands(id INTEGER PRIMARY KEY, name TEXT UNIQUE)""")
+        db.execSQL("""CREATE TABLE categories(id INTEGER PRIMARY KEY, name TEXT UNIQUE)""")
+        db.execSQL("""CREATE TABLE products(id INTEGER PRIMARY KEY, brand TEXT, category TEXT, model TEXT, hsn TEXT,
+            gstRate REAL DEFAULT 18, mrp REAL DEFAULT 0, warrantyMonths INTEGER DEFAULT 12, serialised INTEGER DEFAULT 1)""")
+        db.execSQL("""CREATE TABLE distributors(id INTEGER PRIMARY KEY, name TEXT, gstin TEXT, phone TEXT, address TEXT,
+            creditLimit REAL DEFAULT 0, creditDays INTEGER DEFAULT 0, brands TEXT DEFAULT '', active INTEGER DEFAULT 1)""")
         db.execSQL("CREATE INDEX idx_bills_inv ON bills(inv)")
         db.execSQL("CREATE INDEX idx_bills_ms ON bills(ms)")
         db.execSQL("CREATE INDEX idx_bills_buyer ON bills(buyer)")
