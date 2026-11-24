@@ -73,7 +73,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "5.3 · purchase entry"
+const val APP_VERSION = "5.4 · stock in hand"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -1217,19 +1217,43 @@ fun PurchaseScreen(onDone: () -> Unit) {
             }, modifier = Modifier.fillMaxWidth()) { Text("ADD TO STOCK") }
         }}
         Card(Modifier.padding(vertical = 10.dp)) { Column(Modifier.padding(16.dp)) {
-            Text("Summary", fontWeight = FontWeight.Bold)
+            Text("Stock in hand", fontWeight = FontWeight.Bold)
             Divider(Modifier.padding(vertical = 5.dp))
             Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Models"); Text("${stock.size}") }
             Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Units in hand"); Text("$totalUnits") }
-            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Stock value (cost)"); Text("\u20b9${fmt(totalValue)}") }
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Cost value (what you paid)"); Text("\u20b9${fmt(totalValue)}") }
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Taxable value (ex-GST)"); Text("\u20b9${fmt(totalValue)}") }
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("MRP value (shelf price)"); Text("\u20b9${fmt(stock.sumOf { it.mrp * it.qty })}") }
             if(lowCount > 0) Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Low stock (1 or less)", color = Color.Red); Text("$lowCount", color = Color.Red) }
+            Divider(Modifier.padding(vertical = 5.dp))
+            Text("Brand wise", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            val byBrand = stock.groupBy { if(it.brand.isBlank()) "UNBRANDED" else it.brand }
+            byBrand.entries.sortedByDescending { e -> e.value.sumOf { it.cost * it.qty } }.take(12).forEach { e ->
+                Row(Modifier.fillMaxWidth().padding(vertical = 1.dp), Arrangement.SpaceBetween) {
+                    Text(e.key + "  (" + e.value.sumOf { it.qty } + ")", fontSize = 10.sp)
+                    Text("\u20b9" + fmt(e.value.sumOf { it.cost * it.qty }), fontSize = 10.sp)
+                }
+            }
+            Divider(Modifier.padding(vertical = 5.dp))
+            Text("Ageing (days in stock)", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            val today = System.currentTimeMillis()
+            val ageOf = { e: StockEntry -> try { (today - SimpleDateFormat("dd-MMM-yyyy", Locale.ENGLISH).parse(e.addedOn)!!.time) / 86400000L } catch(ex: Exception) { 0L } }
+            val buckets = listOf("0-30" to (0L..30L), "31-60" to (31L..60L), "61-90" to (61L..90L), "90+" to (91L..100000L))
+            buckets.forEach { (label, range) ->
+                val inBucket = stock.filter { ageOf(it) in range }
+                if(inBucket.isNotEmpty()) Row(Modifier.fillMaxWidth().padding(vertical = 1.dp), Arrangement.SpaceBetween) {
+                    Text(label + " days  (" + inBucket.sumOf { it.qty } + " units)", fontSize = 10.sp)
+                    Text("\u20b9" + fmt(inBucket.sumOf { it.cost * it.qty }), fontSize = 10.sp, color = if(label == "90+") Color.Red else Color.Unspecified)
+                }
+            }
         }}
         stock.sortedBy { it.model.lowercase() }.forEach { e ->
             Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(e.model, fontWeight = FontWeight.Bold, maxLines = 2)
                     if(e.imeiLabel().isNotBlank()) Text(e.imeiLabel(), fontSize = 10.sp, maxLines = 2)
-                    Text("Cost \u20b9${fmt(e.cost)}  \u00b7  MRP \u20b9${fmt(e.mrp)}", fontSize = 10.sp, maxLines = 1)
+                    Text((if(e.brand.isBlank()) "" else e.brand + "  \u00b7  ") + (if(e.cls.isBlank()) "" else e.cls + "  \u00b7  ") + "in since " + e.addedOn, fontSize = 10.sp, maxLines = 1)
+                    Text("Cost \u20b9${fmt(e.cost)}  \u00b7  MRP \u20b9${fmt(e.mrp)}  \u00b7  value \u20b9${fmt(e.cost * e.qty)}", fontSize = 10.sp, maxLines = 1)
                     if(e.supplier.isNotBlank()) Text(e.supplier, fontSize = 10.sp, maxLines = 1)
                 }
                 Column(horizontalAlignment = Alignment.End, modifier = Modifier.width(56.dp)) {
@@ -1592,14 +1616,14 @@ fun PurchaseScreen(onDone: () -> Unit) {
                 }
                 Button(onClick = {
                     if(newPerson.isNotBlank()) {
-                        val role = newRole.trim().uppercase().let { if(it in listOf("OWNER","MANAGER","REP")) it else "REP" }
+                        val role = newRole.trim().uppercase().let { if(it in listOf("OWNER","MANAGER","STOCK","REP")) it else "REP" }
                         scope.launch {
                             withContext(Dispatchers.IO) { savePerson(ctx, Person(0, newPerson.trim(), role, activeBranchCode(prefs), "", true)) }
                             newPerson=""; newRole="MANAGER"; onDataChanged()
                         }
                     }
                 }, modifier = Modifier.fillMaxWidth()) { Text("ADD PERSON") }
-                Text("OWNER: everything. MANAGER: billing, stock and this outlet's reports. REP: billing and stock only. Only the OWNER can cancel a bill.", fontSize=9.sp, color=Color.Gray)
+                Text("OWNER: everything. MANAGER: billing, stock and this outlet's reports. STOCK: stock, purchases and audit. REP: billing and stock. Everyone can see stock in hand; only the OWNER can cancel a bill.", fontSize=9.sp, color=Color.Gray)
             }}
             OutlinedTextField(newPin,{newPin=it},label={Text(if(hasPinSet) "New PIN (blank + SAVE removes the lock)" else "Set Login PIN (optional)")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.NumberPassword, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sName,{sName=it},label={Text("Firm Name")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sState,{sState=it},label={Text("My State Code (GST, e.g. 21)")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sPrefix,{sPrefix=it},label={Text("Invoice Prefix")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sAddr1,{sAddr1=it},label={Text("Address Line 1")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sAddr2,{sAddr2=it},label={Text("Address Line 2")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sPhone,{sPhone=it},label={Text("Phone")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Phone, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sEmail,{sEmail=it},label={Text("Email")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Email, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sLandmark,{sLandmark=it},label={Text("Landmark")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sPincode,{sPincode=it},label={Text("Pincode")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sUpi,{sUpi=it},label={Text("UPI ID (for the payment QR)")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sGst,{sGst=it},label={Text("GSTIN")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sBank,{sBank=it},label={Text("Bank Name & Acc")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sIfsc,{sIfsc=it},label={Text("IFSC")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sJuris,{sJuris=it},label={Text("Jurisdiction")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(defTax,{defTax=it},label={Text("Default Tax %")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Text("PenKhata "+APP_VERSION, fontSize=10.sp, color=Color.Gray, modifier=Modifier.padding(top=8.dp)); val dbBills by produceState(initialValue = -1, ctx) { value = withContext(Dispatchers.IO) { countRows(ctx, "bills") } }; val dbStock by produceState(initialValue = -1, ctx) { value = withContext(Dispatchers.IO) { countRows(ctx, "stock") } }; Text("Database: " + (if(dbBills < 0) "reading..." else "$dbBills bills, $dbStock stock lines"), fontSize=10.sp, color=Color.Gray); Button(onClick={prefs.edit().putString("sName",sName).putString("sState",sState).putString("sPrefix",sPrefix).putString("sAddr1",sAddr1).putString("sAddr2",sAddr2).putString("sPhone",sPhone).putString("sEmail",sEmail).putString("sLandmark",sLandmark).putString("sPincode",sPincode).putString("sUpi",sUpi).putString("sGst",sGst).putString("sBank",sBank).putString("sIfsc",sIfsc).putString("sJuris",sJuris).putString("defTax",defTax).apply(); onPinSave(newPin); Toast.makeText(ctx,"Saved",Toast.LENGTH_SHORT).show()},modifier=Modifier.fillMaxWidth()){Text("SAVE")}; Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Backup & Restore", fontWeight=FontWeight.Bold); Text("One file with your data, a readable XLSX copy and any stored PDFs. Add a password to encrypt it - there is no recovery if you forget it. The app PIN is never included.", fontSize=10.sp); OutlinedTextField(backupPw, {backupPw=it}, label={Text("Password (optional)")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.height(8.dp)); Button(onClick={
                 val name = "penkhata-backup-" + SimpleDateFormat("yyyyMMdd-HHmm", Locale.ENGLISH).format(Date())
@@ -1619,7 +1643,7 @@ fun PurchaseScreen(onDone: () -> Unit) {
         confirmButton = { TextButton(onClick = {
             val p0 = editPerson
             if(p0 != null && editName.isNotBlank()) {
-                val role = editRole.trim().uppercase().let { if(it in listOf("OWNER","MANAGER","REP")) it else p0.role }
+                val role = editRole.trim().uppercase().let { if(it in listOf("OWNER","MANAGER","STOCK","REP")) it else p0.role }
                 val losingOwner = p0.role == "OWNER" && role != "OWNER" && ownerCount(ctx) <= 1
                 if(losingOwner) {
                     Toast.makeText(ctx, "There must always be at least one OWNER", Toast.LENGTH_LONG).show()
