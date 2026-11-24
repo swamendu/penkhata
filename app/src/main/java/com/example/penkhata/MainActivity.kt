@@ -73,7 +73,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "5.2 · master data"
+const val APP_VERSION = "5.3 · purchase entry"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -232,6 +232,73 @@ data class Distributor(val id: Long, val name: String, val gstin: String, val ph
                        val creditLimit: Double, val creditDays: Int, val brands: String, val active: Boolean)
 data class Product(val id: Long, val brand: String, val category: String, val model: String, val hsn: String,
                    val gstRate: Double, val mrp: Double, val warrantyMonths: Int, val serialised: Boolean)
+
+// ---------------------------------------------------------------- purchases
+data class PurchaseLine(val model: String, val brand: String, val category: String, val hsn: String,
+                        val qty: Int, val cost: Double, val gstRate: Double, val serials: String)
+data class Purchase(val ms: Long, val distributor: String, val invoiceNo: String, val date: String,
+                    val taxable: Double, val gst: Double, val total: Double, val creditDays: Int, val note: String,
+                    val lines: List<PurchaseLine>)
+
+fun purchaseTaxable(lines: List<PurchaseLine>): Double = lines.sumOf { it.qty * it.cost }
+fun purchaseGst(lines: List<PurchaseLine>): Double = lines.sumOf { it.qty * it.cost * it.gstRate / 100.0 }
+
+// One distributor bill in: records the purchase, its lines, any new products, and the
+// stock it brings - each serial becoming an individual, traceable unit.
+fun savePurchase(ctx: Context, p: Purchase): Boolean {
+    if(p.lines.isEmpty()) return false
+    return try {
+        val w = db(ctx).writableDatabase
+        val prefs = ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE)
+        w.beginTransaction()
+        try {
+            val cv = android.content.ContentValues()
+            cv.put("ms", p.ms); cv.put("distributor", p.distributor); cv.put("invoiceNo", p.invoiceNo)
+            cv.put("date", p.date); cv.put("branch", activeBranchCode(prefs))
+            cv.put("taxable", p.taxable); cv.put("gst", p.gst); cv.put("total", p.total)
+            cv.put("creditDays", p.creditDays); cv.put("note", p.note)
+            w.insertWithOnConflict("purchases", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE)
+            w.delete("purchase_lines", "ms=?", arrayOf(p.ms.toString()))
+            for(l in p.lines) {
+                val lv = android.content.ContentValues()
+                lv.put("ms", p.ms); lv.put("model", l.model); lv.put("brand", l.brand); lv.put("category", l.category)
+                lv.put("hsn", l.hsn); lv.put("qty", l.qty); lv.put("cost", l.cost); lv.put("gstRate", l.gstRate)
+                lv.put("serials", l.serials)
+                w.insert("purchase_lines", null, lv)
+            }
+            w.setTransactionSuccessful()
+        } finally { w.endTransaction() }
+
+        val stock = loadStock(ctx).toMutableList()
+        val known = loadProducts(ctx).toMutableList()
+        var added = 0
+        for(l in p.lines) {
+            val serials = l.serials.split("\n", ",", " ").map { it.trim() }.filter { it.isNotBlank() }.distinct()
+            val units = if(serials.isNotEmpty()) serials.size else l.qty
+            if(units > 0) {
+                stock.add(StockEntry(System.currentTimeMillis() + added, l.model, serials.joinToString("\n"), l.hsn,
+                    l.cost, 0.0, units, p.distributor, p.date, l.brand, l.category))
+                added++
+            }
+            if(known.none { it.brand.equals(l.brand, true) && it.model.equals(l.model, true) }) {
+                saveProduct(ctx, Product(0, l.brand, l.category, l.model, l.hsn, l.gstRate, 0.0, 12, serials.isNotEmpty()))
+                known.add(Product(0, l.brand, l.category, l.model, l.hsn, l.gstRate, 0.0, 12, serials.isNotEmpty()))
+            }
+        }
+        if(added > 0) saveStock(ctx, stock)
+        true
+    } catch(e: Exception) { false }
+}
+fun loadPurchases(ctx: Context): List<Purchase> {
+    val out = mutableListOf<Purchase>()
+    try {
+        db(ctx).readableDatabase.rawQuery("SELECT ms,distributor,invoiceNo,date,taxable,gst,total,creditDays,note FROM purchases ORDER BY ms DESC", null).use { c ->
+            while(c.moveToNext()) out.add(Purchase(c.getLong(0), c.getString(1) ?: "", c.getString(2) ?: "", c.getString(3) ?: "",
+                c.getDouble(4), c.getDouble(5), c.getDouble(6), c.getInt(7), c.getString(8) ?: "", emptyList()))
+        }
+    } catch(e: Exception) { }
+    return out
+}
 
 fun loadBrands(ctx: Context): List<String> {
     val out = mutableListOf<String>()
@@ -876,7 +943,143 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
     }
 }
 
+@Composable
+fun PurchaseScreen(onDone: () -> Unit) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
+    val prefs = remember { ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE) }
+    var dist by rememberSaveable { mutableStateOf("") }
+    var invNo by rememberSaveable { mutableStateOf("") }
+    var note by rememberSaveable { mutableStateOf("") }
+    var pickDist by remember { mutableStateOf(false) }
+    // one line being typed
+    var lModel by rememberSaveable { mutableStateOf("") }
+    var lBrand by rememberSaveable { mutableStateOf("") }
+    var lCat by rememberSaveable { mutableStateOf("Mobile") }
+    var lHsn by rememberSaveable { mutableStateOf("") }
+    var lQty by rememberSaveable { mutableStateOf("1") }
+    var lCost by rememberSaveable { mutableStateOf("") }
+    var lGst by rememberSaveable { mutableStateOf("18") }
+    var lSerials by rememberSaveable { mutableStateOf("") }
+    var lines by remember { mutableStateOf(listOf<PurchaseLine>()) }
+    var saving by remember { mutableStateOf(false) }
+    val dists by produceState(initialValue = emptyList<Distributor>(), ctx) { value = withContext(Dispatchers.IO) { loadDistributors(ctx) } }
+    val recent by produceState(initialValue = emptyList<Purchase>(), ctx) { value = withContext(Dispatchers.IO) { loadPurchases(ctx) } }
+
+    if(pickDist) AlertDialog(
+        onDismissRequest = { pickDist = false },
+        title = { Text("Distributor") },
+        text = { Column {
+            if(dists.isEmpty()) Text("No distributors yet - add one under Stock -> MASTER DATA.", fontSize = 11.sp)
+            dists.forEach { d ->
+                Text(d.name, fontSize = 12.sp, modifier = Modifier.fillMaxWidth().clickable { dist = d.name; pickDist = false }.padding(vertical = 6.dp))
+            }
+        } },
+        confirmButton = { TextButton(onClick = { pickDist = false }) { Text("CLOSE") } }
+    )
+
+    Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
+        Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
+            Text("PURCHASE", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            TextButton(onClick = { onDone() }) { Text("BACK") }
+        }
+        Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(10.dp)) {
+            Button(onClick = { pickDist = true }, modifier = Modifier.fillMaxWidth()) {
+                Text(if(dist.isBlank()) "CHOOSE DISTRIBUTOR" else dist)
+            }
+            OutlinedTextField(invNo, {invNo=it}, label={Text("Distributor invoice no")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+            OutlinedTextField(note, {note=it}, label={Text("Note (optional)")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+        }}
+
+        Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(10.dp)) {
+            Text("Add a line", fontWeight = FontWeight.Bold)
+            OutlinedTextField(lModel, {lModel=it}, label={Text("Model")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+            Row {
+                OutlinedTextField(lBrand, {lBrand=it}, label={Text("Brand")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+                Spacer(Modifier.width(4.dp))
+                OutlinedTextField(lCat, {lCat=it}, label={Text("Category")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+            }
+            Row {
+                OutlinedTextField(lQty, {lQty=it}, label={Text("Qty")}, modifier=Modifier.weight(0.6f), keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+                Spacer(Modifier.width(4.dp))
+                OutlinedTextField(lCost, {lCost=it}, label={Text("Cost \u20b9 ex-GST")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+                Spacer(Modifier.width(4.dp))
+                OutlinedTextField(lGst, {lGst=it}, label={Text("GST %")}, modifier=Modifier.weight(0.6f), keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+            }
+            Row {
+                OutlinedTextField(lHsn, {lHsn=it}, label={Text("HSN")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+            }
+            OutlinedTextField(lSerials, {lSerials=it}, label={Text("IMEI / serials - one per line")}, minLines=2, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+            Text("Serials override quantity: three serials means three units.", fontSize = 9.sp, color = Color.Gray)
+            Button(onClick = {
+                if(lModel.isNotBlank() && (lCost.toDoubleOrNull() ?: 0.0) > 0.0) {
+                    val serialCount = lSerials.split("\n", ",", " ").map { it.trim() }.filter { it.isNotBlank() }.distinct().size
+                    val qty = if(serialCount > 0) serialCount else (lQty.toIntOrNull() ?: 1)
+                    lines = lines + PurchaseLine(lModel.trim(), lBrand.trim().uppercase(), lCat.trim(), lHsn.trim(), qty,
+                        lCost.toDoubleOrNull() ?: 0.0, lGst.toDoubleOrNull() ?: 18.0, lSerials.trim())
+                    lModel=""; lCost=""; lSerials=""; lQty="1"
+                }
+            }, modifier = Modifier.fillMaxWidth()) { Text("ADD LINE") }
+        }}
+
+        if(lines.isNotEmpty()) Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(10.dp)) {
+            Text("Lines (" + lines.size + ")", fontWeight = FontWeight.Bold)
+            lines.forEachIndexed { i, l ->
+                Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(l.model + "  \u00d7 " + l.qty, fontSize = 11.sp, maxLines = 1)
+                        Text(l.brand + " \u00b7 " + l.category + " \u00b7 \u20b9" + fmt(l.cost) + " + " + fmt(l.gstRate) + "%", fontSize = 9.sp, color = Color.Gray, maxLines = 1)
+                    }
+                    Text("\u20b9" + fmt(l.qty * l.cost * (1 + l.gstRate / 100.0)), fontSize = 11.sp)
+                    TextButton(onClick = { lines = lines.filterIndexed { j, _ -> j != i } }) { Text("\u00d7", color = Color.Red) }
+                }
+            }
+            Divider(Modifier.padding(vertical = 4.dp))
+            val taxable = purchaseTaxable(lines)
+            val gst = purchaseGst(lines)
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Taxable", fontSize = 11.sp); Text("\u20b9" + fmt(taxable), fontSize = 11.sp) }
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("GST (input credit)", fontSize = 11.sp); Text("\u20b9" + fmt(gst), fontSize = 11.sp) }
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Invoice total", fontWeight = FontWeight.Bold); Text("\u20b9" + fmt(taxable + gst), fontWeight = FontWeight.Bold) }
+            Button(onClick = {
+                if(dist.isBlank()) {
+                    Toast.makeText(ctx, "Choose the distributor first", Toast.LENGTH_SHORT).show()
+                } else {
+                    saving = true
+                    scope.launch {
+                        val p = Purchase(System.currentTimeMillis(), dist, invNo.trim(), SimpleDateFormat("dd-MMM-yyyy", Locale.ENGLISH).format(Date()),
+                            taxable, gst, taxable + gst, dists.firstOrNull { it.name == dist }?.creditDays ?: 0, note.trim(), lines)
+                        val ok = withContext(Dispatchers.IO) { savePurchase(ctx, p) }
+                        saving = false
+                        if(ok) {
+                            Toast.makeText(ctx, "Purchase saved, " + lines.sumOf { it.qty } + " units added to stock", Toast.LENGTH_LONG).show()
+                            onDone()
+                        } else {
+                            Toast.makeText(ctx, "Could not save the purchase", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
+            }, enabled = !saving, modifier = Modifier.fillMaxWidth()) { Text(if(saving) "SAVING..." else "SAVE PURCHASE") }
+        }}
+
+        if(recent.isNotEmpty()) Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(10.dp)) {
+            Text("Recent purchases", fontWeight = FontWeight.Bold)
+            recent.take(10).forEach { p ->
+                Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), Arrangement.SpaceBetween) {
+                    Column(Modifier.weight(1f)) {
+                        Text(p.distributor + "  \u00b7  " + p.invoiceNo, fontSize = 11.sp, maxLines = 1)
+                        Text(p.date + (if(p.creditDays > 0) "  \u00b7  " + p.creditDays + " days credit" else ""), fontSize = 9.sp, color = Color.Gray)
+                    }
+                    Text("\u20b9" + fmt(p.total), fontSize = 11.sp)
+                }
+            }
+        }}
+    }
+}
+
 @Composable fun StockScreen() {
+    var showPurchase by rememberSaveable { mutableStateOf(false) }
+    if(showPurchase) { PurchaseScreen { showPurchase = false }; return }
     val focusManager = LocalFocusManager.current
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -924,7 +1127,10 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
     val totalValue = stock.sumOf { it.cost * it.qty }
     val lowCount = stock.count { it.qty <= 1 }
     Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
-        Text("STOCK", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+        Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
+            Text("STOCK", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            Button(onClick = { showPurchase = true }) { Text("PURCHASE IN") }
+        }
         if(loadingStock) LoadingRow("Reading stock...")
         Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(12.dp)) {
             var expanded by rememberSaveable { mutableStateOf(false) }
@@ -1977,6 +2183,12 @@ class PenDb(ctx: Context) : android.database.sqlite.SQLiteOpenHelper(ctx, "penkh
             "branch" to "TEXT DEFAULT ''", "series" to "TEXT DEFAULT ''",
             "salesman" to "TEXT DEFAULT ''", "deliveryDate" to "TEXT DEFAULT ''"))
         healColumns(db, "stock", listOf("brand" to "TEXT DEFAULT ''", "cls" to "TEXT DEFAULT ''"))
+        try {
+            db.execSQL("""CREATE TABLE IF NOT EXISTS purchases(ms INTEGER PRIMARY KEY, distributor TEXT, invoiceNo TEXT, date TEXT, branch TEXT,
+                taxable REAL DEFAULT 0, gst REAL DEFAULT 0, total REAL DEFAULT 0, creditDays INTEGER DEFAULT 0, note TEXT DEFAULT '')""")
+            db.execSQL("""CREATE TABLE IF NOT EXISTS purchase_lines(ms INTEGER, model TEXT, brand TEXT, category TEXT, hsn TEXT,
+                qty INTEGER DEFAULT 0, cost REAL DEFAULT 0, gstRate REAL DEFAULT 18, serials TEXT DEFAULT '')""")
+        } catch(e: Exception) { }
     }
     override fun onConfigure(db: android.database.sqlite.SQLiteDatabase) {
         super.onConfigure(db)
