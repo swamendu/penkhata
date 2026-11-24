@@ -108,7 +108,7 @@ data class BuyerInfo(val name: String, val addr1: String, val addr2: String, val
 data class BillCalc(
     val gross: Double, val itemDiscount: Double, val billDiscount: Double,
     val taxable: Double, val cgst: Double, val sgst: Double, val igst: Double, val totalTax: Double,
-    val roundOff: Double, val grand: Double, val exchange: Double,
+    val roundOff: Double, val grand: Double, val exchange: Double, val discountDivisor: Boolean,
     val cash: Double, val upi: Double, val card: Double, val paid: Double, val balance: Double,
     val interState: Boolean
 )
@@ -116,13 +116,24 @@ data class BillCalc(
 // Single place where a bill is added up, so the screen and the PDF can never disagree.
 // Rates are tax-inclusive: each line is split into taxable value and tax, item discount is
 // applied before the split, and IGST replaces CGST+SGST when the buyer's state differs.
+// A discount percentage can mean two different things, and the shop decides which:
+//   divisor = true  -> the price is (1 + d%) of the discounted value, so divide  (25,000 / 1.03)
+//   divisor = false -> d% off the price, so multiply                              (25,000 x 0.97)
+fun discountDivisor(prefs: android.content.SharedPreferences): Boolean = prefs.getBoolean("discDivisor", true)
+fun netAfterDiscount(gross: Double, discPct: Double, divisor: Boolean): Double {
+    val d = discPct.coerceIn(0.0, 100.0)
+    return if(divisor) gross / (1 + d / 100.0) else gross * (1 - d / 100.0)
+}
+fun discountAmount(gross: Double, discPct: Double, divisor: Boolean): Double =
+    gross - netAfterDiscount(gross, discPct, divisor)
+
 fun computeBill(items: List<InvItem>, billDiscount: Double, exchange: Double, cash: Double, upi: Double, card: Double,
-                sellerState: String, buyerState: String): BillCalc {
+                sellerState: String, buyerState: String, divisor: Boolean = true): BillCalc {
     var gross = 0.0; var itemDisc = 0.0; var taxable = 0.0; var tax = 0.0
     for(it in items) {
         val g = it.qty * it.rate
-        val d = g * (it.discount.coerceIn(0.0, 100.0) / 100.0)
-        val net = g - d
+        val net = netAfterDiscount(g, it.discount, divisor)
+        val d = g - net
         val tr = it.taxRate.coerceIn(0.0, 100.0)
         val base = net / (1 + tr / 100.0)
         gross += g; itemDisc += d; taxable += base; tax += (net - base)
@@ -140,9 +151,9 @@ fun computeBill(items: List<InvItem>, billDiscount: Double, exchange: Double, ca
     val paid = cash + upi + card
     val interState = sellerState.isNotBlank() && buyerState.isNotBlank() && sellerState.trim() != buyerState.trim()
     val grand = rounded - exchange
-    return BillCalc(gross, itemDisc, bd, taxableAfter,
+    return BillCalc(gross, itemDisc, bd, taxableAfter, 
         if(interState) 0.0 else taxAfter / 2, if(interState) 0.0 else taxAfter / 2, if(interState) taxAfter else 0.0, taxAfter,
-        roundOff, grand, exchange, cash, upi, card, paid, grand - paid, interState)
+        roundOff, grand, exchange, divisor, cash, upi, card, paid, grand - paid, interState)
 }
 
 fun fmt(v: Double): String = String.format("%.2f", v)
@@ -472,7 +483,7 @@ fun InvoiceScreen(isQuote: Boolean) {
     LaunchedEffect(autoPayMode) { if(autoPayMode.isNotBlank() && payMode != autoPayMode) payMode = autoPayMode }
 
     val calc = computeBill(items, billDisc.toDoubleOrNull() ?: 0.0, exchange.toDoubleOrNull() ?: 0.0,
-        cash.toDoubleOrNull() ?: 0.0, upi.toDoubleOrNull() ?: 0.0, card.toDoubleOrNull() ?: 0.0, sellerState, bState)
+        cash.toDoubleOrNull() ?: 0.0, upi.toDoubleOrNull() ?: 0.0, card.toDoubleOrNull() ?: 0.0, sellerState, bState, discountDivisor(prefs))
 
     Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
         Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
@@ -1370,7 +1381,7 @@ fun convertQuoteToInvoice(ctx: Context, quoteMs: Long): File? {
         o.optString("bpin"), o.optString("bphone"), o.optString("bgst"), o.optString("bstate"))
     val bd = o.optDouble("bd", 0.0); val exch = o.optDouble("exch", 0.0)
     val cash = o.optDouble("cash", 0.0); val upi = o.optDouble("upi", 0.0); val card = o.optDouble("card", 0.0)
-    val calc = computeBill(lines, bd, exch, cash, upi, card, seller.state, buyer.state)
+    val calc = computeBill(lines, bd, exch, cash, upi, card, seller.state, buyer.state, discountDivisor(ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE)))
     val prefs = ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE)
     val invNo = nextInvoiceNo(ctx, prefs)
     val dateStr = SimpleDateFormat("dd-MMM-yyyy", Locale.ENGLISH).format(Date())
@@ -1530,7 +1541,8 @@ fun renderBill(ctx: Context, ms: Long): File? {
     val sel = o.optJSONObject("seller")
     val sellerState = sel?.optString("state") ?: ""
     val calc = computeBill(lines, o.optDouble("bd", 0.0), o.optDouble("exch", 0.0),
-        o.optDouble("cash", 0.0), o.optDouble("upi", 0.0), o.optDouble("card", 0.0), sellerState, o.optString("bstate"))
+        o.optDouble("cash", 0.0), o.optDouble("upi", 0.0), o.optDouble("card", 0.0), sellerState, o.optString("bstate"),
+        discountDivisor(ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE)))
     return try {
         createPdf(ctx, o.optBoolean("quote", false), o.optString("inv"), o.optString("date"),
             o.optString("payMode"), o.optString("delNote"),
@@ -2200,11 +2212,12 @@ fun saveInvoiceData(ctx: Context, ms: Long, isQuote: Boolean, invNo: String, dat
     for(i in items) cogs += stockCostFor(stock, i) * i.qty
     // per-line figures, scaled by the bill discount, so rate-wise summaries add up
     var baseSum = 0.0
-    for(i in items) { val g=i.qty*i.rate; val net=g-(g*(i.discount.coerceIn(0.0,100.0)/100.0)); baseSum += net/(1+i.taxRate.coerceIn(0.0,100.0)/100.0) }
+    val divisor = discountDivisor(ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE))
+    for(i in items) { val g=i.qty*i.rate; val net=netAfterDiscount(g, i.discount, divisor); baseSum += net/(1+i.taxRate.coerceIn(0.0,100.0)/100.0) }
     val keep = if(baseSum > 0.0) calc.taxable / baseSum else 1.0
     val lines = JSONArray()
     for(i in items) {
-        val g = i.qty*i.rate; val net = g - (g*(i.discount.coerceIn(0.0,100.0)/100.0))
+        val g = i.qty*i.rate; val net = netAfterDiscount(g, i.discount, divisor)
         val tr = i.taxRate.coerceIn(0.0,100.0); val base = net/(1+tr/100.0)
         val o = JSONObject()
         o.put("desc", i.desc); o.put("hsn", i.hsn); o.put("qty", i.qty); o.put("rate", i.rate)
@@ -2390,7 +2403,7 @@ fun createPdf(ctx: Context, isQuote: Boolean, invNo: String, date: String, payMo
     val detailPaint=Paint(p).apply{ textSize=8f; textAlign=Paint.Align.LEFT }
     fun rowLines(it: InvItem): Pair<List<String>, List<String>> {
         val descLines = wrapLines(it.desc, p, descW).take(3)
-        val discNote = if(it.discount>0.004) "Disc ${fmt(it.discount)}%  -${fmt(it.qty*it.rate*it.discount/100.0)}" else ""
+        val discNote = if(it.discount>0.004) "Disc ${fmt(it.discount)}%  -${fmt(discountAmount(it.qty*it.rate, it.discount, calc.discountDivisor))}" else ""
         val detailLines = listOf(if(it.serial.isNotEmpty()) "SR/IMEI: ${it.serial}" else "", discNote)
             .filter{it.isNotBlank()}.flatMap{ wrapLines(it, detailPaint, descW).take(1) }
         return descLines to detailLines
