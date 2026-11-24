@@ -74,7 +74,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "5.7.1 · hotfix"
+const val APP_VERSION = "5.7.2 · hotfix"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -165,6 +165,27 @@ fun fyLabel(): String {
     val start = if(c.get(Calendar.MONTH) + 1 >= 4) c.get(Calendar.YEAR) else c.get(Calendar.YEAR) - 1
     return String.format("%02d-%02d", start % 100, (start + 1) % 100)
 }
+
+// ---------------------------------------------------------------- crash log
+// The shop has no PC to run adb on, so the app keeps the last crash itself and
+// shows it in Settings. That is the only way a stack trace reaches me.
+fun crashLogFile(ctx: Context): File = File(ctx.filesDir, "last_crash.txt")
+fun installCrashLogger(ctx: Context) {
+    val previous = Thread.getDefaultUncaughtExceptionHandler()
+    Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+        try {
+            val text = StringBuilder()
+            text.append("When: ").append(SimpleDateFormat("dd-MMM-yyyy HH:mm:ss", Locale.ENGLISH).format(Date())).append("\n")
+            text.append("Version: ").append(APP_VERSION).append("\n")
+            text.append("Thread: ").append(thread.name).append("\n\n")
+            text.append(android.util.Log.getStackTraceString(error))
+            crashLogFile(ctx).writeText(text.toString().take(20000))
+        } catch(e: Exception) { }
+        previous?.uncaughtException(thread, error)
+    }
+}
+fun readCrashLog(ctx: Context): String = try { if(crashLogFile(ctx).exists()) crashLogFile(ctx).readText() else "" } catch(e: Exception) { "" }
+fun clearCrashLog(ctx: Context) { try { crashLogFile(ctx).delete() } catch(e: Exception) { } }
 
 // ---------------------------------------------------------------- outlets and people
 data class Branch(val code: String, val name: String, val address: String, val pincode: String,
@@ -476,6 +497,7 @@ fun bumpInvoiceNo(ctx: Context, prefs: android.content.SharedPreferences) {
 class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        installCrashLogger(this)
         setContent { MaterialTheme(colorScheme = lightColorScheme(primary = Color(0xFF2E7D32))) { MainAppScreen() } }
     }
 }
@@ -1877,14 +1899,21 @@ fun monthlySales(ctx: Context, months: Int): List<Pair<String, Double>> {
                     pendingEncrypted = bytes; restorePw = ""; askPassword = true
                 } else {
                     scope.launch {
-                        // snapshot what is here now, so a wrong restore can be undone
-                        val snap = withContext(Dispatchers.IO) { autoBackup(ctx) }
-                        val isZip = bytes.size > 2 && bytes[0] == 'P'.code.toByte() && bytes[1] == 'K'.code.toByte()
-                        val msg = withContext(Dispatchers.IO) {
-                            if(isZip) restoreZip(ctx, ByteArrayInputStream(bytes)) else restoreJson(ctx, String(bytes, Charsets.UTF_8))
+                        // nothing in a restore may take the app down: a half-done restore
+                        // is recoverable, a crash is not
+                        try {
+                            val snap = withContext(Dispatchers.IO) { autoBackup(ctx) }
+                            val isZip = bytes.size > 2 && bytes[0] == 'P'.code.toByte() && bytes[1] == 'K'.code.toByte()
+                            val msg = withContext(Dispatchers.IO) {
+                                if(isZip) restoreZip(ctx, ByteArrayInputStream(bytes)) else restoreJson(ctx, String(bytes, Charsets.UTF_8))
+                            }
+                            onDataChanged()
+                            Toast.makeText(ctx, msg + (if(snap != null) " Previous data saved first." else ""), Toast.LENGTH_LONG).show()
+                        } catch(t: Throwable) {
+                            onDataChanged()
+                            Toast.makeText(ctx, "Restore stopped: " + (t.message ?: t.javaClass.simpleName) + ". Settings shows the details.", Toast.LENGTH_LONG).show()
+                            try { crashLogFile(ctx).writeText("Restore failed\n" + android.util.Log.getStackTraceString(t)) } catch(e: Exception) { }
                         }
-                        onDataChanged()
-                        Toast.makeText(ctx, msg + (if(snap != null) " Previous data saved first." else ""), Toast.LENGTH_LONG).show()
                     }
                 }
             } catch(e: Exception) {
@@ -1937,6 +1966,14 @@ fun monthlySales(ctx: Context, months: Int): List<Pair<String, Double>> {
                     }
                 }, modifier = Modifier.fillMaxWidth()) { Text("ADD PERSON") }
                 Text("OWNER: everything. MANAGER: billing, stock and this outlet's reports. STOCK: stock, purchases and audit. REP: billing and stock. Everyone can see stock in hand; only the OWNER can cancel a bill.", fontSize=9.sp, color=Color.Gray)
+            }}
+            val crashText by produceState(initialValue = "", ctx) { value = withContext(Dispatchers.IO) { readCrashLog(ctx) } }
+            if(crashText.isNotBlank()) Card(Modifier.padding(vertical=5.dp)){Column(Modifier.padding(10.dp)){
+                Text("Last error", fontWeight=FontWeight.Bold, color=Color.Red)
+                Text(crashText.take(1200), fontSize=9.sp, color=Color.DarkGray)
+                Row {
+                    TextButton(onClick = { scope.launch { withContext(Dispatchers.IO) { clearCrashLog(ctx) }; onDataChanged() } }) { Text("CLEAR", fontSize=10.sp) }
+                }
             }}
             OutlinedTextField(newPin,{newPin=it},label={Text(if(hasPinSet) "New PIN (blank + SAVE removes the lock)" else "Set Login PIN (optional)")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.NumberPassword, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sName,{sName=it},label={Text("Firm Name")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sState,{sState=it},label={Text("My State Code (GST, e.g. 21)")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sPrefix,{sPrefix=it},label={Text("Invoice Prefix")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sAddr1,{sAddr1=it},label={Text("Address Line 1")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sAddr2,{sAddr2=it},label={Text("Address Line 2")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sPhone,{sPhone=it},label={Text("Phone")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Phone, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sEmail,{sEmail=it},label={Text("Email")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Email, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sLandmark,{sLandmark=it},label={Text("Landmark")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sPincode,{sPincode=it},label={Text("Pincode")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sUpi,{sUpi=it},label={Text("UPI ID (for the payment QR)")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sGst,{sGst=it},label={Text("GSTIN")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sBank,{sBank=it},label={Text("Bank Name & Acc")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sIfsc,{sIfsc=it},label={Text("IFSC")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sJuris,{sJuris=it},label={Text("Jurisdiction")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(defTax,{defTax=it},label={Text("Default Tax %")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Text("PenKhata "+APP_VERSION, fontSize=10.sp, color=Color.Gray, modifier=Modifier.padding(top=8.dp)); val dbBills by produceState(initialValue = -1, ctx) { value = withContext(Dispatchers.IO) { countRows(ctx, "bills") } }; val dbStock by produceState(initialValue = -1, ctx) { value = withContext(Dispatchers.IO) { countRows(ctx, "stock") } }; Text("Database: " + (if(dbBills < 0) "reading..." else "$dbBills bills, $dbStock stock lines"), fontSize=10.sp, color=Color.Gray); Button(onClick={prefs.edit().putString("sName",sName).putString("sState",sState).putString("sPrefix",sPrefix).putString("sAddr1",sAddr1).putString("sAddr2",sAddr2).putString("sPhone",sPhone).putString("sEmail",sEmail).putString("sLandmark",sLandmark).putString("sPincode",sPincode).putString("sUpi",sUpi).putString("sGst",sGst).putString("sBank",sBank).putString("sIfsc",sIfsc).putString("sJuris",sJuris).putString("defTax",defTax).apply(); onPinSave(newPin); Toast.makeText(ctx,"Saved",Toast.LENGTH_SHORT).show()},modifier=Modifier.fillMaxWidth()){Text("SAVE")}; Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Backup & Restore", fontWeight=FontWeight.Bold); Text("One file with your data, a readable XLSX copy and any stored PDFs. Add a password to encrypt it - there is no recovery if you forget it. The app PIN is never included.", fontSize=10.sp); OutlinedTextField(backupPw, {backupPw=it}, label={Text("Password (optional)")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.height(8.dp)); Button(onClick={
                 val name = "penkhata-backup-" + SimpleDateFormat("yyyyMMdd-HHmm", Locale.ENGLISH).format(Date())
@@ -2048,13 +2085,19 @@ fun monthlySales(ctx: Context, months: Int): List<Pair<String, Double>> {
                         Toast.makeText(ctx, "Wrong password", Toast.LENGTH_LONG).show()
                     } else {
                         askPassword = false; pendingEncrypted = null
-                        val snap = withContext(Dispatchers.IO) { autoBackup(ctx) }
-                        val msg = withContext(Dispatchers.IO) {
-                            if(plain.size > 2 && plain[0] == 'P'.code.toByte() && plain[1] == 'K'.code.toByte()) restoreZip(ctx, ByteArrayInputStream(plain))
-                            else restoreJson(ctx, String(plain, Charsets.UTF_8))
+                        try {
+                            val snap = withContext(Dispatchers.IO) { autoBackup(ctx) }
+                            val msg = withContext(Dispatchers.IO) {
+                                if(plain.size > 2 && plain[0] == 'P'.code.toByte() && plain[1] == 'K'.code.toByte()) restoreZip(ctx, ByteArrayInputStream(plain))
+                                else restoreJson(ctx, String(plain, Charsets.UTF_8))
+                            }
+                            onDataChanged()
+                            Toast.makeText(ctx, msg + (if(snap != null) " Previous data saved first." else ""), Toast.LENGTH_LONG).show()
+                        } catch(t: Throwable) {
+                            onDataChanged()
+                            Toast.makeText(ctx, "Restore stopped: " + (t.message ?: t.javaClass.simpleName) + ". Settings shows the details.", Toast.LENGTH_LONG).show()
+                            try { crashLogFile(ctx).writeText("Restore failed\n" + android.util.Log.getStackTraceString(t)) } catch(e: Exception) { }
                         }
-                        onDataChanged()
-                        Toast.makeText(ctx, msg + (if(snap != null) " Previous data saved first." else ""), Toast.LENGTH_LONG).show()
                     }
                 }
             }
