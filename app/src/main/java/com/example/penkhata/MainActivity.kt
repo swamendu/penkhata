@@ -895,34 +895,78 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
     val backupLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
         if(uri != null) {
             try {
-                ctx.contentResolver.openOutputStream(uri)?.use { backupZip(ctx, it) }
-                Toast.makeText(ctx, "Backup saved", Toast.LENGTH_LONG).show()
+                val payload = backupPayload(ctx)
+                ctx.contentResolver.openOutputStream(uri)?.use {
+                    it.write(if(backupPw.isBlank()) payload else encryptBytes(payload, backupPw))
+                }
+                Toast.makeText(ctx, if(backupPw.isBlank()) "Backup saved" else "Encrypted backup saved - keep the password safe", Toast.LENGTH_LONG).show()
             } catch(e: Exception) {
                 Toast.makeText(ctx, "Backup failed: " + (e.message ?: "unknown error"), Toast.LENGTH_LONG).show()
             }
         }
     }
     val scope = rememberCoroutineScope()
+    var backupPw by rememberSaveable { mutableStateOf("") }
+    var pendingEncrypted by remember { mutableStateOf<ByteArray?>(null) }
+    var restorePw by rememberSaveable { mutableStateOf("") }
+    var askPassword by remember { mutableStateOf(false) }
     var confirmMaster by remember { mutableStateOf(false) }
     var confirmAll by remember { mutableStateOf(false) }
     val restoreLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if(uri != null) {
             try {
                 val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: ByteArray(0)
-                val isZip = bytes.size > 2 && bytes[0] == 'P'.code.toByte() && bytes[1] == 'K'.code.toByte()
-                val msg = if(isZip) restoreZip(ctx, ByteArrayInputStream(bytes)) else restoreJson(ctx, String(bytes, Charsets.UTF_8))
-                // the restored files must also reach the database, not just the folder
-                scope.launch {
-                    withContext(Dispatchers.IO) { importJsonIfNeeded(ctx) }
-                    onDataChanged()
+                if(isEncryptedBackup(bytes)) {
+                    pendingEncrypted = bytes; restorePw = ""; askPassword = true
+                } else {
+                    scope.launch {
+                        // snapshot what is here now, so a wrong restore can be undone
+                        val snap = withContext(Dispatchers.IO) { autoBackup(ctx) }
+                        val isZip = bytes.size > 2 && bytes[0] == 'P'.code.toByte() && bytes[1] == 'K'.code.toByte()
+                        val msg = withContext(Dispatchers.IO) {
+                            if(isZip) restoreZip(ctx, ByteArrayInputStream(bytes)) else restoreJson(ctx, String(bytes, Charsets.UTF_8))
+                        }
+                        onDataChanged()
+                        Toast.makeText(ctx, msg + (if(snap != null) " Previous data saved first." else ""), Toast.LENGTH_LONG).show()
+                    }
                 }
-                Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
             } catch(e: Exception) {
                 Toast.makeText(ctx, "Restore failed: " + (e.message ?: "unknown error"), Toast.LENGTH_LONG).show()
             }
         }
     }
-    var sName by remember{mutableStateOf(prefs.getString("sName","")?:"")}; var sState by remember{mutableStateOf(prefs.getString("sState","21")?:"21")}; var sPrefix by remember{mutableStateOf(prefs.getString("sPrefix","INV")?:"INV")}; var sAddr1 by remember{mutableStateOf(prefs.getString("sAddr1","")?:(prefs.getString("sAddr","")?:"").lineSequence().firstOrNull()?.trim()?:"")}; var sAddr2 by remember{mutableStateOf(prefs.getString("sAddr2","")?:(prefs.getString("sAddr","")?:"").lineSequence().drop(1).joinToString(" ").trim())}; var sPhone by remember{mutableStateOf(prefs.getString("sPhone","")?:"")}; var sEmail by remember{mutableStateOf(prefs.getString("sEmail","")?:"")}; var sLandmark by remember{mutableStateOf(prefs.getString("sLandmark","")?:"")}; var sPincode by remember{mutableStateOf(prefs.getString("sPincode","")?:"")}; var sUpi by remember{mutableStateOf(prefs.getString("sUpi","")?:"")}; var sGst by remember{mutableStateOf(prefs.getString("sGst","")?:"")}; var sBank by remember{mutableStateOf(prefs.getString("sBank","")?:"")}; var sIfsc by remember{mutableStateOf(prefs.getString("sIfsc","")?:"")}; var sJuris by remember{mutableStateOf(prefs.getString("sJuris","")?:"")}; var defTax by remember{mutableStateOf(prefs.getString("defTax","18")?:"18")}; var newPin by remember{mutableStateOf(currentPin)}; Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())){Text("SETTINGS",fontSize=24.sp,fontWeight=FontWeight.Bold); OutlinedTextField(newPin,{newPin=it},label={Text("Set Login PIN")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.NumberPassword, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sName,{sName=it},label={Text("Firm Name")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sState,{sState=it},label={Text("My State Code (GST, e.g. 21)")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sPrefix,{sPrefix=it},label={Text("Invoice Prefix")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sAddr1,{sAddr1=it},label={Text("Address Line 1")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sAddr2,{sAddr2=it},label={Text("Address Line 2")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sPhone,{sPhone=it},label={Text("Phone")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Phone, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sEmail,{sEmail=it},label={Text("Email")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Email, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sLandmark,{sLandmark=it},label={Text("Landmark")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sPincode,{sPincode=it},label={Text("Pincode")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sUpi,{sUpi=it},label={Text("UPI ID (for the payment QR)")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sGst,{sGst=it},label={Text("GSTIN")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sBank,{sBank=it},label={Text("Bank Name & Acc")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sIfsc,{sIfsc=it},label={Text("IFSC")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sJuris,{sJuris=it},label={Text("Jurisdiction")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(defTax,{defTax=it},label={Text("Default Tax %")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Text("PenKhata "+APP_VERSION, fontSize=10.sp, color=Color.Gray, modifier=Modifier.padding(top=8.dp)); val dbBills by produceState(initialValue = -1, ctx) { value = withContext(Dispatchers.IO) { countRows(ctx, "bills") } }; val dbStock by produceState(initialValue = -1, ctx) { value = withContext(Dispatchers.IO) { countRows(ctx, "stock") } }; Text("Database: " + (if(dbBills < 0) "reading..." else "$dbBills bills, $dbStock stock lines"), fontSize=10.sp, color=Color.Gray); Button(onClick={prefs.edit().putString("sName",sName).putString("sState",sState).putString("sPrefix",sPrefix).putString("sAddr1",sAddr1).putString("sAddr2",sAddr2).putString("sPhone",sPhone).putString("sEmail",sEmail).putString("sLandmark",sLandmark).putString("sPincode",sPincode).putString("sUpi",sUpi).putString("sGst",sGst).putString("sBank",sBank).putString("sIfsc",sIfsc).putString("sJuris",sJuris).putString("defTax",defTax).apply(); onPinSave(newPin); Toast.makeText(ctx,"Saved",Toast.LENGTH_SHORT).show()},modifier=Modifier.fillMaxWidth()){Text("SAVE")}; Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Backup & Restore", fontWeight=FontWeight.Bold); Text("Saves settings, invoices, ledger and the PDF bills to one file you choose, so a reinstall does not mean re-typing everything. The app PIN is not included.", fontSize=10.sp); Spacer(Modifier.height(8.dp)); Button(onClick={ backupLauncher.launch("penkhata-backup-"+SimpleDateFormat("yyyyMMdd-HHmm", Locale.ENGLISH).format(Date())+".zip") }, modifier=Modifier.fillMaxWidth()){ Text("BACKUP DATA") }; Spacer(Modifier.height(6.dp)); Button(onClick={ restoreLauncher.launch(arrayOf("application/json","text/plain","*/*")) }, modifier=Modifier.fillMaxWidth()){ Text("RESTORE DATA") } }}; Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Reset", fontWeight=FontWeight.Bold); Text("Master reset clears bills, PDFs, customers, stock, ledger and expenses but keeps every setting on this screen. Total reset clears those as well and starts the app empty.", fontSize=10.sp); Spacer(Modifier.height(8.dp)); Button(onClick={ confirmMaster = true }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFEF6C00))){ Text("MASTER RESET (KEEP SETTINGS)") }; Spacer(Modifier.height(6.dp)); Button(onClick={ confirmAll = true }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFC62828))){ Text("TOTAL RESET (EVERYTHING)") } }}; if(confirmMaster) AlertDialog(onDismissRequest={ confirmMaster = false }, title={ Text("Master reset?") }, text={ Text("Deletes every bill, PDF, customer, stock line, ledger entry and expense. Your outlet details and PIN stay.") }, confirmButton={ TextButton(onClick={ scope.launch { val n = withContext(Dispatchers.IO){ wipeTransactions(ctx) }; confirmMaster = false; onDataChanged(); Toast.makeText(ctx, "Cleared $n files.", Toast.LENGTH_LONG).show() } }){ Text("DELETE") } }, dismissButton={ TextButton(onClick={ confirmMaster = false }){ Text("CANCEL") } }); if(confirmAll) AlertDialog(onDismissRequest={ confirmAll = false }, title={ Text("Total reset?") }, text={ Text("Deletes everything: bills, PDFs, customers, stock, ledger, expenses, all settings and the PIN. The app goes back to a fresh install.") }, confirmButton={ TextButton(onClick={ scope.launch { val n = withContext(Dispatchers.IO){ wipeEverything(ctx) }; confirmAll = false; onDataChanged(); Toast.makeText(ctx, "Cleared $n files and all settings. Restart the app.", Toast.LENGTH_LONG).show() } }){ Text("DELETE EVERYTHING") } }, dismissButton={ TextButton(onClick={ confirmAll = false }){ Text("CANCEL") } }); Spacer(Modifier.height(60.dp))} }
+    var sName by remember{mutableStateOf(prefs.getString("sName","")?:"")}; var sState by remember{mutableStateOf(prefs.getString("sState","21")?:"21")}; var sPrefix by remember{mutableStateOf(prefs.getString("sPrefix","INV")?:"INV")}; var sAddr1 by remember{mutableStateOf(prefs.getString("sAddr1","")?:(prefs.getString("sAddr","")?:"").lineSequence().firstOrNull()?.trim()?:"")}; var sAddr2 by remember{mutableStateOf(prefs.getString("sAddr2","")?:(prefs.getString("sAddr","")?:"").lineSequence().drop(1).joinToString(" ").trim())}; var sPhone by remember{mutableStateOf(prefs.getString("sPhone","")?:"")}; var sEmail by remember{mutableStateOf(prefs.getString("sEmail","")?:"")}; var sLandmark by remember{mutableStateOf(prefs.getString("sLandmark","")?:"")}; var sPincode by remember{mutableStateOf(prefs.getString("sPincode","")?:"")}; var sUpi by remember{mutableStateOf(prefs.getString("sUpi","")?:"")}; var sGst by remember{mutableStateOf(prefs.getString("sGst","")?:"")}; var sBank by remember{mutableStateOf(prefs.getString("sBank","")?:"")}; var sIfsc by remember{mutableStateOf(prefs.getString("sIfsc","")?:"")}; var sJuris by remember{mutableStateOf(prefs.getString("sJuris","")?:"")}; var defTax by remember{mutableStateOf(prefs.getString("defTax","18")?:"18")}; var newPin by remember{mutableStateOf(currentPin)}; Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())){Text("SETTINGS",fontSize=24.sp,fontWeight=FontWeight.Bold); OutlinedTextField(newPin,{newPin=it},label={Text("Set Login PIN")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.NumberPassword, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sName,{sName=it},label={Text("Firm Name")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sState,{sState=it},label={Text("My State Code (GST, e.g. 21)")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sPrefix,{sPrefix=it},label={Text("Invoice Prefix")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sAddr1,{sAddr1=it},label={Text("Address Line 1")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sAddr2,{sAddr2=it},label={Text("Address Line 2")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sPhone,{sPhone=it},label={Text("Phone")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Phone, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sEmail,{sEmail=it},label={Text("Email")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Email, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sLandmark,{sLandmark=it},label={Text("Landmark")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sPincode,{sPincode=it},label={Text("Pincode")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sUpi,{sUpi=it},label={Text("UPI ID (for the payment QR)")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sGst,{sGst=it},label={Text("GSTIN")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sBank,{sBank=it},label={Text("Bank Name & Acc")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sIfsc,{sIfsc=it},label={Text("IFSC")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sJuris,{sJuris=it},label={Text("Jurisdiction")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(defTax,{defTax=it},label={Text("Default Tax %")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Text("PenKhata "+APP_VERSION, fontSize=10.sp, color=Color.Gray, modifier=Modifier.padding(top=8.dp)); val dbBills by produceState(initialValue = -1, ctx) { value = withContext(Dispatchers.IO) { countRows(ctx, "bills") } }; val dbStock by produceState(initialValue = -1, ctx) { value = withContext(Dispatchers.IO) { countRows(ctx, "stock") } }; Text("Database: " + (if(dbBills < 0) "reading..." else "$dbBills bills, $dbStock stock lines"), fontSize=10.sp, color=Color.Gray); Button(onClick={prefs.edit().putString("sName",sName).putString("sState",sState).putString("sPrefix",sPrefix).putString("sAddr1",sAddr1).putString("sAddr2",sAddr2).putString("sPhone",sPhone).putString("sEmail",sEmail).putString("sLandmark",sLandmark).putString("sPincode",sPincode).putString("sUpi",sUpi).putString("sGst",sGst).putString("sBank",sBank).putString("sIfsc",sIfsc).putString("sJuris",sJuris).putString("defTax",defTax).apply(); onPinSave(newPin); Toast.makeText(ctx,"Saved",Toast.LENGTH_SHORT).show()},modifier=Modifier.fillMaxWidth()){Text("SAVE")}; Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Backup & Restore", fontWeight=FontWeight.Bold); Text("One file with your data, a readable XLSX copy and any stored PDFs. Add a password to encrypt it - there is no recovery if you forget it. The app PIN is never included.", fontSize=10.sp); OutlinedTextField(backupPw, {backupPw=it}, label={Text("Password (optional)")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeiAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.height(8.dp)); Button(onClick={ backupLauncher.launch("penkhata-backup-"+SimpleDateFormat("yyyyMMdd-HHmm", Locale.ENGLISH).format(Date()) + (if(backupPw.isBlank()) ".zip" else ".pkh")) }, modifier=Modifier.fillMaxWidth()){ Text("BACKUP DATA") }; Spacer(Modifier.height(6.dp)); Button(onClick={ restoreLauncher.launch(arrayOf("application/json","text/plain","*/*")) }, modifier=Modifier.fillMaxWidth()){ Text("RESTORE DATA") } }}; Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Reset", fontWeight=FontWeight.Bold); Text("Master reset clears bills, PDFs, customers, stock, ledger and expenses but keeps every setting on this screen. Total reset clears those as well and starts the app empty.", fontSize=10.sp); Spacer(Modifier.height(8.dp)); Button(onClick={ confirmMaster = true }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFEF6C00))){ Text("MASTER RESET (KEEP SETTINGS)") }; Spacer(Modifier.height(6.dp)); Button(onClick={ confirmAll = true }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFC62828))){ Text("TOTAL RESET (EVERYTHING)") } }}; if(askPassword) AlertDialog(
+        onDismissRequest = { askPassword = false; pendingEncrypted = null },
+        title = { Text("Backup password") },
+        text = {
+            Column {
+                Text("This backup is encrypted. Enter the password you set when making it.", fontSize = 11.sp)
+                OutlinedTextField(restorePw, {restorePw=it}, label={Text("Password")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeiAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+            }
+        },
+        confirmButton = { TextButton(onClick = {
+            val data = pendingEncrypted
+            if(data != null) {
+                scope.launch {
+                    val plain = withContext(Dispatchers.IO) { decryptBytes(data, restorePw) }
+                    if(plain == null) {
+                        Toast.makeText(ctx, "Wrong password", Toast.LENGTH_LONG).show()
+                    } else {
+                        askPassword = false; pendingEncrypted = null
+                        val snap = withContext(Dispatchers.IO) { autoBackup(ctx) }
+                        val msg = withContext(Dispatchers.IO) {
+                            if(plain.size > 2 && plain[0] == 'P'.code.toByte() && plain[1] == 'K'.code.toByte()) restoreZip(ctx, ByteArrayInputStream(plain))
+                            else restoreJson(ctx, String(plain, Charsets.UTF_8))
+                        }
+                        onDataChanged()
+                        Toast.makeText(ctx, msg + (if(snap != null) " Previous data saved first." else ""), Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        }) { Text("UNLOCK") } },
+        dismissButton = { TextButton(onClick = { askPassword = false; pendingEncrypted = null }) { Text("CANCEL") } }
+    )
+    if(confirmMaster) AlertDialog(onDismissRequest={ confirmMaster = false }, title={ Text("Master reset?") }, text={ Text("Deletes every bill, PDF, customer, stock line, ledger entry and expense. Your outlet details and PIN stay.") }, confirmButton={ TextButton(onClick={ scope.launch { val n = withContext(Dispatchers.IO){ wipeTransactions(ctx) }; confirmMaster = false; onDataChanged(); Toast.makeText(ctx, "Cleared $n files.", Toast.LENGTH_LONG).show() } }){ Text("DELETE") } }, dismissButton={ TextButton(onClick={ confirmMaster = false }){ Text("CANCEL") } }); if(confirmAll) AlertDialog(onDismissRequest={ confirmAll = false }, title={ Text("Total reset?") }, text={ Text("Deletes everything: bills, PDFs, customers, stock, ledger, expenses, all settings and the PIN. The app goes back to a fresh install.") }, confirmButton={ TextButton(onClick={ scope.launch { val n = withContext(Dispatchers.IO){ wipeEverything(ctx) }; confirmAll = false; onDataChanged(); Toast.makeText(ctx, "Cleared $n files and all settings. Restart the app.", Toast.LENGTH_LONG).show() } }){ Text("DELETE EVERYTHING") } }, dismissButton={ TextButton(onClick={ confirmAll = false }){ Text("CANCEL") } }); Spacer(Modifier.height(60.dp))} }
 
 // --- LOGIC ---
 data class InvoiceRec(val invNo: String, val date: String, val whenMs: Long, val buyer: String, val buyerGst: String,
@@ -1430,6 +1474,139 @@ fun autoBackup(ctx: Context): File? {
         dir.listFiles()?.sortedByDescending { it.lastModified() }?.drop(3)?.forEach { it.delete() }
         f
     } catch(e: Exception) { null }
+}
+
+// ---------------------------------------------------------------- xlsx export
+// XLSX is a zip of XML. Writing it by hand keeps Apache POI (several MB) out of the app.
+fun xmlEscape(v: String): String = v.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
+fun colName(i: Int): String { var n = i + 1; var out = ""; while(n > 0) { val r = (n - 1) % 26; out = ('A' + r) + out; n = (n - 1) / 26 }; return out }
+fun sheetXml(rows: List<List<String>>): String {
+    val sb = StringBuilder()
+    sb.append("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>")
+    sb.append("<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>")
+    rows.forEachIndexed { r, row ->
+        sb.append("<row r=\"${r+1}\">")
+        row.forEachIndexed { c, v ->
+            if(v.isNotBlank()) sb.append("<c r=\"${colName(c)}${r+1}\" t=\"inlineStr\"><is><t xml:space=\"preserve\">${xmlEscape(v)}</t></is></c>")
+        }
+        sb.append("</row>")
+    }
+    sb.append("</sheetData></worksheet>")
+    return sb.toString()
+}
+fun xlsxBytes(sheets: List<Pair<String, List<List<String>>>>): ByteArray {
+    val bos = java.io.ByteArrayOutputStream()
+    java.util.zip.ZipOutputStream(bos).use { z ->
+        fun put(name: String, content: String) {
+            z.putNextEntry(java.util.zip.ZipEntry(name)); z.write(content.toByteArray(Charsets.UTF_8)); z.closeEntry()
+        }
+        val ct = StringBuilder("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>")
+        ct.append("<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">")
+        ct.append("<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>")
+        ct.append("<Default Extension=\"xml\" ContentType=\"application/xml\"/>")
+        ct.append("<Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>")
+        sheets.forEachIndexed { i, _ ->
+            ct.append("<Override PartName=\"/xl/worksheets/sheet${i+1}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>")
+        }
+        ct.append("</Types>")
+        put("[Content_Types].xml", ct.toString())
+        put("_rels/.rels", "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>")
+        val wb = StringBuilder("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets>")
+        sheets.forEachIndexed { i, sh -> wb.append("<sheet name=\"${xmlEscape(sh.first.take(28))}\" sheetId=\"${i+1}\" r:id=\"rId${i+1}\"/>") }
+        wb.append("</sheets></workbook>")
+        put("xl/workbook.xml", wb.toString())
+        val rels = StringBuilder("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">")
+        sheets.forEachIndexed { i, _ -> rels.append("<Relationship Id=\"rId${i+1}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet${i+1}.xml\"/>") }
+        rels.append("</Relationships>")
+        put("xl/_rels/workbook.xml.rels", rels.toString())
+        sheets.forEachIndexed { i, sh -> put("xl/worksheets/sheet${i+1}.xml", sheetXml(sh.second)) }
+    }
+    return bos.toByteArray()
+}
+
+// The same data as the backup, in a workbook you can open and read yourself.
+fun exportWorkbook(ctx: Context): ByteArray {
+    val inv = mutableListOf(listOf("Invoice","Date","Buyer","Phone","GSTIN","State","Taxable","CGST","SGST","IGST","Total","Paid","Balance","Profit"))
+    val lines = mutableListOf(listOf("Invoice","Description","Serial/IMEI","HSN","Qty","Rate","GST %","Taxable","Tax"))
+    val led = mutableListOf(listOf("Date","Party","Type","Amount","Note"))
+    val stk = mutableListOf(listOf("Model","IMEI","HSN","Cost","MRP","Qty","Supplier"))
+    val exp = mutableListOf(listOf("Date","Note","Amount"))
+    val set = mutableListOf(listOf("Setting","Value"))
+    try {
+        db(ctx).readableDatabase.rawQuery("SELECT ms,inv,date,buyer,bphone,bgst,bstate,taxable,cgst,sgst,igst,total,paid,balance,profit,lines FROM bills ORDER BY ms", null).use { c ->
+            while(c.moveToNext()) {
+                inv.add(listOf(c.getString(1) ?: "", c.getString(2) ?: "", c.getString(3) ?: "", c.getString(4) ?: "", c.getString(5) ?: "",
+                    c.getString(6) ?: "", fmt(c.getDouble(7)), fmt(c.getDouble(8)), fmt(c.getDouble(9)), fmt(c.getDouble(10)),
+                    fmt(c.getDouble(11)), fmt(c.getDouble(12)), fmt(c.getDouble(13)), fmt(c.getDouble(14))))
+                try {
+                    val arr = JSONArray(c.getString(15) ?: "[]")
+                    for(i in 0 until arr.length()) {
+                        val o = arr.optJSONObject(i) ?: continue
+                        lines.add(listOf(c.getString(1) ?: "", o.optString("desc"), o.optString("serial"), o.optString("hsn"),
+                            qtyText(o.optDouble("qty", 0.0)), fmt(o.optDouble("rate", 0.0)), fmt(o.optDouble("taxRate", 0.0)),
+                            fmt(o.optDouble("taxable", 0.0)), fmt(o.optDouble("tax", 0.0))))
+                    }
+                } catch(e: Exception) { }
+            }
+        }
+        db(ctx).readableDatabase.rawQuery("SELECT date,party,type,amt,descr FROM ledger ORDER BY id", null).use { c ->
+            while(c.moveToNext()) led.add(listOf(c.getString(0) ?: "", c.getString(1) ?: "", c.getString(2) ?: "", fmt(c.getDouble(3)), c.getString(4) ?: ""))
+        }
+        db(ctx).readableDatabase.rawQuery("SELECT model,imei,hsn,cost,mrp,qty,supplier FROM stock ORDER BY model", null).use { c ->
+            while(c.moveToNext()) stk.add(listOf(c.getString(0) ?: "", (c.getString(1) ?: "").replace("\n", ", "), c.getString(2) ?: "",
+                fmt(c.getDouble(3)), fmt(c.getDouble(4)), c.getInt(5).toString(), c.getString(6) ?: ""))
+        }
+        db(ctx).readableDatabase.rawQuery("SELECT ms,note,amount FROM expenses ORDER BY ms", null).use { c ->
+            while(c.moveToNext()) exp.add(listOf(SimpleDateFormat("dd-MMM-yyyy", Locale.ENGLISH).format(Date(c.getLong(0))), c.getString(1) ?: "", fmt(c.getDouble(2))))
+        }
+    } catch(e: Exception) { }
+    val prefs = ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE)
+    for(k in prefs.all.keys.sorted()) {
+        if(k == "appPin") continue
+        set.add(listOf(k, prefs.all[k]?.toString() ?: ""))
+    }
+    return xlsxBytes(listOf("Invoices" to inv, "Invoice Lines" to lines, "Ledger" to led, "Stock" to stk, "Expenses" to exp, "Settings" to set))
+}
+
+// ---------------------------------------------------------------- encryption
+// AES-256-GCM with a PBKDF2 key. Header: "PKH1" + salt(16) + iv(12) + ciphertext.
+fun encryptBytes(data: ByteArray, password: String): ByteArray {
+    val salt = ByteArray(16); java.security.SecureRandom().nextBytes(salt)
+    val iv = ByteArray(12); java.security.SecureRandom().nextBytes(iv)
+    val spec = javax.crypto.spec.PBEKeySpec(password.toCharArray(), salt, 120000, 256)
+    val key = javax.crypto.SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec)
+    val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+    cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, javax.crypto.spec.SecretKeySpec(key.encoded, "AES"), javax.crypto.spec.GCMParameterSpec(128, iv))
+    val out = java.io.ByteArrayOutputStream()
+    out.write("PKH1".toByteArray()); out.write(salt); out.write(iv); out.write(cipher.doFinal(data))
+    return out.toByteArray()
+}
+fun isEncryptedBackup(data: ByteArray): Boolean =
+    data.size > 32 && data[0] == 'P'.code.toByte() && data[1] == 'K'.code.toByte() && data[2] == 'H'.code.toByte() && data[3] == '1'.code.toByte()
+fun decryptBytes(data: ByteArray, password: String): ByteArray? {
+    return try {
+        val salt = data.copyOfRange(4, 20); val iv = data.copyOfRange(20, 32); val body = data.copyOfRange(32, data.size)
+        val spec = javax.crypto.spec.PBEKeySpec(password.toCharArray(), salt, 120000, 256)
+        val key = javax.crypto.SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec)
+        val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(javax.crypto.Cipher.DECRYPT_MODE, javax.crypto.spec.SecretKeySpec(key.encoded, "AES"), javax.crypto.spec.GCMParameterSpec(128, iv))
+        cipher.doFinal(body)
+    } catch(e: Exception) { null }
+}
+
+// Backup content: the JSON the app restores from, plus the workbook a human can read.
+fun backupPayload(ctx: Context): ByteArray {
+    val bos = java.io.ByteArrayOutputStream()
+    java.util.zip.ZipOutputStream(bos).use { z ->
+        z.putNextEntry(java.util.zip.ZipEntry("backup.json")); z.write(backupJson(ctx).toByteArray(Charsets.UTF_8)); z.closeEntry()
+        z.putNextEntry(java.util.zip.ZipEntry("PenKhata-data.xlsx")); z.write(exportWorkbook(ctx)); z.closeEntry()
+        ctx.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)?.listFiles()
+            ?.filter { it.extension.equals("pdf", true) }
+            ?.forEach { f ->
+                z.putNextEntry(java.util.zip.ZipEntry("pdf/" + f.name)); f.inputStream().use { it.copyTo(z) }; z.closeEntry()
+            }
+    }
+    return bos.toByteArray()
 }
 fun backupZip(ctx: Context, out: OutputStream) {
     ZipOutputStream(out).use { zos ->
