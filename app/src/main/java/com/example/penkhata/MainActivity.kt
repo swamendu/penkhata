@@ -233,6 +233,73 @@ data class Distributor(val id: Long, val name: String, val gstin: String, val ph
 data class Product(val id: Long, val brand: String, val category: String, val model: String, val hsn: String,
                    val gstRate: Double, val mrp: Double, val warrantyMonths: Int, val serialised: Boolean)
 
+// ---------------------------------------------------------------- purchases
+data class PurchaseLine(val model: String, val brand: String, val category: String, val hsn: String,
+                        val qty: Int, val cost: Double, val gstRate: Double, val serials: String)
+data class Purchase(val ms: Long, val distributor: String, val invoiceNo: String, val date: String,
+                    val taxable: Double, val gst: Double, val total: Double, val creditDays: Int, val note: String,
+                    val lines: List<PurchaseLine>)
+
+fun purchaseTaxable(lines: List<PurchaseLine>): Double = lines.sumOf { it.qty * it.cost }
+fun purchaseGst(lines: List<PurchaseLine>): Double = lines.sumOf { it.qty * it.cost * it.gstRate / 100.0 }
+
+// One distributor bill in: records the purchase, its lines, any new products, and the
+// stock it brings - each serial becoming an individual, traceable unit.
+fun savePurchase(ctx: Context, p: Purchase): Boolean {
+    if(p.lines.isEmpty()) return false
+    return try {
+        val w = db(ctx).writableDatabase
+        val prefs = ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE)
+        w.beginTransaction()
+        try {
+            val cv = android.content.ContentValues()
+            cv.put("ms", p.ms); cv.put("distributor", p.distributor); cv.put("invoiceNo", p.invoiceNo)
+            cv.put("date", p.date); cv.put("branch", activeBranchCode(prefs))
+            cv.put("taxable", p.taxable); cv.put("gst", p.gst); cv.put("total", p.total)
+            cv.put("creditDays", p.creditDays); cv.put("note", p.note)
+            w.insertWithOnConflict("purchases", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE)
+            w.delete("purchase_lines", "ms=?", arrayOf(p.ms.toString()))
+            for(l in p.lines) {
+                val lv = android.content.ContentValues()
+                lv.put("ms", p.ms); lv.put("model", l.model); lv.put("brand", l.brand); lv.put("category", l.category)
+                lv.put("hsn", l.hsn); lv.put("qty", l.qty); lv.put("cost", l.cost); lv.put("gstRate", l.gstRate)
+                lv.put("serials", l.serials)
+                w.insert("purchase_lines", null, lv)
+            }
+            w.setTransactionSuccessful()
+        } finally { w.endTransaction() }
+
+        val stock = loadStock(ctx).toMutableList()
+        val known = loadProducts(ctx).toMutableList()
+        var added = 0
+        for(l in p.lines) {
+            val serials = l.serials.split("\n", ",", " ").map { it.trim() }.filter { it.isNotBlank() }.distinct()
+            val units = if(serials.isNotEmpty()) serials.size else l.qty
+            if(units > 0) {
+                stock.add(StockEntry(System.currentTimeMillis() + added, l.model, serials.joinToString("\n"), l.hsn,
+                    l.cost, 0.0, units, p.distributor, p.date, l.brand, l.category))
+                added++
+            }
+            if(known.none { it.brand.equals(l.brand, true) && it.model.equals(l.model, true) }) {
+                saveProduct(ctx, Product(0, l.brand, l.category, l.model, l.hsn, l.gstRate, 0.0, 12, serials.isNotEmpty()))
+                known.add(Product(0, l.brand, l.category, l.model, l.hsn, l.gstRate, 0.0, 12, serials.isNotEmpty()))
+            }
+        }
+        if(added > 0) saveStock(ctx, stock)
+        true
+    } catch(e: Exception) { false }
+}
+fun loadPurchases(ctx: Context): List<Purchase> {
+    val out = mutableListOf<Purchase>()
+    try {
+        db(ctx).readableDatabase.rawQuery("SELECT ms,distributor,invoiceNo,date,taxable,gst,total,creditDays,note FROM purchases ORDER BY ms DESC", null).use { c ->
+            while(c.moveToNext()) out.add(Purchase(c.getLong(0), c.getString(1) ?: "", c.getString(2) ?: "", c.getString(3) ?: "",
+                c.getDouble(4), c.getDouble(5), c.getDouble(6), c.getInt(7), c.getString(8) ?: "", emptyList()))
+        }
+    } catch(e: Exception) { }
+    return out
+}
+
 fun loadBrands(ctx: Context): List<String> {
     val out = mutableListOf<String>()
     try { db(ctx).readableDatabase.rawQuery("SELECT name FROM brands ORDER BY name", null).use { c -> while(c.moveToNext()) out.add(c.getString(0) ?: "") } } catch(e: Exception) { }
