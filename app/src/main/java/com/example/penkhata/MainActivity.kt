@@ -66,7 +66,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "3.5 · iteration 20b"
+const val APP_VERSION = "3.6.2 · hotfix"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0)
 val InvItemListSaver: Saver<List<InvItem>, String> = Saver(
@@ -976,6 +976,48 @@ data class InvoiceRec(val invNo: String, val date: String, val whenMs: Long, val
                       val rates: Map<Double, Pair<Double, Double>>)
 data class Expense(val id: Long, val ms: Long, val note: String, val amount: Double)
 
+// Backups made before 3.6.2 lost the tax columns. Where a bill has lines but no tax,
+// rebuild the aggregates from the lines so restored data is not shown as zero.
+fun repairAggregates(ctx: Context): Int {
+    var fixed = 0
+    try {
+        val w = db(ctx).writableDatabase
+        val todo = mutableListOf<Pair<Long, Pair<Double, Double>>>()
+        w.rawQuery("SELECT ms,lines,tax,total FROM bills", null).use { c ->
+            while(c.moveToNext()) {
+                val ms = c.getLong(0); val linesJson = c.getString(1) ?: "[]"
+                if(c.getDouble(2) > 0.004 || c.getDouble(3) <= 0.004) continue
+                var taxable = 0.0; var tax = 0.0
+                try {
+                    val arr = JSONArray(linesJson)
+                    for(i in 0 until arr.length()) {
+                        val o = arr.optJSONObject(i) ?: continue
+                        taxable += o.optDouble("taxable", 0.0); tax += o.optDouble("tax", 0.0)
+                    }
+                } catch(e: Exception) { }
+                if(tax > 0.004) todo.add(ms to (taxable to tax))
+            }
+        }
+        for((ms, v) in todo) {
+            val cv = android.content.ContentValues()
+            cv.put("taxable", v.first); cv.put("tax", v.second)
+            w.update("bills", cv, "ms=?", arrayOf(ms.toString()))
+            w.rawQuery("SELECT bstate,seller FROM bills WHERE ms=?", arrayOf(ms.toString())).use { c ->
+                if(c.moveToFirst()) {
+                    val bstate = c.getString(0) ?: ""
+                    val sstate = try { JSONObject(c.getString(1) ?: "{}").optString("state") } catch(e: Exception) { "" }
+                    val inter = bstate.isNotBlank() && sstate.isNotBlank() && bstate.trim() != sstate.trim()
+                    val cv2 = android.content.ContentValues()
+                    if(inter) { cv2.put("igst", v.second); cv2.put("cgst", 0.0); cv2.put("sgst", 0.0); cv2.put("interState", 1) }
+                    else { cv2.put("igst", 0.0); cv2.put("cgst", v.second/2); cv2.put("sgst", v.second/2); cv2.put("interState", 0) }
+                    w.update("bills", cv2, "ms=?", arrayOf(ms.toString()))
+                }
+            }
+            fixed++
+        }
+    } catch(e: Exception) { }
+    return fixed
+}
 fun loadInvoices(ctx: Context, includeQuotes: Boolean = false): List<InvoiceRec> {
     val out = mutableListOf<InvoiceRec>()
     val where = if(includeQuotes) "" else " WHERE quote=0"
@@ -1069,7 +1111,7 @@ fun billOutDir(ctx: Context): File = File(ctx.cacheDir, "bills")
 fun billJson(ctx: Context, ms: Long): JSONObject? {
     return try {
         db(ctx).readableDatabase.rawQuery(
-            "SELECT quote,inv,date,payMode,delNote,buyer,baddr1,baddr2,blmk,bpin,bphone,bgst,bstate,bd,exch,cash,upi,card,finance,seller,lines,total FROM bills WHERE ms=?",
+            "SELECT quote,inv,date,payMode,delNote,buyer,baddr1,baddr2,blmk,bpin,bphone,bgst,bstate,bd,exch,cash,upi,card,finance,seller,lines,total,taxable,cgst,sgst,igst,tax,cogs,profit,paid,balance,interState FROM bills WHERE ms=?",
             arrayOf(ms.toString())).use { c ->
             if(!c.moveToFirst()) return null
             val j = JSONObject()
@@ -1083,6 +1125,11 @@ fun billJson(ctx: Context, ms: Long): JSONObject? {
             j.put("seller", try { JSONObject(c.getString(19) ?: "{}") } catch(e: Exception) { JSONObject() })
             j.put("lines", try { JSONArray(c.getString(20) ?: "[]") } catch(e: Exception) { JSONArray() })
             j.put("total", c.getDouble(21))
+            // the accounting columns: without these a backup restored to zeros
+            j.put("taxable", c.getDouble(22)); j.put("cgst", c.getDouble(23)); j.put("sgst", c.getDouble(24))
+            j.put("igst", c.getDouble(25)); j.put("tax", c.getDouble(26)); j.put("cogs", c.getDouble(27))
+            j.put("profit", c.getDouble(28)); j.put("paid", c.getDouble(29)); j.put("balance", c.getDouble(30))
+            j.put("interState", c.getInt(31) != 0)
             j
         }
     } catch(e: Exception) { null }
@@ -1730,7 +1777,10 @@ fun restoreJson(ctx: Context, text: String): String {
     } finally {
         w.endTransaction()
     }
-    return "Restored $settingsCount settings, $inv invoices, $led ledger entries, $exp expenses, $st stock lines."
+    // backups made before 3.6.2 carry no tax columns; rebuild them from the lines
+    val repaired = repairAggregates(ctx)
+    return "Restored $settingsCount settings, $inv invoices, $led ledger entries, $exp expenses, $st stock lines." +
+           (if(repaired > 0) " Rebuilt tax for $repaired old bill(s)." else "")
 }
 
 fun saveInvoiceData(ctx: Context, ms: Long, isQuote: Boolean, invNo: String, dateStr: String, payMode: String, delNote: String,
