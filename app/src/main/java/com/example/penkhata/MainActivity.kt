@@ -226,20 +226,6 @@ fun InvoiceScreen(isQuote: Boolean) {
         if(ims.isEmpty()) listOf(e to "") else ims.map { e to it }
     }
     val scanClient = remember { GmsBarcodeScanning.getClient(ctx, GmsBarcodeScannerOptions.Builder().build()) }
-    fun applyStockByImei(imeiNo: String) {
-        val e = findStockByImei(stockList, imeiNo) ?: return
-        iDesc = e.model
-        iHsn = e.hsn
-        if(e.mrp > 0.0) iRate = if(e.mrp == e.mrp.toLong().toDouble()) e.mrp.toLong().toString() else e.mrp.toString()
-        iQty = "1"
-        Toast.makeText(ctx, "Filled from stock: " + e.model, Toast.LENGTH_SHORT).show()
-    }
-    fun applyCustomerByPhone(phoneNo: String) {
-        val c = findCustomerByPhone(customers, phoneNo) ?: return
-        bName = c.name; bAddr1 = c.addr1; bAddr2 = c.addr2; bLandmark = c.landmark
-        bPincode = c.pincode; bGst = c.gst; bState = c.state
-        Toast.makeText(ctx, "Customer details filled: " + c.name, Toast.LENGTH_SHORT).show()
-    }
     var pendingScan by remember { mutableStateOf<File?>(null) }
     val scanCamera = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
         val f = pendingScan
@@ -270,6 +256,20 @@ fun InvoiceScreen(isQuote: Boolean) {
         }
     }
     val (customers, _) = loadState(emptyList<BuyerInfo>(), ctx) { withContext(Dispatchers.IO) { loadCustomers(ctx) } }
+    fun applyStockByImei(imeiNo: String) {
+        val e = findStockByImei(stockList, imeiNo) ?: return
+        iDesc = e.model
+        iHsn = e.hsn
+        if(e.mrp > 0.0) iRate = if(e.mrp == e.mrp.toLong().toDouble()) e.mrp.toLong().toString() else e.mrp.toString()
+        iQty = "1"
+        Toast.makeText(ctx, "Filled from stock: " + e.model, Toast.LENGTH_SHORT).show()
+    }
+    fun applyCustomerByPhone(phoneNo: String) {
+        val c = findCustomerByPhone(customers, phoneNo) ?: return
+        bName = c.name; bAddr1 = c.addr1; bAddr2 = c.addr2; bLandmark = c.landmark
+        bPincode = c.pincode; bGst = c.gst; bState = c.state
+        Toast.makeText(ctx, "Customer details filled: " + c.name, Toast.LENGTH_SHORT).show()
+    }
     var showCustomers by rememberSaveable { mutableStateOf(false) }
 
     val scope = rememberCoroutineScope()
