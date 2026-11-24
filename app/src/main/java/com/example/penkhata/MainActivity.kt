@@ -73,20 +73,23 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "4.1 · iteration 26"
+const val APP_VERSION = "5.0 · stage A"
 
-data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0)
+data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
+                   val brand: String = "", val cls: String = "")
 val InvItemListSaver: Saver<List<InvItem>, String> = Saver(
-    save = { list -> list.joinToString("\u0002") { "${it.desc}\u0001${it.serial}\u0001${it.hsn}\u0001${it.qty}\u0001${it.rate}\u0001${it.unit}\u0001${it.taxRate}\u0001${it.discount}" } },
+    save = { list -> list.joinToString("\u0002") { "${it.desc}\u0001${it.serial}\u0001${it.hsn}\u0001${it.qty}\u0001${it.rate}\u0001${it.unit}\u0001${it.taxRate}\u0001${it.discount}\u0001${it.brand}\u0001${it.cls}" } },
     restore = { s ->
         if(s.isEmpty()) emptyList() else s.split("\u0002").mapNotNull { row ->
             val f = row.split("\u0001")
-            if(f.size < 7) null else InvItem(f[0], f[1], f[2], f[3].toDoubleOrNull() ?: 0.0, f[4].toDoubleOrNull() ?: 0.0, f[5], f[6].toDoubleOrNull() ?: 18.0, if(f.size > 7) f[7].toDoubleOrNull() ?: 0.0 else 0.0)
+            if(f.size < 7) null else InvItem(f[0], f[1], f[2], f[3].toDoubleOrNull() ?: 0.0, f[4].toDoubleOrNull() ?: 0.0, f[5], f[6].toDoubleOrNull() ?: 18.0,
+                if(f.size > 7) f[7].toDoubleOrNull() ?: 0.0 else 0.0, f.getOrNull(8) ?: "", f.getOrNull(9) ?: "")
         }
     }
 )
 data class StockEntry(val id: Long, val model: String, val imei: String, val hsn: String,
-                      val cost: Double, val mrp: Double, val qty: Int, val supplier: String, val addedOn: String)
+                      val cost: Double, val mrp: Double, val qty: Int, val supplier: String, val addedOn: String,
+                      val brand: String = "", val cls: String = "")
 // A stock line can hold several IMEIs (one per handset), stored newline-separated.
 fun StockEntry.imeiList(): List<String> =
     imei.split("\n", ",", " ").map{ it.trim() }.filter{ it.isNotBlank() }.distinct()
@@ -151,14 +154,77 @@ fun fyLabel(): String {
     return String.format("%02d-%02d", start % 100, (start + 1) % 100)
 }
 
-fun nextInvoiceNo(prefs: android.content.SharedPreferences): String {
-    val prefix = (prefs.getString("sPrefix", "") ?: "").trim().ifEmpty { "INV" }
-    val n = prefs.getInt("nextInv", 1)
-    return "$prefix/${fyLabel()}/" + String.format("%03d", n)
-}
+// ---------------------------------------------------------------- outlets and people
+data class Branch(val code: String, val name: String, val address: String, val pincode: String,
+                  val gstin: String, val phone: String, val state: String, val series: String, val nextSerial: Int)
+data class Person(val id: Long, val name: String, val role: String, val branch: String, val phone: String, val active: Boolean)
 
-fun bumpInvoiceNo(prefs: android.content.SharedPreferences) {
-    prefs.edit().putInt("nextInv", prefs.getInt("nextInv", 1) + 1).apply()
+fun loadBranches(ctx: Context): List<Branch> {
+    val out = mutableListOf<Branch>()
+    try {
+        db(ctx).readableDatabase.rawQuery("SELECT code,name,address,pincode,gstin,phone,state,series,nextSerial FROM branches ORDER BY code", null).use { c ->
+            while(c.moveToNext()) out.add(Branch(c.getString(0) ?: "", c.getString(1) ?: "", c.getString(2) ?: "", c.getString(3) ?: "",
+                c.getString(4) ?: "", c.getString(5) ?: "", c.getString(6) ?: "", c.getString(7) ?: "", c.getInt(8)))
+        }
+    } catch(e: Exception) { }
+    return out
+}
+fun saveBranch(ctx: Context, b: Branch) {
+    val cv = android.content.ContentValues()
+    cv.put("code", b.code); cv.put("name", b.name); cv.put("address", b.address); cv.put("pincode", b.pincode)
+    cv.put("gstin", b.gstin); cv.put("phone", b.phone); cv.put("state", b.state); cv.put("series", b.series)
+    cv.put("nextSerial", b.nextSerial)
+    db(ctx).writableDatabase.insertWithOnConflict("branches", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE)
+}
+// First run on an existing install: make a branch out of whatever Settings already holds.
+fun ensureBranch(ctx: Context) {
+    try {
+        if(loadBranches(ctx).isNotEmpty()) return
+        val p = ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE)
+        val code = (p.getString("sPrefix", "") ?: "").trim().ifEmpty { "MAIN" }
+        saveBranch(ctx, Branch(code, p.getString("sName", "") ?: "",
+            listOf(p.getString("sAddr1", "") ?: "", p.getString("sAddr2", "") ?: "").filter { it.isNotBlank() }.joinToString(", "),
+            p.getString("sPincode", "") ?: "", p.getString("sGst", "") ?: "", p.getString("sPhone", "") ?: "",
+            p.getString("sState", "21") ?: "21", (p.getString("sPrefix", "") ?: "INV"), p.getInt("nextInv", 1)))
+        if(loadPeople(ctx).isEmpty()) savePerson(ctx, Person(0, "Owner", "OWNER", code, p.getString("sPhone", "") ?: "", true))
+    } catch(e: Exception) { }
+}
+fun loadPeople(ctx: Context): List<Person> {
+    val out = mutableListOf<Person>()
+    try {
+        db(ctx).readableDatabase.rawQuery("SELECT id,name,role,branch,phone,active FROM people ORDER BY role, name", null).use { c ->
+            while(c.moveToNext()) out.add(Person(c.getLong(0), c.getString(1) ?: "", c.getString(2) ?: "", c.getString(3) ?: "", c.getString(4) ?: "", c.getInt(5) != 0))
+        }
+    } catch(e: Exception) { }
+    return out
+}
+fun savePerson(ctx: Context, p: Person) {
+    val cv = android.content.ContentValues()
+    if(p.id > 0) cv.put("id", p.id)
+    cv.put("name", p.name); cv.put("role", p.role); cv.put("branch", p.branch); cv.put("phone", p.phone)
+    cv.put("active", if(p.active) 1 else 0)
+    db(ctx).writableDatabase.insertWithOnConflict("people", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE)
+}
+fun activeBranchCode(prefs: android.content.SharedPreferences): String = prefs.getString("activeBranch", "") ?: ""
+fun activePerson(prefs: android.content.SharedPreferences): String = prefs.getString("activePerson", "Owner") ?: "Owner"
+fun activeRole(prefs: android.content.SharedPreferences): String = prefs.getString("activeRole", "OWNER") ?: "OWNER"
+
+// Numbers are per outlet and series, so two shops can both have 00001 without colliding.
+fun nextInvoiceNo(ctx: Context, prefs: android.content.SharedPreferences): String {
+    val branches = loadBranches(ctx)
+    val b = branches.firstOrNull { it.code == activeBranchCode(prefs) } ?: branches.firstOrNull()
+    if(b == null) {
+        val prefix = (prefs.getString("sPrefix", "") ?: "").trim().ifEmpty { "INV" }
+        return "$prefix/${fyLabel()}/" + String.format("%03d", prefs.getInt("nextInv", 1))
+    }
+    return "${b.code}/${b.series}${fyLabel()}/" + String.format("%05d", b.nextSerial)
+}
+fun bumpInvoiceNo(ctx: Context, prefs: android.content.SharedPreferences) {
+    try {
+        val branches = loadBranches(ctx)
+        val b = branches.firstOrNull { it.code == activeBranchCode(prefs) } ?: branches.firstOrNull() ?: return
+        saveBranch(ctx, b.copy(nextSerial = b.nextSerial + 1))
+    } catch(e: Exception) { }
 }
 
 class MainActivity : FragmentActivity() {
@@ -236,7 +302,10 @@ fun MainAppScreen() {
     var currentScreen by remember { mutableStateOf("dashboard") }
     // bumped after a restore or a reset: every screen rebuilds and re-reads its data
     var dataVersion by remember { mutableStateOf(0) }
-    LaunchedEffect(Unit) { withContext(Dispatchers.IO) { importJsonIfNeeded(ctx) }; dataVersion++ }
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) { importJsonIfNeeded(ctx); ensureBranch(ctx) }
+        dataVersion++
+    }
 
     var showExit by remember { mutableStateOf(false) }
     var exiting by remember { mutableStateOf(false) }
@@ -309,7 +378,7 @@ fun InvoiceScreen(isQuote: Boolean) {
     val ctx = LocalContext.current
     val prefs = remember { ctx.getSharedPreferences("penkhata_data", android.content.Context.MODE_PRIVATE) }
     val sellerState = prefs.getString("sState", "21") ?: "21"
-    var invNo by rememberSaveable { mutableStateOf(nextInvoiceNo(prefs)) }
+    var invNo by rememberSaveable { mutableStateOf(nextInvoiceNo(ctx, prefs)) }
     var date by rememberSaveable { mutableStateOf(SimpleDateFormat("dd-MMM-yyyy", Locale.ENGLISH).format(Date())) }
     var payMode by rememberSaveable { mutableStateOf("") }; var delNote by rememberSaveable { mutableStateOf("") }
     var bName by rememberSaveable { mutableStateOf("") }
@@ -335,8 +404,11 @@ fun InvoiceScreen(isQuote: Boolean) {
     }
     val scanClient = remember { GmsBarcodeScanning.getClient(ctx, GmsBarcodeScannerOptions.Builder().build()) }
     val (customers, _) = loadState(emptyList<BuyerInfo>(), ctx) { withContext(Dispatchers.IO) { loadCustomers(ctx) } }
+    var iBrand by rememberSaveable { mutableStateOf("") }
+    var iCls by rememberSaveable { mutableStateOf("") }
     fun applyStockByImei(imeiNo: String) {
         val e = findStockByImei(stockList, imeiNo) ?: return
+        iBrand = e.brand; iCls = e.cls
         iDesc = e.model
         iHsn = e.hsn
         if(e.mrp > 0.0) iRate = if(e.mrp == e.mrp.toLong().toDouble()) e.mrp.toLong().toString() else e.mrp.toString()
@@ -384,7 +456,7 @@ fun InvoiceScreen(isQuote: Boolean) {
     var busy by remember { mutableStateOf(false) }
 
     fun clearBill() {
-        invNo = nextInvoiceNo(prefs)
+        invNo = nextInvoiceNo(ctx, prefs)
         bName=""; bAddr1=""; bAddr2=""; bLandmark=""; bPincode=""; bPhone=""; bGst=""; bState=""
         items = emptyList()
         billDisc=""; exchange=""; cash=""; upi=""; card=""; finance=""
@@ -454,6 +526,7 @@ fun InvoiceScreen(isQuote: Boolean) {
             if(showStock) stockUnits.forEach { pair ->
                 val entry = pair.first; val imeiNo = pair.second
                 Column(Modifier.fillMaxWidth().clickable {
+                    iBrand = entry.brand; iCls = entry.cls
                     iDesc = entry.model
                     iSerial = imeiNo
                     iHsn = entry.hsn
@@ -482,8 +555,9 @@ fun InvoiceScreen(isQuote: Boolean) {
             Button(onClick={
                 if(iDesc.isNotEmpty()) {
                     items = items + InvItem(iDesc, iSerial, iHsn, iQty.toDoubleOrNull() ?: 1.0, iRate.toDoubleOrNull() ?: 0.0, iUnit,
-                        (iTax.toDoubleOrNull() ?: 18.0).coerceIn(0.0, 100.0), (iDisc.toDoubleOrNull() ?: 0.0).coerceIn(0.0, 100.0))
-                    iDesc=""; iSerial=""; iQty="1"; iRate=""; iDisc="0"
+                        (iTax.toDoubleOrNull() ?: 18.0).coerceIn(0.0, 100.0), (iDisc.toDoubleOrNull() ?: 0.0).coerceIn(0.0, 100.0),
+                        iBrand, iCls)
+                    iDesc=""; iSerial=""; iQty="1"; iRate=""; iDisc="0"; iBrand=""; iCls=""
                 }
             }, modifier=Modifier.fillMaxWidth().padding(top=5.dp)) { Text("ADD") }
         }}
@@ -555,7 +629,7 @@ fun InvoiceScreen(isQuote: Boolean) {
                     if(file == null) { Toast.makeText(ctx, "Could not write the PDF", Toast.LENGTH_LONG).show() }
                     else {
                         if(!isQuote) {
-                            bumpInvoiceNo(prefs); clearBill()
+                            bumpInvoiceNo(ctx, prefs); clearBill()
                             scope.launch { withContext(Dispatchers.IO) { deductStock(ctx, snapItems) } }
                         }
                         openPdf(ctx, file)
@@ -743,7 +817,12 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
             }
             Row { OutlinedTextField(hsn, {hsn=it}, label={Text("HSN")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.width(5.dp)); OutlinedTextField(qty, {qty=it}, label={Text("Qty")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })) }
             Row { OutlinedTextField(cost, {cost=it}, label={Text("Purchase \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.width(5.dp)); OutlinedTextField(mrp, {mrp=it}, label={Text("MRP \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })) }
-            OutlinedTextField(supplier, {supplier=it}, label={Text("Supplier")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+            Row {
+                OutlinedTextField(brand, {brand=it}, label={Text("Brand")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+                Spacer(Modifier.width(5.dp))
+                OutlinedTextField(cls, {cls=it}, label={Text("Class")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+            }
+            OutlinedTextField(supplier, {supplier=it}, label={Text("Supplier / Distributor")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
             Button(onClick = {
                 if(model.isNotBlank()) {
                     val imeis = imei.split("\n", ",", " ").map{ it.trim() }.filter{ it.isNotBlank() }.distinct()
@@ -751,11 +830,12 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
                     val units = if(imeis.isNotEmpty()) imeis.size else (qty.toIntOrNull() ?: 1).coerceAtLeast(0)
                     val entry = StockEntry(System.currentTimeMillis(), model.trim(), imeis.joinToString("\n"), hsn.trim(),
                         cost.toDoubleOrNull() ?: 0.0, mrp.toDoubleOrNull() ?: 0.0, units,
-                        supplier.trim(), SimpleDateFormat("dd-MMM-yyyy", Locale.ENGLISH).format(Date()))
+                        supplier.trim(), SimpleDateFormat("dd-MMM-yyyy", Locale.ENGLISH).format(Date()),
+                        brand.trim().uppercase(), cls.trim())
                     scope.launch {
                         withContext(Dispatchers.IO) { saveStock(ctx, loadStock(ctx) + entry) }
                         reload++
-                        model=""; imei=""; hsn=""; cost=""; mrp=""; qty="1"; supplier=""
+                        model=""; imei=""; hsn=""; cost=""; mrp=""; qty="1"; supplier=""; brand=""
                         Toast.makeText(ctx, "Added to stock", Toast.LENGTH_SHORT).show()
                     }
                 }
@@ -1100,7 +1180,47 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
             }
         }
     }
-    var sName by remember{mutableStateOf(prefs.getString("sName","")?:"")}; var sState by remember{mutableStateOf(prefs.getString("sState","21")?:"21")}; var sPrefix by remember{mutableStateOf(prefs.getString("sPrefix","INV")?:"INV")}; var sAddr1 by remember{mutableStateOf(prefs.getString("sAddr1","")?:(prefs.getString("sAddr","")?:"").lineSequence().firstOrNull()?.trim()?:"")}; var sAddr2 by remember{mutableStateOf(prefs.getString("sAddr2","")?:(prefs.getString("sAddr","")?:"").lineSequence().drop(1).joinToString(" ").trim())}; var sPhone by remember{mutableStateOf(prefs.getString("sPhone","")?:"")}; var sEmail by remember{mutableStateOf(prefs.getString("sEmail","")?:"")}; var sLandmark by remember{mutableStateOf(prefs.getString("sLandmark","")?:"")}; var sPincode by remember{mutableStateOf(prefs.getString("sPincode","")?:"")}; var sUpi by remember{mutableStateOf(prefs.getString("sUpi","")?:"")}; var sGst by remember{mutableStateOf(prefs.getString("sGst","")?:"")}; var sBank by remember{mutableStateOf(prefs.getString("sBank","")?:"")}; var sIfsc by remember{mutableStateOf(prefs.getString("sIfsc","")?:"")}; var sJuris by remember{mutableStateOf(prefs.getString("sJuris","")?:"")}; var defTax by remember{mutableStateOf(prefs.getString("defTax","18")?:"18")}; var newPin by remember{mutableStateOf("")}; Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())){Text("SETTINGS",fontSize=24.sp,fontWeight=FontWeight.Bold); OutlinedTextField(newPin,{newPin=it},label={Text(if(hasPinSet) "New PIN (blank + SAVE removes the lock)" else "Set Login PIN (optional)")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.NumberPassword, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sName,{sName=it},label={Text("Firm Name")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sState,{sState=it},label={Text("My State Code (GST, e.g. 21)")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sPrefix,{sPrefix=it},label={Text("Invoice Prefix")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sAddr1,{sAddr1=it},label={Text("Address Line 1")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sAddr2,{sAddr2=it},label={Text("Address Line 2")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sPhone,{sPhone=it},label={Text("Phone")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Phone, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sEmail,{sEmail=it},label={Text("Email")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Email, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sLandmark,{sLandmark=it},label={Text("Landmark")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sPincode,{sPincode=it},label={Text("Pincode")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sUpi,{sUpi=it},label={Text("UPI ID (for the payment QR)")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sGst,{sGst=it},label={Text("GSTIN")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sBank,{sBank=it},label={Text("Bank Name & Acc")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sIfsc,{sIfsc=it},label={Text("IFSC")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sJuris,{sJuris=it},label={Text("Jurisdiction")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(defTax,{defTax=it},label={Text("Default Tax %")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Text("PenKhata "+APP_VERSION, fontSize=10.sp, color=Color.Gray, modifier=Modifier.padding(top=8.dp)); val dbBills by produceState(initialValue = -1, ctx) { value = withContext(Dispatchers.IO) { countRows(ctx, "bills") } }; val dbStock by produceState(initialValue = -1, ctx) { value = withContext(Dispatchers.IO) { countRows(ctx, "stock") } }; Text("Database: " + (if(dbBills < 0) "reading..." else "$dbBills bills, $dbStock stock lines"), fontSize=10.sp, color=Color.Gray); Button(onClick={prefs.edit().putString("sName",sName).putString("sState",sState).putString("sPrefix",sPrefix).putString("sAddr1",sAddr1).putString("sAddr2",sAddr2).putString("sPhone",sPhone).putString("sEmail",sEmail).putString("sLandmark",sLandmark).putString("sPincode",sPincode).putString("sUpi",sUpi).putString("sGst",sGst).putString("sBank",sBank).putString("sIfsc",sIfsc).putString("sJuris",sJuris).putString("defTax",defTax).apply(); onPinSave(newPin); Toast.makeText(ctx,"Saved",Toast.LENGTH_SHORT).show()},modifier=Modifier.fillMaxWidth()){Text("SAVE")}; Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Backup & Restore", fontWeight=FontWeight.Bold); Text("One file with your data, a readable XLSX copy and any stored PDFs. Add a password to encrypt it - there is no recovery if you forget it. The app PIN is never included.", fontSize=10.sp); OutlinedTextField(backupPw, {backupPw=it}, label={Text("Password (optional)")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.height(8.dp)); Button(onClick={
+    var sName by remember{mutableStateOf(prefs.getString("sName","")?:"")}; var sState by remember{mutableStateOf(prefs.getString("sState","21")?:"21")}; var sPrefix by remember{mutableStateOf(prefs.getString("sPrefix","INV")?:"INV")}; var sAddr1 by remember{mutableStateOf(prefs.getString("sAddr1","")?:(prefs.getString("sAddr","")?:"").lineSequence().firstOrNull()?.trim()?:"")}; var sAddr2 by remember{mutableStateOf(prefs.getString("sAddr2","")?:(prefs.getString("sAddr","")?:"").lineSequence().drop(1).joinToString(" ").trim())}; var sPhone by remember{mutableStateOf(prefs.getString("sPhone","")?:"")}; var sEmail by remember{mutableStateOf(prefs.getString("sEmail","")?:"")}; var sLandmark by remember{mutableStateOf(prefs.getString("sLandmark","")?:"")}; var sPincode by remember{mutableStateOf(prefs.getString("sPincode","")?:"")}; var sUpi by remember{mutableStateOf(prefs.getString("sUpi","")?:"")}; var sGst by remember{mutableStateOf(prefs.getString("sGst","")?:"")}; var sBank by remember{mutableStateOf(prefs.getString("sBank","")?:"")}; var sIfsc by remember{mutableStateOf(prefs.getString("sIfsc","")?:"")}; var sJuris by remember{mutableStateOf(prefs.getString("sJuris","")?:"")}; var defTax by remember{mutableStateOf(prefs.getString("defTax","18")?:"18")}; var newPerson by remember{mutableStateOf("")}; var newRole by remember{mutableStateOf("MANAGER")}; var newPin by remember{mutableStateOf("")}; Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())){Text("SETTINGS",fontSize=24.sp,fontWeight=FontWeight.Bold);             Card(Modifier.padding(vertical=5.dp)){Column(Modifier.padding(10.dp)){
+                val branches by produceState(initialValue = emptyList<Branch>(), ctx) { value = withContext(Dispatchers.IO) { loadBranches(ctx) } }
+                val people by produceState(initialValue = emptyList<Person>(), ctx) { value = withContext(Dispatchers.IO) { loadPeople(ctx) } }
+                Text("Outlet & Team", fontWeight=FontWeight.Bold)
+                Divider(Modifier.padding(vertical=5.dp))
+                Text("Acting as: " + activePerson(prefs) + " (" + activeRole(prefs) + ")", fontSize=11.sp, fontWeight=FontWeight.Bold)
+                branches.forEach { b ->
+                    Row(Modifier.fillMaxWidth().clickable { prefs.edit().putString("activeBranch", b.code).apply(); onDataChanged() }.padding(vertical=3.dp), verticalAlignment=Alignment.CenterVertically){
+                        Text(if(b.code == activeBranchCode(prefs)) "\u2714 " else "   ", fontSize=11.sp)
+                        Text(b.code + " \u00b7 " + b.name, fontSize=11.sp, modifier=Modifier.weight(1f), maxLines=1)
+                        Text(b.series + " \u00b7 next " + String.format("%05d", b.nextSerial), fontSize=9.sp, color=Color.Gray)
+                    }
+                }
+                Divider(Modifier.padding(vertical=4.dp))
+                people.forEach { person ->
+                    Row(Modifier.fillMaxWidth().clickable {
+                        prefs.edit().putString("activePerson", person.name).putString("activeRole", person.role).apply(); onDataChanged()
+                    }.padding(vertical=3.dp), verticalAlignment=Alignment.CenterVertically){
+                        Text(if(person.name == activePerson(prefs)) "\u2714 " else "   ", fontSize=11.sp)
+                        Text(person.name, fontSize=11.sp, modifier=Modifier.weight(1f), maxLines=1)
+                        Text(person.role, fontSize=9.sp, color=if(person.role=="OWNER") Color(0xFF2E7D32) else Color.Gray)
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
+                Row {
+                    OutlinedTextField(newPerson, {newPerson=it}, label={Text("Add person")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+                    Spacer(Modifier.width(4.dp))
+                    OutlinedTextField(newRole, {newRole=it}, label={Text("Role")}, modifier=Modifier.weight(0.7f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+                }
+                Button(onClick = {
+                    if(newPerson.isNotBlank()) {
+                        val role = newRole.trim().uppercase().let { if(it in listOf("OWNER","MANAGER","REP")) it else "REP" }
+                        scope.launch {
+                            withContext(Dispatchers.IO) { savePerson(ctx, Person(0, newPerson.trim(), role, activeBranchCode(prefs), "", true)) }
+                            newPerson=""; newRole="MANAGER"; onDataChanged()
+                        }
+                    }
+                }, modifier = Modifier.fillMaxWidth()) { Text("ADD PERSON") }
+                Text("OWNER: everything. MANAGER: billing, stock and this outlet's reports. REP: billing and stock only. Only the OWNER can cancel a bill.", fontSize=9.sp, color=Color.Gray)
+            }}
+            OutlinedTextField(newPin,{newPin=it},label={Text(if(hasPinSet) "New PIN (blank + SAVE removes the lock)" else "Set Login PIN (optional)")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.NumberPassword, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sName,{sName=it},label={Text("Firm Name")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sState,{sState=it},label={Text("My State Code (GST, e.g. 21)")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sPrefix,{sPrefix=it},label={Text("Invoice Prefix")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sAddr1,{sAddr1=it},label={Text("Address Line 1")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sAddr2,{sAddr2=it},label={Text("Address Line 2")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sPhone,{sPhone=it},label={Text("Phone")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Phone, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sEmail,{sEmail=it},label={Text("Email")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Email, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sLandmark,{sLandmark=it},label={Text("Landmark")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sPincode,{sPincode=it},label={Text("Pincode")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sUpi,{sUpi=it},label={Text("UPI ID (for the payment QR)")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sGst,{sGst=it},label={Text("GSTIN")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sBank,{sBank=it},label={Text("Bank Name & Acc")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sIfsc,{sIfsc=it},label={Text("IFSC")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sJuris,{sJuris=it},label={Text("Jurisdiction")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(defTax,{defTax=it},label={Text("Default Tax %")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Text("PenKhata "+APP_VERSION, fontSize=10.sp, color=Color.Gray, modifier=Modifier.padding(top=8.dp)); val dbBills by produceState(initialValue = -1, ctx) { value = withContext(Dispatchers.IO) { countRows(ctx, "bills") } }; val dbStock by produceState(initialValue = -1, ctx) { value = withContext(Dispatchers.IO) { countRows(ctx, "stock") } }; Text("Database: " + (if(dbBills < 0) "reading..." else "$dbBills bills, $dbStock stock lines"), fontSize=10.sp, color=Color.Gray); Button(onClick={prefs.edit().putString("sName",sName).putString("sState",sState).putString("sPrefix",sPrefix).putString("sAddr1",sAddr1).putString("sAddr2",sAddr2).putString("sPhone",sPhone).putString("sEmail",sEmail).putString("sLandmark",sLandmark).putString("sPincode",sPincode).putString("sUpi",sUpi).putString("sGst",sGst).putString("sBank",sBank).putString("sIfsc",sIfsc).putString("sJuris",sJuris).putString("defTax",defTax).apply(); onPinSave(newPin); Toast.makeText(ctx,"Saved",Toast.LENGTH_SHORT).show()},modifier=Modifier.fillMaxWidth()){Text("SAVE")}; Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Backup & Restore", fontWeight=FontWeight.Bold); Text("One file with your data, a readable XLSX copy and any stored PDFs. Add a password to encrypt it - there is no recovery if you forget it. The app PIN is never included.", fontSize=10.sp); OutlinedTextField(backupPw, {backupPw=it}, label={Text("Password (optional)")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.height(8.dp)); Button(onClick={
                 val name = "penkhata-backup-" + SimpleDateFormat("yyyyMMdd-HHmm", Locale.ENGLISH).format(Date())
                 if(backupPw.isBlank()) backupLauncher.launch("$name.zip") else backupEncLauncher.launch("$name.pkh")
             }, modifier=Modifier.fillMaxWidth()){ Text("BACKUP DATA") }; Spacer(Modifier.height(6.dp)); Button(onClick={ restoreLauncher.launch(arrayOf("application/json","text/plain","*/*")) }, modifier=Modifier.fillMaxWidth()){ Text("RESTORE DATA") } }}; Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Reset", fontWeight=FontWeight.Bold); Text("Master reset clears bills, PDFs, customers, stock, ledger and expenses but keeps every setting on this screen. Total reset clears those as well and starts the app empty.", fontSize=10.sp); Spacer(Modifier.height(8.dp)); Button(onClick={ confirmMaster = true }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFEF6C00))){ Text("MASTER RESET (KEEP SETTINGS)") }; Spacer(Modifier.height(6.dp)); Button(onClick={ confirmAll = true }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFC62828))){ Text("TOTAL RESET (EVERYTHING)") } }}; if(askPassword) AlertDialog(
@@ -1250,13 +1370,13 @@ fun convertQuoteToInvoice(ctx: Context, quoteMs: Long): File? {
     val cash = o.optDouble("cash", 0.0); val upi = o.optDouble("upi", 0.0); val card = o.optDouble("card", 0.0)
     val calc = computeBill(lines, bd, exch, cash, upi, card, seller.state, buyer.state)
     val prefs = ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE)
-    val invNo = nextInvoiceNo(prefs)
+    val invNo = nextInvoiceNo(ctx, prefs)
     val dateStr = SimpleDateFormat("dd-MMM-yyyy", Locale.ENGLISH).format(Date())
     val ms = System.currentTimeMillis()
     saveInvoiceData(ctx, ms, false, invNo, dateStr, o.optString("payMode"), o.optString("delNote"), buyer, seller,
         bd, exch, cash, upi, card, o.optString("finance"), calc, lines)
     deductStock(ctx, lines)
-    bumpInvoiceNo(prefs)
+    bumpInvoiceNo(ctx, prefs)
     return createPdf(ctx, false, invNo, dateStr, o.optString("payMode"), o.optString("delNote"),
         seller.name, seller.addr, seller.phone, seller.email, seller.landmark, seller.pincode, seller.gst,
         seller.bank, seller.ifsc, seller.juris, buyer.name, buyer.addr1, buyer.addr2, buyer.landmark,
@@ -1526,13 +1646,17 @@ fun shareReminder(ctx: Context, party: String, amount: Double, firm: String) {
 // ---------------------------------------------------------------- database
 // SQLite replaces the per-file JSON store: indexed lookups, crash-safe writes and a
 // single file to back up. The JSON files are imported once and left in place.
-class PenDb(ctx: Context) : android.database.sqlite.SQLiteOpenHelper(ctx, "penkhata.db", null, 2) {
+class PenDb(ctx: Context) : android.database.sqlite.SQLiteOpenHelper(ctx, "penkhata.db", null, 3) {
     override fun onCreate(db: android.database.sqlite.SQLiteDatabase) {
         db.execSQL("""CREATE TABLE bills(ms INTEGER PRIMARY KEY, quote INTEGER, inv TEXT, date TEXT, payMode TEXT, delNote TEXT,
             buyer TEXT, bgst TEXT, baddr1 TEXT, baddr2 TEXT, blmk TEXT, bpin TEXT, bphone TEXT, bstate TEXT,
             total REAL, taxable REAL, cgst REAL, sgst REAL, igst REAL, tax REAL, interState INTEGER,
             cogs REAL, profit REAL, paid REAL, balance REAL, bd REAL, exch REAL, cash REAL, upi REAL, card REAL,
-            finance TEXT, seller TEXT, lines TEXT, cancelled INTEGER DEFAULT 0, cancelReason TEXT DEFAULT '')""")
+            finance TEXT, seller TEXT, lines TEXT, cancelled INTEGER DEFAULT 0, cancelReason TEXT DEFAULT '',
+            branch TEXT DEFAULT '', series TEXT DEFAULT '', salesman TEXT DEFAULT '', deliveryDate TEXT DEFAULT '')""")
+        db.execSQL("""CREATE TABLE branches(code TEXT PRIMARY KEY, name TEXT, address TEXT, pincode TEXT, gstin TEXT,
+            phone TEXT, state TEXT, series TEXT, nextSerial INTEGER DEFAULT 1)""")
+        db.execSQL("""CREATE TABLE people(id INTEGER PRIMARY KEY, name TEXT, role TEXT, branch TEXT, phone TEXT, active INTEGER DEFAULT 1)""")
         db.execSQL("CREATE INDEX idx_bills_inv ON bills(inv)")
         db.execSQL("CREATE INDEX idx_bills_ms ON bills(ms)")
         db.execSQL("CREATE INDEX idx_bills_buyer ON bills(buyer)")
@@ -1549,6 +1673,17 @@ class PenDb(ctx: Context) : android.database.sqlite.SQLiteOpenHelper(ctx, "penkh
         if(oldVersion < 2) {
             db.execSQL("ALTER TABLE bills ADD COLUMN cancelled INTEGER DEFAULT 0")
             db.execSQL("ALTER TABLE bills ADD COLUMN cancelReason TEXT DEFAULT ''")
+        }
+        // v3: outlets, people, and attribution on every bill
+        if(oldVersion < 3) {
+            db.execSQL("ALTER TABLE bills ADD COLUMN branch TEXT DEFAULT ''")
+            db.execSQL("ALTER TABLE bills ADD COLUMN series TEXT DEFAULT ''")
+            db.execSQL("ALTER TABLE bills ADD COLUMN salesman TEXT DEFAULT ''")
+            db.execSQL("ALTER TABLE bills ADD COLUMN deliveryDate TEXT DEFAULT ''")
+            db.execSQL("ALTER TABLE stock ADD COLUMN brand TEXT DEFAULT ''")
+            db.execSQL("ALTER TABLE stock ADD COLUMN cls TEXT DEFAULT ''")
+            db.execSQL("CREATE TABLE IF NOT EXISTS branches(code TEXT PRIMARY KEY, name TEXT, address TEXT, pincode TEXT, gstin TEXT, phone TEXT, state TEXT, series TEXT, nextSerial INTEGER DEFAULT 1)")
+            db.execSQL("CREATE TABLE IF NOT EXISTS people(id INTEGER PRIMARY KEY, name TEXT, role TEXT, branch TEXT, phone TEXT, active INTEGER DEFAULT 1)")
         }
     }
     override fun onConfigure(db: android.database.sqlite.SQLiteDatabase) {
@@ -1638,9 +1773,10 @@ fun importJsonIfNeeded(ctx: Context) {
 fun loadStock(ctx: Context): List<StockEntry> {
     val out = mutableListOf<StockEntry>()
     try {
-        db(ctx).readableDatabase.rawQuery("SELECT id,model,imei,hsn,cost,mrp,qty,supplier,addedOn FROM stock ORDER BY model", null).use { c ->
+        db(ctx).readableDatabase.rawQuery("SELECT id,model,imei,hsn,cost,mrp,qty,supplier,addedOn,brand,cls FROM stock ORDER BY model", null).use { c ->
             while(c.moveToNext()) out.add(StockEntry(c.getLong(0), c.getString(1) ?: "", c.getString(2) ?: "", c.getString(3) ?: "",
-                c.getDouble(4), c.getDouble(5), c.getInt(6), c.getString(7) ?: "", c.getString(8) ?: ""))
+                c.getDouble(4), c.getDouble(5), c.getInt(6), c.getString(7) ?: "", c.getString(8) ?: "",
+                c.getString(9) ?: "", c.getString(10) ?: ""))
         }
     } catch(e: Exception) { }
     return out
@@ -1654,6 +1790,7 @@ fun saveStock(ctx: Context, list: List<StockEntry>) {
             val cv = android.content.ContentValues()
             cv.put("id", e.id); cv.put("model", e.model); cv.put("imei", e.imei); cv.put("hsn", e.hsn)
             cv.put("cost", e.cost); cv.put("mrp", e.mrp); cv.put("qty", e.qty); cv.put("supplier", e.supplier); cv.put("addedOn", e.addedOn)
+            cv.put("brand", e.brand); cv.put("cls", e.cls)
             w.insertWithOnConflict("stock", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE)
         }
         w.setTransactionSuccessful()
@@ -2071,6 +2208,7 @@ fun saveInvoiceData(ctx: Context, ms: Long, isQuote: Boolean, invNo: String, dat
         o.put("desc", i.desc); o.put("hsn", i.hsn); o.put("qty", i.qty); o.put("rate", i.rate)
         o.put("serial", i.serial); o.put("unit", i.unit); o.put("discount", i.discount)
         o.put("taxRate", tr); o.put("taxable", base*keep); o.put("tax", (net-base)*keep)
+        o.put("brand", i.brand); o.put("cls", i.cls)
         lines.put(o)
     }
     val sj = JSONObject()
@@ -2087,6 +2225,11 @@ fun saveInvoiceData(ctx: Context, ms: Long, isQuote: Boolean, invNo: String, dat
     cv.put("cogs", cogs); cv.put("profit", calc.taxable - cogs); cv.put("paid", calc.paid); cv.put("balance", calc.balance)
     cv.put("bd", billDiscount); cv.put("exch", exchange); cv.put("cash", cash); cv.put("upi", upi); cv.put("card", card)
     cv.put("finance", finance); cv.put("seller", sj.toString()); cv.put("lines", lines.toString())
+    // who did it and from which outlet: the basis of every later dispute
+    val pref = ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE)
+    val br = loadBranches(ctx).firstOrNull { it.code == activeBranchCode(pref) } ?: loadBranches(ctx).firstOrNull()
+    cv.put("branch", br?.code ?: ""); cv.put("series", br?.series ?: "")
+    cv.put("salesman", activePerson(pref)); cv.put("deliveryDate", dateStr)
     db(ctx).writableDatabase.insertWithOnConflict("bills", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE)
 }
 fun saveLedgerEntry(ctx: Context, e: LedgerEntry) {
