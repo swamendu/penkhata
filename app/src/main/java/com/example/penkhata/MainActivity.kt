@@ -57,7 +57,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "2.8.1 \u00b7 hotfix"
+const val APP_VERSION = "2.8.2 \u00b7 hotfix"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0)
 val InvItemListSaver: Saver<List<InvItem>, String> = Saver(
@@ -727,7 +727,7 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
             busy = true
             val f = withContext(Dispatchers.IO) { renderBill(ctx, ms) }
             busy = false
-            if(f != null) openPdf(ctx, f) else Toast.makeText(ctx, "Could not rebuild this bill", Toast.LENGTH_LONG).show()
+            if(f != null) openPdf(ctx, f) else Toast.makeText(ctx, "This bill has no item details stored (saved by an older version), so it cannot be rebuilt", Toast.LENGTH_LONG).show()
         }
     }
     fun shareBill(ms: Long) {
@@ -735,7 +735,7 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
             busy = true
             val f = withContext(Dispatchers.IO) { renderBill(ctx, ms) }
             busy = false
-            if(f != null) sharePdf(ctx, f) else Toast.makeText(ctx, "Could not rebuild this bill", Toast.LENGTH_LONG).show()
+            if(f != null) sharePdf(ctx, f) else Toast.makeText(ctx, "This bill has no item details stored (saved by an older version), so it cannot be rebuilt", Toast.LENGTH_LONG).show()
         }
     }
     Column(Modifier.padding(16.dp)) {
@@ -869,7 +869,7 @@ fun loadInvoices(ctx: Context, includeQuotes: Boolean = false): List<InvoiceRec>
 fun loadCustomers(ctx: Context): List<BuyerInfo> {
     val seen = mutableListOf<BuyerInfo>()
     loadInvoices(ctx).sortedByDescending { it.whenMs }.forEach { rec ->
-        val f = File(ctx.filesDir, "inv_${rec.whenMs}.json")
+        val f = findBillFile(ctx, rec.whenMs) ?: return@forEach
         val o = try { JSONObject(f.readText()) } catch(e: Exception) { null } ?: return@forEach
         val b = BuyerInfo(o.optString("buyer"), o.optString("baddr1"), o.optString("baddr2"), o.optString("blmk"),
             o.optString("bpin"), o.optString("bphone"), o.optString("bgst"), o.optString("bstate"))
@@ -887,7 +887,7 @@ fun searchBills(ctx: Context, query: String): List<BillHit> {
     if(q.length < 2) return emptyList()
     val hits = mutableListOf<BillHit>()
     loadInvoices(ctx).sortedByDescending { it.whenMs }.forEach { rec ->
-        val f = File(ctx.filesDir, "inv_${rec.whenMs}.json")
+        val f = findBillFile(ctx, rec.whenMs) ?: return@forEach
         val o = try { JSONObject(f.readText()) } catch(e: Exception) { null } ?: return@forEach
         val phone = o.optString("bphone")
         val serials = mutableListOf<String>()
@@ -923,8 +923,20 @@ fun qrBitmap(text: String, size: Int): Bitmap? {
 fun billOutDir(ctx: Context): File = File(ctx.cacheDir, "bills")
 
 // Rebuilds the PDF from the stored record, so no PDFs need to be kept on disk.
+// A bill's file is named after its timestamp when it is written, but a restore writes
+// it under the restore timestamp. Look the record up by its stored "ms" as well.
+fun findBillFile(ctx: Context, ms: Long): File? {
+    val direct = File(ctx.filesDir, "inv_$ms.json")
+    if(direct.exists()) return direct
+    return ctx.filesDir.listFiles()?.firstOrNull { f ->
+        f.name.startsWith("inv_") && (
+            f.name.contains(ms.toString()) ||
+            (try { JSONObject(f.readText()).optLong("ms") == ms } catch(e: Exception) { false })
+        )
+    }
+}
 fun renderBill(ctx: Context, ms: Long): File? {
-    val o = try { JSONObject(File(ctx.filesDir, "inv_$ms.json").readText()) } catch(e: Exception) { null } ?: return null
+    val o = try { JSONObject((findBillFile(ctx, ms) ?: return null).readText()) } catch(e: Exception) { null } ?: return null
     val lines = mutableListOf<InvItem>()
     o.optJSONArray("lines")?.let { arr ->
         for(i in 0 until arr.length()) {
@@ -934,6 +946,8 @@ fun renderBill(ctx: Context, ms: Long): File? {
                 l.optDouble("taxRate", 18.0), l.optDouble("discount", 0.0)))
         }
     }
+    // bills saved before v2.1 have no line details; a blank invoice would be worse than an honest message
+    if(lines.isEmpty() && o.optDouble("total", 0.0) > 0.004) return null
     val sel = o.optJSONObject("seller")
     val sellerState = sel?.optString("state") ?: ""
     val calc = computeBill(lines, o.optDouble("bd", 0.0), o.optDouble("exch", 0.0),
@@ -951,7 +965,7 @@ fun renderBill(ctx: Context, ms: Long): File? {
 }
 fun viewBill(ctx: Context, ms: Long) {
     val f = renderBill(ctx, ms)
-    if(f != null) openPdf(ctx, f) else Toast.makeText(ctx, "Could not rebuild this bill", Toast.LENGTH_LONG).show()
+    if(f != null) openPdf(ctx, f) else Toast.makeText(ctx, "This bill has no item details stored (saved by an older version), so it cannot be rebuilt", Toast.LENGTH_LONG).show()
 }
 // Bills are no longer stored as PDFs; this clears any PDFs left by older builds.
 fun freeStoredPdfs(ctx: Context): Int {
@@ -961,7 +975,7 @@ fun freeStoredPdfs(ctx: Context): Int {
 }
 fun shareBillFile(ctx: Context, ms: Long) {
     val f = renderBill(ctx, ms)
-    if(f != null) sharePdf(ctx, f) else Toast.makeText(ctx, "Could not rebuild this bill", Toast.LENGTH_LONG).show()
+    if(f != null) sharePdf(ctx, f) else Toast.makeText(ctx, "This bill has no item details stored (saved by an older version), so it cannot be rebuilt", Toast.LENGTH_LONG).show()
 }
 fun sharePdf(ctx: Context, f: File) {
     val uri = try {
