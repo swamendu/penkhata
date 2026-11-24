@@ -73,7 +73,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "5.5 · stock audit"
+const val APP_VERSION = "5.6 · reports"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -1461,6 +1461,14 @@ fun PurchaseScreen(onDone: () -> Unit) {
             } catch(e: Exception) { Toast.makeText(ctx, "Export failed: " + (e.message ?: "unknown"), Toast.LENGTH_LONG).show() }
         }
     }
+    val registerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")) { uri ->
+        if(uri != null) {
+            try {
+                ctx.contentResolver.openOutputStream(uri)?.use { it.write(buildRegisterXlsx(ctx, startMs, endMs)) }
+                Toast.makeText(ctx, "Installation register exported", Toast.LENGTH_LONG).show()
+            } catch(e: Exception) { Toast.makeText(ctx, "Export failed: " + (e.message ?: "unknown"), Toast.LENGTH_LONG).show() }
+        }
+    }
     val csvLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri ->
         if(uri != null) {
             try {
@@ -1553,6 +1561,23 @@ fun PurchaseScreen(onDone: () -> Unit) {
             Button(onClick = {
                 csvLauncher.launch("PenKhata-bills-" + SimpleDateFormat("MMMyyyy", Locale.ENGLISH).format(Date(startMs)) + ".csv")
             }, modifier = Modifier.fillMaxWidth()) { Text("EXPORT CSV (THIS MONTH)") }
+            Spacer(Modifier.height(6.dp))
+            Button(onClick = {
+                registerLauncher.launch("Installation-Register-" + SimpleDateFormat("MMMyyyy", Locale.ENGLISH).format(Date(startMs)) + ".xlsx")
+            }, modifier = Modifier.fillMaxWidth()) { Text("INSTALLATION REGISTER (XLSX)") }
+        }}
+        val brandRows by produceState(initialValue = emptyList<Triple<String, Double, Double>>(), startMs, endMs) {
+            value = withContext(Dispatchers.IO) { brandSales(ctx, startMs, endMs) }
+        }
+        if(brandRows.isNotEmpty()) Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(16.dp)) {
+            Text("Brand wise", fontWeight = FontWeight.Bold)
+            Divider(Modifier.padding(vertical = 5.dp))
+            brandRows.forEach { b ->
+                Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), Arrangement.SpaceBetween) {
+                    Text(b.first + "  (" + b.third.toInt() + " units)", fontSize = 10.sp)
+                    Text("\u20b9" + fmt(b.second), fontSize = 10.sp)
+                }
+            }
         }}
         if(dayTotals.isNotEmpty()) Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(16.dp)) {
             Text("Day book", fontWeight = FontWeight.Bold)
