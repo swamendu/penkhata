@@ -66,7 +66,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "3.2.1 \u00b7 iteration 19a"
+const val APP_VERSION = "3.3 \u00b7 iteration 19b"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0)
 val InvItemListSaver: Saver<List<InvItem>, String> = Saver(
@@ -591,7 +591,7 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
                 }
                 IconButton(onClick = {
                     scope.launch {
-                        withContext(Dispatchers.IO) { File(ctx.filesDir, "led_${it.id}.json").delete() }
+                        withContext(Dispatchers.IO) { deleteLedgerEntry(ctx, it.id) }
                         reload++
                     }
                 }) { Icon(Icons.Default.Delete, "Del", tint = Color.Gray) }
@@ -934,72 +934,71 @@ data class Expense(val id: Long, val ms: Long, val note: String, val amount: Dou
 
 fun loadInvoices(ctx: Context, includeQuotes: Boolean = false): List<InvoiceRec> {
     val out = mutableListOf<InvoiceRec>()
-    ctx.filesDir.listFiles()?.filter { it.name.startsWith("inv_") }?.forEach { f ->
-        val o = try { JSONObject(f.readText()) } catch(e: Exception) { null } ?: return@forEach
-        if(!includeQuotes && o.optBoolean("quote", false)) return@forEach
-        // older records have no timestamp: the file name carries the epoch millis
-        val ms = if(o.has("ms")) o.optLong("ms") else (Regex("\\d+").find(f.name.removePrefix("inv_"))?.value?.toLongOrNull() ?: 0L)
-        val rates = mutableMapOf<Double, Pair<Double, Double>>()
-        o.optJSONArray("lines")?.let { arr ->
-            for(i in 0 until arr.length()) {
-                val it2 = arr.optJSONObject(i) ?: continue
-                val r = it2.optDouble("taxRate", 0.0)
-                val prev = rates[r] ?: (0.0 to 0.0)
-                rates[r] = (prev.first + it2.optDouble("taxable", 0.0)) to (prev.second + it2.optDouble("tax", 0.0))
+    val where = if(includeQuotes) "" else " WHERE quote=0"
+    try {
+        db(ctx).readableDatabase.rawQuery("SELECT inv,date,ms,buyer,bgst,total,taxable,cgst,sgst,igst,tax,cogs,profit,interState,paid,balance,lines FROM bills$where ORDER BY ms DESC", null).use { c ->
+            while(c.moveToNext()) {
+                val rates = mutableMapOf<Double, Pair<Double, Double>>()
+                try {
+                    val arr = JSONArray(c.getString(16) ?: "[]")
+                    for(i in 0 until arr.length()) {
+                        val o = arr.optJSONObject(i) ?: continue
+                        val r = o.optDouble("taxRate", 0.0)
+                        val prev = rates[r] ?: (0.0 to 0.0)
+                        rates[r] = (prev.first + o.optDouble("taxable", 0.0)) to (prev.second + o.optDouble("tax", 0.0))
+                    }
+                } catch(e: Exception) { }
+                out.add(InvoiceRec(c.getString(0) ?: "", c.getString(1) ?: "", c.getLong(2), c.getString(3) ?: "", c.getString(4) ?: "",
+                    c.getDouble(5), c.getDouble(6), c.getDouble(7), c.getDouble(8), c.getDouble(9), c.getDouble(10),
+                    c.getDouble(11), c.getDouble(12), c.getInt(13) != 0, c.getDouble(14), c.getDouble(15), rates))
             }
         }
-        out.add(InvoiceRec(o.optString("inv"), o.optString("d"), ms, o.optString("buyer"), o.optString("bgst"),
-            o.optDouble("total", 0.0), o.optDouble("taxable", 0.0), o.optDouble("cgst", 0.0), o.optDouble("sgst", 0.0),
-            o.optDouble("igst", 0.0), o.optDouble("tax", 0.0), o.optDouble("cogs", 0.0), o.optDouble("profit", 0.0),
-            o.optBoolean("interState", false), o.optDouble("paid", 0.0), o.optDouble("balance", 0.0), rates))
-    }
-    // A restore (or a repeated save) can leave two files for the same bill. Keep one:
-    // same invoice number, same amount, same taxable value means the same bill.
-    val unique = LinkedHashMap<String, InvoiceRec>()
-    for(r in out) {
-        val key = r.invNo.trim() + "|" + String.format(Locale.ENGLISH, "%.2f", r.total) + "|" + String.format(Locale.ENGLISH, "%.2f", r.taxable)
-        val prev = unique[key]
-        if(prev == null || r.whenMs > prev.whenMs) unique[key] = r
-    }
-    return unique.values.toList()
+    } catch(e: Exception) { }
+    return out
 }
 // Every buyer seen on a saved bill, newest first, for one-tap fill on the entry screen.
 fun loadCustomers(ctx: Context): List<BuyerInfo> {
-    val seen = mutableListOf<BuyerInfo>()
-    loadInvoices(ctx).sortedByDescending { it.whenMs }.forEach { rec ->
-        val f = findBillFile(ctx, rec.whenMs) ?: return@forEach
-        val o = try { JSONObject(f.readText()) } catch(e: Exception) { null } ?: return@forEach
-        val b = BuyerInfo(o.optString("buyer"), o.optString("baddr1"), o.optString("baddr2"), o.optString("blmk"),
-            o.optString("bpin"), o.optString("bphone"), o.optString("bgst"), o.optString("bstate"))
-        if(b.name.isBlank()) return@forEach
-        if(seen.none { it.name.equals(b.name, true) && it.phone == b.phone }) seen.add(b)
-    }
-    return seen
+    val out = mutableListOf<BuyerInfo>()
+    try {
+        db(ctx).readableDatabase.rawQuery("SELECT buyer,baddr1,baddr2,blmk,bpin,bphone,bgst,bstate FROM bills WHERE buyer<>'' ORDER BY ms DESC", null).use { c ->
+            while(c.moveToNext()) {
+                val b = BuyerInfo(c.getString(0) ?: "", c.getString(1) ?: "", c.getString(2) ?: "", c.getString(3) ?: "",
+                    c.getString(4) ?: "", c.getString(5) ?: "", c.getString(6) ?: "", c.getString(7) ?: "")
+                if(out.none { it.name.equals(b.name, true) && it.phone == b.phone }) out.add(b)
+            }
+        }
+    } catch(e: Exception) { }
+    return out
 }
 
 data class BillHit(val rec: InvoiceRec, val pdf: String, val serial: String)
 // Searches IMEI, phone, buyer name and invoice number. Bills saved before this build
 // carry no phone or serial, so they only match on name and invoice number.
 fun searchBills(ctx: Context, query: String): List<BillHit> {
-    val q = query.trim().lowercase()
+    val q = query.trim()
     if(q.length < 2) return emptyList()
+    val like = "%" + q + "%"
     val hits = mutableListOf<BillHit>()
-    loadInvoices(ctx).sortedByDescending { it.whenMs }.forEach { rec ->
-        val f = findBillFile(ctx, rec.whenMs) ?: return@forEach
-        val o = try { JSONObject(f.readText()) } catch(e: Exception) { null } ?: return@forEach
-        val phone = o.optString("bphone")
-        val serials = mutableListOf<String>()
-        o.optJSONArray("lines")?.let { arr ->
-            for(i in 0 until arr.length()) arr.optJSONObject(i)?.optString("serial")?.takeIf { it.isNotBlank() }?.let { serials.add(it) }
+    try {
+        db(ctx).readableDatabase.rawQuery(
+            "SELECT ms,inv,buyer,total,lines FROM bills WHERE quote=0 AND (inv LIKE ? OR buyer LIKE ? OR bphone LIKE ? OR lines LIKE ?) ORDER BY ms DESC",
+            arrayOf(like, like, like, like)).use { c ->
+            while(c.moveToNext()) {
+                val ms = c.getLong(0)
+                var serial = ""
+                try {
+                    val arr = JSONArray(c.getString(4) ?: "[]")
+                    for(i in 0 until arr.length()) {
+                        val sv = arr.optJSONObject(i)?.optString("serial") ?: ""
+                        if(sv.isNotBlank() && sv.lowercase().contains(q.lowercase())) { serial = sv; break }
+                    }
+                } catch(e: Exception) { }
+                val rec = InvoiceRec(c.getString(1) ?: "", "", ms, c.getString(2) ?: "", "", c.getDouble(3),
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false, 0.0, 0.0, emptyMap())
+                hits.add(BillHit(rec, "", serial))
+            }
         }
-        val matchedSerial = serials.firstOrNull { it.lowercase().contains(q) } ?: ""
-        val hit = matchedSerial.isNotBlank() || phone.lowercase().contains(q) ||
-                  rec.buyer.lowercase().contains(q) || rec.invNo.lowercase().contains(q)
-        if(hit) {
-            val name = if(o.optBoolean("quote", false)) "Quote_${rec.whenMs}.pdf" else "Inv_${rec.whenMs}.pdf"
-            hits.add(BillHit(rec, name, matchedSerial))
-        }
-    }
+    } catch(e: Exception) { }
     return hits
 }
 // UPI payment link the customer scans; renders to a bitmap for the PDF canvas.
@@ -1023,18 +1022,30 @@ fun billOutDir(ctx: Context): File = File(ctx.cacheDir, "bills")
 // Rebuilds the PDF from the stored record, so no PDFs need to be kept on disk.
 // A bill's file is named after its timestamp when it is written, but a restore writes
 // it under the restore timestamp. Look the record up by its stored "ms" as well.
-fun findBillFile(ctx: Context, ms: Long): File? {
-    val direct = File(ctx.filesDir, "inv_$ms.json")
-    if(direct.exists()) return direct
-    return ctx.filesDir.listFiles()?.firstOrNull { f ->
-        f.name.startsWith("inv_") && (
-            f.name.contains(ms.toString()) ||
-            (try { JSONObject(f.readText()).optLong("ms") == ms } catch(e: Exception) { false })
-        )
-    }
+fun billJson(ctx: Context, ms: Long): JSONObject? {
+    return try {
+        db(ctx).readableDatabase.rawQuery(
+            "SELECT quote,inv,date,payMode,delNote,buyer,baddr1,baddr2,blmk,bpin,bphone,bgst,bstate,bd,exch,cash,upi,card,finance,seller,lines,total FROM bills WHERE ms=?",
+            arrayOf(ms.toString())).use { c ->
+            if(!c.moveToFirst()) return null
+            val j = JSONObject()
+            j.put("ms", ms); j.put("quote", c.getInt(0) != 0); j.put("inv", c.getString(1) ?: "")
+            j.put("date", c.getString(2) ?: ""); j.put("payMode", c.getString(3) ?: ""); j.put("delNote", c.getString(4) ?: "")
+            j.put("buyer", c.getString(5) ?: ""); j.put("baddr1", c.getString(6) ?: ""); j.put("baddr2", c.getString(7) ?: "")
+            j.put("blmk", c.getString(8) ?: ""); j.put("bpin", c.getString(9) ?: ""); j.put("bphone", c.getString(10) ?: "")
+            j.put("bgst", c.getString(11) ?: ""); j.put("bstate", c.getString(12) ?: "")
+            j.put("bd", c.getDouble(13)); j.put("exch", c.getDouble(14)); j.put("cash", c.getDouble(15))
+            j.put("upi", c.getDouble(16)); j.put("card", c.getDouble(17)); j.put("finance", c.getString(18) ?: "")
+            j.put("seller", try { JSONObject(c.getString(19) ?: "{}") } catch(e: Exception) { JSONObject() })
+            j.put("lines", try { JSONArray(c.getString(20) ?: "[]") } catch(e: Exception) { JSONArray() })
+            j.put("total", c.getDouble(21))
+            j
+        }
+    } catch(e: Exception) { null }
 }
+
 fun renderBill(ctx: Context, ms: Long): File? {
-    val o = try { JSONObject((findBillFile(ctx, ms) ?: return null).readText()) } catch(e: Exception) { null } ?: return null
+    val o = billJson(ctx, ms) ?: return null
     val lines = mutableListOf<InvItem>()
     o.optJSONArray("lines")?.let { arr ->
         for(i in 0 until arr.length()) {
@@ -1102,17 +1113,18 @@ fun openBillPdf(ctx: Context, name: String) {
 
 fun loadExpenses(ctx: Context): List<Expense> {
     val out = mutableListOf<Expense>()
-    ctx.filesDir.listFiles()?.filter { it.name.startsWith("exp_") }?.forEach { f ->
-        val o = try { JSONObject(f.readText()) } catch(e: Exception) { null } ?: return@forEach
-        out.add(Expense(o.optLong("id"), o.optLong("ms"), o.optString("note"), o.optDouble("amount", 0.0)))
-    }
+    try {
+        db(ctx).readableDatabase.rawQuery("SELECT id,ms,note,amount FROM expenses ORDER BY ms", null).use { c ->
+            while(c.moveToNext()) out.add(Expense(c.getLong(0), c.getLong(1), c.getString(2) ?: "", c.getDouble(3)))
+        }
+    } catch(e: Exception) { }
     return out
 }
 fun saveExpense(ctx: Context, note: String, amount: Double) {
-    val o = JSONObject()
     val ms = System.currentTimeMillis()
-    o.put("id", ms); o.put("ms", ms); o.put("note", note); o.put("amount", amount)
-    writeFileAtomic(File(ctx.filesDir, "exp_${ms}.json"), o.toString())
+    val cv = android.content.ContentValues()
+    cv.put("id", ms); cv.put("ms", ms); cv.put("note", note); cv.put("amount", amount)
+    db(ctx).writableDatabase.insertWithOnConflict("expenses", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE)
 }
 fun monthRange(offset: Int): Pair<Long, Long> {
     val c = Calendar.getInstance()
@@ -1263,28 +1275,28 @@ fun importJsonIfNeeded(ctx: Context) {
 }
 
 fun loadStock(ctx: Context): List<StockEntry> {
-    val f = File(ctx.filesDir, "stock.json")
-    if(!f.exists()) return emptyList()
     val out = mutableListOf<StockEntry>()
     try {
-        val arr = JSONArray(f.readText())
-        for(i in 0 until arr.length()) {
-            val o = arr.optJSONObject(i) ?: continue
-            out.add(StockEntry(o.optLong("id"), o.optString("model"), o.optString("imei"), o.optString("hsn"),
-                o.optDouble("cost", 0.0), o.optDouble("mrp", 0.0), o.optInt("qty", 0), o.optString("supplier"), o.optString("addedOn")))
+        db(ctx).readableDatabase.rawQuery("SELECT id,model,imei,hsn,cost,mrp,qty,supplier,addedOn FROM stock ORDER BY model", null).use { c ->
+            while(c.moveToNext()) out.add(StockEntry(c.getLong(0), c.getString(1) ?: "", c.getString(2) ?: "", c.getString(3) ?: "",
+                c.getDouble(4), c.getDouble(5), c.getInt(6), c.getString(7) ?: "", c.getString(8) ?: ""))
         }
     } catch(e: Exception) { }
     return out
 }
 fun saveStock(ctx: Context, list: List<StockEntry>) {
-    val arr = JSONArray()
-    for(e in list) {
-        val o = JSONObject()
-        o.put("id", e.id); o.put("model", e.model); o.put("imei", e.imei); o.put("hsn", e.hsn)
-        o.put("cost", e.cost); o.put("mrp", e.mrp); o.put("qty", e.qty); o.put("supplier", e.supplier); o.put("addedOn", e.addedOn)
-        arr.put(o)
-    }
-    writeFileAtomic(File(ctx.filesDir, "stock.json"), arr.toString())
+    val w = db(ctx).writableDatabase
+    w.beginTransaction()
+    try {
+        w.delete("stock", null, null)
+        for(e in list) {
+            val cv = android.content.ContentValues()
+            cv.put("id", e.id); cv.put("model", e.model); cv.put("imei", e.imei); cv.put("hsn", e.hsn)
+            cv.put("cost", e.cost); cv.put("mrp", e.mrp); cv.put("qty", e.qty); cv.put("supplier", e.supplier); cv.put("addedOn", e.addedOn)
+            w.insertWithOnConflict("stock", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE)
+        }
+        w.setTransactionSuccessful()
+    } finally { w.endTransaction() }
 }
 // Purchase cost of a sold item: matched on IMEI first, then on model name. 0 when unknown.
 // Scanning or typing a full IMEI should bring the whole stock line with it.
@@ -1350,11 +1362,7 @@ fun wipeEverything(ctx: Context): Int {
     ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE).edit().clear().apply()
     return n
 }
-fun writeFileAtomic(f: File, text: String) {
-    val tmp = File(f.parentFile, f.name + ".tmp")
-    tmp.writeText(text)
-    if(!tmp.renameTo(f)) { f.writeText(text); tmp.delete() }
-}
+
 // Everything needed to stand the app up on a fresh install: all settings, plus the
 // invoice and ledger records so the GST tab is not empty after a restore.
 // The PIN is deliberately left out of the file.
@@ -1362,18 +1370,42 @@ fun backupJson(ctx: Context): String {
     val prefs = ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE)
     val settings = JSONObject()
     for((k, v) in prefs.all) { if(k != "appPin" && v != null) settings.put(k, v) }
-    val invoices = JSONArray(); val ledger = JSONArray(); val expenses = JSONArray()
-    ctx.filesDir.listFiles()?.forEach { f ->
-        try {
-            when {
-                f.name.startsWith("inv_") -> invoices.put(JSONObject(f.readText()))
-                f.name.startsWith("led_") -> ledger.put(JSONObject(f.readText()))
-                f.name.startsWith("exp_") -> expenses.put(JSONObject(f.readText()))
+    val invoices = JSONArray(); val ledger = JSONArray(); val expenses = JSONArray(); val stockArr = JSONArray()
+    try {
+        db(ctx).readableDatabase.rawQuery("SELECT ms FROM bills ORDER BY ms", null).use { c ->
+            while(c.moveToNext()) billJson(ctx, c.getLong(0))?.let { invoices.put(it) }
+        }
+    } catch(e: Exception) { }
+    try {
+        db(ctx).readableDatabase.rawQuery("SELECT id,date,party,type,amt,descr FROM ledger ORDER BY id", null).use { c ->
+            while(c.moveToNext()) {
+                val o = JSONObject()
+                o.put("id", c.getLong(0)); o.put("date", c.getString(1) ?: ""); o.put("party", c.getString(2) ?: "")
+                o.put("type", c.getString(3) ?: ""); o.put("amt", c.getDouble(4)); o.put("desc", c.getString(5) ?: "")
+                ledger.put(o)
             }
-        } catch(e: Exception) { }
-    }
-    // stock is a single file, kept as-is
-    val stockArr = try { JSONArray(File(ctx.filesDir, "stock.json").readText()) } catch(e: Exception) { JSONArray() }
+        }
+    } catch(e: Exception) { }
+    try {
+        db(ctx).readableDatabase.rawQuery("SELECT id,ms,note,amount FROM expenses ORDER BY ms", null).use { c ->
+            while(c.moveToNext()) {
+                val o = JSONObject()
+                o.put("id", c.getLong(0)); o.put("ms", c.getLong(1)); o.put("note", c.getString(2) ?: ""); o.put("amount", c.getDouble(3))
+                expenses.put(o)
+            }
+        }
+    } catch(e: Exception) { }
+    try {
+        db(ctx).readableDatabase.rawQuery("SELECT id,model,imei,hsn,cost,mrp,qty,supplier,addedOn FROM stock", null).use { c ->
+            while(c.moveToNext()) {
+                val o = JSONObject()
+                o.put("id", c.getLong(0)); o.put("model", c.getString(1) ?: ""); o.put("imei", c.getString(2) ?: "")
+                o.put("hsn", c.getString(3) ?: ""); o.put("cost", c.getDouble(4)); o.put("mrp", c.getDouble(5))
+                o.put("qty", c.getInt(6)); o.put("supplier", c.getString(7) ?: ""); o.put("addedOn", c.getString(8) ?: "")
+                stockArr.put(o)
+            }
+        }
+    } catch(e: Exception) { }
     val root = JSONObject()
     root.put("type", "penkhata-backup")
     root.put("format", 1)
@@ -1436,47 +1468,92 @@ fun restoreZip(ctx: Context, input: InputStream): String {
     return if(summary.isEmpty()) "That zip has no backup.json inside" else "$summary PDFs restored: $pdfs."
 }
 
+// One bill row from the JSON shape used by the backup and by the importer.
+fun insertBillRow(w: android.database.sqlite.SQLiteDatabase, o: JSONObject, ms: Long) {
+    val cv = android.content.ContentValues()
+    cv.put("ms", ms); cv.put("quote", if(o.optBoolean("quote", false)) 1 else 0)
+    cv.put("inv", o.optString("inv")); cv.put("date", o.optString("date"))
+    cv.put("payMode", o.optString("payMode")); cv.put("delNote", o.optString("delNote"))
+    cv.put("buyer", o.optString("buyer")); cv.put("bgst", o.optString("bgst"))
+    cv.put("baddr1", o.optString("baddr1")); cv.put("baddr2", o.optString("baddr2"))
+    cv.put("blmk", o.optString("blmk")); cv.put("bpin", o.optString("bpin"))
+    cv.put("bphone", o.optString("bphone")); cv.put("bstate", o.optString("bstate"))
+    cv.put("total", o.optDouble("total", 0.0)); cv.put("taxable", o.optDouble("taxable", 0.0))
+    cv.put("cgst", o.optDouble("cgst", 0.0)); cv.put("sgst", o.optDouble("sgst", 0.0))
+    cv.put("igst", o.optDouble("igst", 0.0)); cv.put("tax", o.optDouble("tax", 0.0))
+    cv.put("interState", if(o.optBoolean("interState", false)) 1 else 0)
+    cv.put("cogs", o.optDouble("cogs", 0.0)); cv.put("profit", o.optDouble("profit", 0.0))
+    cv.put("paid", o.optDouble("paid", 0.0)); cv.put("balance", o.optDouble("balance", 0.0))
+    cv.put("bd", o.optDouble("bd", 0.0)); cv.put("exch", o.optDouble("exch", 0.0))
+    cv.put("cash", o.optDouble("cash", 0.0)); cv.put("upi", o.optDouble("upi", 0.0)); cv.put("card", o.optDouble("card", 0.0))
+    cv.put("finance", o.optString("finance")); cv.put("seller", o.optJSONObject("seller")?.toString() ?: "")
+    cv.put("lines", o.optJSONArray("lines")?.toString() ?: "[]")
+    w.insertWithOnConflict("bills", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE)
+}
 fun restoreJson(ctx: Context, text: String): String {
     val root = try { JSONObject(text) } catch(e: Exception) { return "That file is not a PenKhata backup" }
     if(root.optString("type") != "penkhata-backup") return "That file is not a PenKhata backup"
     val prefs = ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE)
     val ed = prefs.edit()
     var settingsCount = 0
-    val settings = root.optJSONObject("settings")
-    if(settings != null) for(k in settings.keys()) {
-        if(k == "appPin") continue
-        val raw = settings.opt(k)
-        // nextInv is stored as an Int and read back with getInt(), so keep the type
-        if(raw is Number) ed.putInt(k, raw.toInt()) else ed.putString(k, raw?.toString() ?: "")
-        settingsCount++
+    root.optJSONObject("settings")?.let { settings ->
+        for(k in settings.keys()) {
+            if(k == "appPin") continue
+            val raw = settings.opt(k)
+            if(raw is Number) ed.putInt(k, raw.toInt()) else ed.putString(k, raw?.toString() ?: "")
+            settingsCount++
+        }
     }
     ed.apply()
-    var inv = 0; var led = 0
-    val stamp = System.currentTimeMillis()
-    root.optJSONArray("invoices")?.let { arr ->
-        for(i in 0 until arr.length()) {
-            val o = arr.optJSONObject(i) ?: continue
-            writeFileAtomic(File(ctx.filesDir, "inv_${stamp}_$i.json"), o.toString()); inv++
+    val w = db(ctx).writableDatabase
+    var inv = 0; var led = 0; var exp = 0; var st = 0
+    w.beginTransaction()
+    try {
+        // a restore replaces what is there, rather than merging two shops together
+        for(t in listOf("bills", "ledger", "expenses", "stock")) w.delete(t, null, null)
+        root.optJSONArray("invoices")?.let { arr ->
+            for(i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                insertBillRow(w, o, o.optLong("ms", System.currentTimeMillis() + i)); inv++
+            }
         }
-    }
-    root.optJSONArray("ledger")?.let { arr ->
-        for(i in 0 until arr.length()) {
-            val o = arr.optJSONObject(i) ?: continue
-            writeFileAtomic(File(ctx.filesDir, "led_${stamp}_$i.json"), o.toString()); led++
+        root.optJSONArray("ledger")?.let { arr ->
+            for(i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val cv = android.content.ContentValues()
+                cv.put("id", o.optLong("id", System.currentTimeMillis() + i)); cv.put("date", o.optString("date"))
+                cv.put("party", o.optString("party")); cv.put("type", o.optString("type"))
+                cv.put("amt", o.optDouble("amt", 0.0)); cv.put("descr", o.optString("desc"))
+                w.insertWithOnConflict("ledger", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE); led++
+            }
         }
-    }
-    var exp = 0
-    root.optJSONArray("expenses")?.let { arr ->
-        for(i in 0 until arr.length()) {
-            val o = arr.optJSONObject(i) ?: continue
-            writeFileAtomic(File(ctx.filesDir, "exp_${stamp}_$i.json"), o.toString()); exp++
+        root.optJSONArray("expenses")?.let { arr ->
+            for(i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val cv = android.content.ContentValues()
+                cv.put("id", o.optLong("id", System.currentTimeMillis() + i)); cv.put("ms", o.optLong("ms", System.currentTimeMillis() + i))
+                cv.put("note", o.optString("note")); cv.put("amount", o.optDouble("amount", 0.0))
+                w.insertWithOnConflict("expenses", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE); exp++
+            }
         }
+        root.optJSONArray("stock")?.let { arr ->
+            for(i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val cv = android.content.ContentValues()
+                cv.put("id", o.optLong("id", System.currentTimeMillis() + i)); cv.put("model", o.optString("model"))
+                cv.put("imei", o.optString("imei")); cv.put("hsn", o.optString("hsn"))
+                cv.put("cost", o.optDouble("cost", 0.0)); cv.put("mrp", o.optDouble("mrp", 0.0))
+                cv.put("qty", o.optInt("qty", 0)); cv.put("supplier", o.optString("supplier")); cv.put("addedOn", o.optString("addedOn"))
+                w.insertWithOnConflict("stock", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE); st++
+            }
+        }
+        w.setTransactionSuccessful()
+    } catch(e: Exception) {
+        return "Restore failed: " + (e.message ?: "unknown error")
+    } finally {
+        w.endTransaction()
     }
-    var stockCount = 0
-    root.optJSONArray("stock")?.let { arr ->
-        if(arr.length() > 0) { writeFileAtomic(File(ctx.filesDir, "stock.json"), arr.toString()); stockCount = arr.length() }
-    }
-    return "Restored $settingsCount settings, $inv invoices, $led ledger entries, $exp expenses, $stockCount stock lines. Reopen the app to load them."
+    return "Restored $settingsCount settings, $inv invoices, $led ledger entries, $exp expenses, $st stock lines."
 }
 
 fun saveInvoiceData(ctx: Context, ms: Long, isQuote: Boolean, invNo: String, dateStr: String, payMode: String, delNote: String,
@@ -1485,22 +1562,6 @@ fun saveInvoiceData(ctx: Context, ms: Long, isQuote: Boolean, invNo: String, dat
     val stock = loadStock(ctx)
     var cogs = 0.0
     for(i in items) cogs += stockCostFor(stock, i) * i.qty
-    val j=JSONObject()
-    j.put("d",Date().toString()); j.put("ms",ms); j.put("quote",isQuote); j.put("inv",invNo)
-    j.put("buyer",b.name); j.put("bgst",b.gst)
-    j.put("baddr1",b.addr1); j.put("baddr2",b.addr2); j.put("blmk",b.landmark); j.put("bpin",b.pincode)
-    j.put("bphone",b.phone); j.put("bstate",b.state)
-    j.put("date",dateStr); j.put("payMode",payMode); j.put("delNote",delNote); j.put("finance",finance)
-    j.put("bd",billDiscount); j.put("exch",exchange); j.put("cash",cash); j.put("upi",upi); j.put("card",card)
-    val sj = JSONObject()
-    sj.put("name",sel.name); sj.put("addr",sel.addr); sj.put("phone",sel.phone); sj.put("email",sel.email)
-    sj.put("landmark",sel.landmark); sj.put("pincode",sel.pincode); sj.put("gst",sel.gst)
-    sj.put("bank",sel.bank); sj.put("ifsc",sel.ifsc); sj.put("juris",sel.juris); sj.put("upi",sel.upi); sj.put("state",sel.state)
-    j.put("seller",sj)
-    j.put("total",calc.grand); j.put("taxable",calc.taxable); j.put("tax",calc.totalTax)
-    j.put("cgst",calc.cgst); j.put("sgst",calc.sgst); j.put("igst",calc.igst); j.put("interState",calc.interState)
-    j.put("cogs",cogs); j.put("profit",calc.taxable-cogs)
-    j.put("paid",calc.paid); j.put("balance",calc.balance)
     // per-line figures, scaled by the bill discount, so rate-wise summaries add up
     var baseSum = 0.0
     for(i in items) { val g=i.qty*i.rate; val net=g-(g*(i.discount.coerceIn(0.0,100.0)/100.0)); baseSum += net/(1+i.taxRate.coerceIn(0.0,100.0)/100.0) }
@@ -1515,26 +1576,39 @@ fun saveInvoiceData(ctx: Context, ms: Long, isQuote: Boolean, invNo: String, dat
         o.put("taxRate", tr); o.put("taxable", base*keep); o.put("tax", (net-base)*keep)
         lines.put(o)
     }
-    j.put("lines", lines)
-    writeFileAtomic(File(ctx.filesDir,"inv_${ms}.json"), j.toString())
+    val sj = JSONObject()
+    sj.put("name", sel.name); sj.put("addr", sel.addr); sj.put("phone", sel.phone); sj.put("email", sel.email)
+    sj.put("landmark", sel.landmark); sj.put("pincode", sel.pincode); sj.put("gst", sel.gst)
+    sj.put("bank", sel.bank); sj.put("ifsc", sel.ifsc); sj.put("juris", sel.juris); sj.put("upi", sel.upi); sj.put("state", sel.state)
+    val cv = android.content.ContentValues()
+    cv.put("ms", ms); cv.put("quote", if(isQuote) 1 else 0); cv.put("inv", invNo); cv.put("date", dateStr)
+    cv.put("payMode", payMode); cv.put("delNote", delNote)
+    cv.put("buyer", b.name); cv.put("bgst", b.gst); cv.put("baddr1", b.addr1); cv.put("baddr2", b.addr2)
+    cv.put("blmk", b.landmark); cv.put("bpin", b.pincode); cv.put("bphone", b.phone); cv.put("bstate", b.state)
+    cv.put("total", calc.grand); cv.put("taxable", calc.taxable); cv.put("cgst", calc.cgst); cv.put("sgst", calc.sgst)
+    cv.put("igst", calc.igst); cv.put("tax", calc.totalTax); cv.put("interState", if(calc.interState) 1 else 0)
+    cv.put("cogs", cogs); cv.put("profit", calc.taxable - cogs); cv.put("paid", calc.paid); cv.put("balance", calc.balance)
+    cv.put("bd", billDiscount); cv.put("exch", exchange); cv.put("cash", cash); cv.put("upi", upi); cv.put("card", card)
+    cv.put("finance", finance); cv.put("seller", sj.toString()); cv.put("lines", lines.toString())
+    db(ctx).writableDatabase.insertWithOnConflict("bills", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE)
 }
 fun saveLedgerEntry(ctx: Context, e: LedgerEntry) {
-    val ms = System.currentTimeMillis()
-    val j = JSONObject()
-    j.put("id", ms); j.put("date", e.date); j.put("party", e.party); j.put("type", e.type); j.put("amt", e.amount); j.put("desc", e.desc)
-    writeFileAtomic(File(ctx.filesDir, "led_${ms}.json"), j.toString())
+    val cv = android.content.ContentValues()
+    cv.put("id", System.currentTimeMillis()); cv.put("date", e.date); cv.put("party", e.party)
+    cv.put("type", e.type); cv.put("amt", e.amount); cv.put("descr", e.desc)
+    db(ctx).writableDatabase.insertWithOnConflict("ledger", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE)
 }
 fun loadLedger(ctx: Context): List<LedgerEntry> {
-    val l=mutableListOf<LedgerEntry>()
-    ctx.filesDir.listFiles()?.filter{it.name.startsWith("led_")}?.forEach { f ->
-        val j = try { JSONObject(f.readText()) } catch(e: Exception) { null }
-        if(j != null) {
-            // the id is needed to delete the right file; older entries carry it only in the name
-            val id = if(j.has("id")) j.optLong("id") else (Regex("\\d+").find(f.name.removePrefix("led_"))?.value?.toLongOrNull() ?: 0L)
-            l.add(LedgerEntry(id, j.optString("date"), j.optString("party"), j.optString("type"), j.optDouble("amt",0.0), j.optString("desc")))
+    val l = mutableListOf<LedgerEntry>()
+    try {
+        db(ctx).readableDatabase.rawQuery("SELECT id,date,party,type,amt,descr FROM ledger ORDER BY id", null).use { c ->
+            while(c.moveToNext()) l.add(LedgerEntry(c.getLong(0), c.getString(1) ?: "", c.getString(2) ?: "", c.getString(3) ?: "", c.getDouble(4), c.getString(5) ?: ""))
         }
-    }
+    } catch(e: Exception) { }
     return l
+}
+fun deleteLedgerEntry(ctx: Context, id: Long) {
+    try { db(ctx).writableDatabase.delete("ledger", "id=?", arrayOf(id.toString())) } catch(e: Exception) { }
 }
 fun numberToWords(num: Long): String {
     if(num==0L) return "Zero"
