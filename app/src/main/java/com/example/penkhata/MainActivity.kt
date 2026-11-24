@@ -509,6 +509,7 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
     return state.value
 }
 @Composable fun LedgerScreen() {
+    val focusManager = LocalFocusManager.current
     val ctx = LocalContext.current
     val prefs = remember { ctx.getSharedPreferences("penkhata_data", android.content.Context.MODE_PRIVATE) }
     val scope = rememberCoroutineScope()
@@ -704,6 +705,7 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
     }
 }
 @Composable fun GSTReportScreen() {
+    val focusManager = LocalFocusManager.current
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var offset by rememberSaveable { mutableStateOf(0) }
@@ -800,6 +802,7 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
 }
 
 @Composable fun FileHistoryScreen() {
+    val focusManager = LocalFocusManager.current
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var query by rememberSaveable { mutableStateOf("") }
