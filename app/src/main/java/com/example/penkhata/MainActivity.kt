@@ -73,7 +73,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "5.5 · stock audit"
+const val APP_VERSION = "5.6 · reports"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -1461,6 +1461,14 @@ fun PurchaseScreen(onDone: () -> Unit) {
             } catch(e: Exception) { Toast.makeText(ctx, "Export failed: " + (e.message ?: "unknown"), Toast.LENGTH_LONG).show() }
         }
     }
+    val registerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")) { uri ->
+        if(uri != null) {
+            try {
+                ctx.contentResolver.openOutputStream(uri)?.use { it.write(buildRegisterXlsx(ctx, startMs, endMs)) }
+                Toast.makeText(ctx, "Installation register exported", Toast.LENGTH_LONG).show()
+            } catch(e: Exception) { Toast.makeText(ctx, "Export failed: " + (e.message ?: "unknown"), Toast.LENGTH_LONG).show() }
+        }
+    }
     val csvLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri ->
         if(uri != null) {
             try {
@@ -1553,6 +1561,23 @@ fun PurchaseScreen(onDone: () -> Unit) {
             Button(onClick = {
                 csvLauncher.launch("PenKhata-bills-" + SimpleDateFormat("MMMyyyy", Locale.ENGLISH).format(Date(startMs)) + ".csv")
             }, modifier = Modifier.fillMaxWidth()) { Text("EXPORT CSV (THIS MONTH)") }
+            Spacer(Modifier.height(6.dp))
+            Button(onClick = {
+                registerLauncher.launch("Installation-Register-" + SimpleDateFormat("MMMyyyy", Locale.ENGLISH).format(Date(startMs)) + ".xlsx")
+            }, modifier = Modifier.fillMaxWidth()) { Text("INSTALLATION REGISTER (XLSX)") }
+        }}
+        val brandRows by produceState(initialValue = emptyList<Triple<String, Double, Double>>(), startMs, endMs) {
+            value = withContext(Dispatchers.IO) { brandSales(ctx, startMs, endMs) }
+        }
+        if(brandRows.isNotEmpty()) Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(16.dp)) {
+            Text("Brand wise", fontWeight = FontWeight.Bold)
+            Divider(Modifier.padding(vertical = 5.dp))
+            brandRows.forEach { b ->
+                Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), Arrangement.SpaceBetween) {
+                    Text(b.first + "  (" + b.third.toInt() + " units)", fontSize = 10.sp)
+                    Text("\u20b9" + fmt(b.second), fontSize = 10.sp)
+                }
+            }
         }}
         if(dayTotals.isNotEmpty()) Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(16.dp)) {
             Text("Day book", fontWeight = FontWeight.Bold)
@@ -2708,6 +2733,72 @@ fun xlsxBytes(sheets: List<Pair<String, List<List<String>>>>): ByteArray {
         sheets.forEachIndexed { i, sh -> put("xl/worksheets/sheet${i+1}.xml", sheetXml(sh.second)) }
     }
     return bos.toByteArray()
+}
+
+// The Installation Register: one row per item sold, in the column order brand
+// claim teams ask for. This is the sheet the shop files, not a generic export.
+fun buildRegisterXlsx(ctx: Context, startMs: Long, endMs: Long): ByteArray {
+    val prefs = ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE)
+    val branch = loadBranches(ctx).firstOrNull { it.code == activeBranchCode(prefs) } ?: loadBranches(ctx).firstOrNull()
+    val salesmanPhone = loadPeople(ctx).associate { it.name to it.phone }
+    val rows = mutableListOf<List<String>>()
+    rows.add(listOf(prefs.getString("sName", "") ?: ""))
+    rows.add(listOf("REGD OFFICE : " + (prefs.getString("sAddr1", "") ?: "")))
+    rows.add(listOf("Branch : " + (branch?.code ?: "") + (if((branch?.gstin ?: "").isBlank()) "" else " (GSTIN : " + branch!!.gstin + ")")))
+    rows.add(listOf("BRANCH ADDRESS : " + (branch?.address ?: "")))
+    rows.add(listOf("Installation Register"))
+    val fmtD = SimpleDateFormat("dd-MM-yyyy", Locale.ENGLISH)
+    rows.add(listOf("Period : " + fmtD.format(Date(startMs)) + " To " + fmtD.format(Date(endMs - 1)) + " (Financial Year : " + fyLabel() + ")"))
+    rows.add(listOf("Sl.","Branch","Date","Bill Number","Product Name","Customer Name","Address","Pincode","District",
+        "Delivery Address","Near Location","Mobile No","Phone","Delivery Dt","Remarks","Brand","Class","Salesman",
+        "Salesman MobNo","Product Value","Qty","Product Srl No."))
+    var sl = 0
+    try {
+        db(ctx).readableDatabase.rawQuery(
+            "SELECT inv,date,buyer,baddr1,baddr2,bpin,bstate,blmk,bphone,branch,salesman,deliveryDate,cancelReason,lines FROM bills " +
+            "WHERE quote=0 AND cancelled=0 AND ms>=? AND ms<? ORDER BY ms",
+            arrayOf(startMs.toString(), endMs.toString())).use { c ->
+            while(c.moveToNext()) {
+                val addr = listOf(c.getString(3) ?: "", c.getString(4) ?: "").filter { it.isNotBlank() }.joinToString(", ")
+                val arr = try { JSONArray(c.getString(13) ?: "[]") } catch(e: Exception) { JSONArray() }
+                for(i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val qty = o.optDouble("qty", 1.0)
+                    val value = o.optDouble("taxable", 0.0) + o.optDouble("tax", 0.0)
+                    val salesman = c.getString(10) ?: ""
+                    sl++
+                    rows.add(listOf(sl.toString(), c.getString(9) ?: "", c.getString(1) ?: "", c.getString(0) ?: "",
+                        o.optString("desc"), c.getString(2) ?: "", addr, c.getString(5) ?: "", c.getString(6) ?: "",
+                        addr, c.getString(7) ?: "", c.getString(8) ?: "", c.getString(8) ?: "",
+                        c.getString(11) ?: "", c.getString(12) ?: "",
+                        o.optString("brand"), o.optString("cls"), salesman, salesmanPhone[salesman] ?: "",
+                        fmt(value), if(qty == qty.toLong().toDouble()) qty.toLong().toString() else fmt(qty), o.optString("serial")))
+                }
+            }
+        }
+    } catch(e: Exception) { }
+    return xlsxBytes(listOf("Register" to rows))
+}
+
+// Brand-wise sales for a period: what each brand actually did.
+fun brandSales(ctx: Context, startMs: Long, endMs: Long): List<Triple<String, Double, Double>> {
+    val map = mutableMapOf<String, Pair<Double, Double>>()
+    try {
+        db(ctx).readableDatabase.rawQuery("SELECT lines FROM bills WHERE quote=0 AND cancelled=0 AND ms>=? AND ms<?",
+            arrayOf(startMs.toString(), endMs.toString())).use { c ->
+            while(c.moveToNext()) {
+                val arr = try { JSONArray(c.getString(0) ?: "[]") } catch(e: Exception) { JSONArray() }
+                for(i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val b = o.optString("brand").ifBlank { "UNBRANDED" }
+                    val val0 = o.optDouble("taxable", 0.0) + o.optDouble("tax", 0.0)
+                    val cur = map[b] ?: (0.0 to 0.0)
+                    map[b] = (cur.first + val0) to (cur.second + o.optDouble("qty", 0.0))
+                }
+            }
+        }
+    } catch(e: Exception) { }
+    return map.entries.map { Triple(it.key, it.value.first, it.value.second) }.sortedByDescending { it.second }
 }
 
 // The same data as the backup, in a workbook you can open and read yourself.
