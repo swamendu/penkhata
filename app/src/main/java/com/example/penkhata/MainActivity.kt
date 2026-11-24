@@ -16,26 +16,35 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
+import com.google.android.gms.common.ConnectionResult
+import com.google.android.gms.common.GoogleApiAvailability
+import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
@@ -57,7 +66,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "2.8.2 \u00b7 hotfix"
+const val APP_VERSION = "3.1 \u00b7 iteration 18"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0)
 val InvItemListSaver: Saver<List<InvItem>, String> = Saver(
@@ -162,6 +171,29 @@ fun MainAppScreen() {
     // bumped after a restore or a reset: every screen rebuilds and re-reads its data
     var dataVersion by remember { mutableStateOf(0) }
 
+    var showExit by remember { mutableStateOf(false) }
+    var exiting by remember { mutableStateOf(false) }
+    val exitScope = rememberCoroutineScope()
+    // Back used to minimise silently; now it asks, and saves a backup on the way out.
+    BackHandler(enabled = !isLocked) { showExit = true }
+    if(showExit) AlertDialog(
+        onDismissRequest = { showExit = false },
+        title = { Text("Exit PenKhata?") },
+        text = { Text("A backup is saved first, so nothing is lost. Bills, stock and settings stay on this phone.") },
+        confirmButton = { TextButton(onClick = {
+            if(!exiting) {
+                exiting = true
+                exitScope.launch {
+                    val f = withContext(Dispatchers.IO) { autoBackup(ctx) }
+                    exiting = false
+                    showExit = false
+                    Toast.makeText(ctx, if(f != null) "Backup saved: " + f.name else "Exit without backup (could not write it)", Toast.LENGTH_LONG).show()
+                    (ctx as? android.app.Activity)?.finish()
+                }
+            }
+        }) { Text(if(exiting) "SAVING..." else "SAVE & EXIT") } },
+        dismissButton = { TextButton(onClick = { showExit = false }) { Text("CANCEL") } }
+    )
     if (isLocked) LoginScreen(savedPin) { isLocked = false }
     else Scaffold(
         bottomBar = { NavigationBar {
@@ -184,16 +216,18 @@ fun MainAppScreen() {
 
 @Composable
 fun LoginScreen(pin: String, unlock: () -> Unit) {
+    val focusManager = LocalFocusManager.current
     var input by remember { mutableStateOf("") }
     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
         Text("LOCKED", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-        OutlinedTextField(value=input, onValueChange={input=it}, visualTransformation=PasswordVisualTransformation(), keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.NumberPassword), modifier=Modifier.padding(20.dp))
+        OutlinedTextField(value=input, onValueChange={input=it}, visualTransformation=PasswordVisualTransformation(), keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.NumberPassword, imeAction=ImeAction.Next), modifier=Modifier.padding(20.dp), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
         Button(onClick={if(input==pin) unlock()}) { Text("UNLOCK") }
     }
 }
 
 @Composable
 fun InvoiceScreen(isQuote: Boolean) {
+    val focusManager = LocalFocusManager.current
     val ctx = LocalContext.current
     val prefs = remember { ctx.getSharedPreferences("penkhata_data", android.content.Context.MODE_PRIVATE) }
     val sellerState = prefs.getString("sState", "21") ?: "21"
@@ -223,6 +257,49 @@ fun InvoiceScreen(isQuote: Boolean) {
     }
     val scanClient = remember { GmsBarcodeScanning.getClient(ctx, GmsBarcodeScannerOptions.Builder().build()) }
     val (customers, _) = loadState(emptyList<BuyerInfo>(), ctx) { withContext(Dispatchers.IO) { loadCustomers(ctx) } }
+    fun applyStockByImei(imeiNo: String) {
+        val e = findStockByImei(stockList, imeiNo) ?: return
+        iDesc = e.model
+        iHsn = e.hsn
+        if(e.mrp > 0.0) iRate = if(e.mrp == e.mrp.toLong().toDouble()) e.mrp.toLong().toString() else e.mrp.toString()
+        iQty = "1"
+        Toast.makeText(ctx, "Filled from stock: " + e.model, Toast.LENGTH_SHORT).show()
+    }
+    fun applyCustomerByPhone(phoneNo: String) {
+        val c = findCustomerByPhone(customers, phoneNo) ?: return
+        bName = c.name; bAddr1 = c.addr1; bAddr2 = c.addr2; bLandmark = c.landmark
+        bPincode = c.pincode; bGst = c.gst; bState = c.state
+        Toast.makeText(ctx, "Customer details filled: " + c.name, Toast.LENGTH_SHORT).show()
+    }
+    var pendingScan by remember { mutableStateOf<File?>(null) }
+    val scanCamera = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
+        val f = pendingScan
+        if(res.resultCode == android.app.Activity.RESULT_OK && f != null && f.exists()) {
+            decodeBarcodeFromImage(ctx, f) { v -> iSerial = v; applyStockByImei(v) }
+        }
+        pendingScan = null
+    }
+    fun startImeiScan() {
+        if(playScannerAvailable(ctx)) {
+            try {
+                scanClient.startScan()
+                    .addOnSuccessListener { b -> val v = b.rawValue; if(v != null) { iSerial = v; applyStockByImei(v) } }
+                    .addOnFailureListener { e ->
+                        // Play Services scanner refused: fall back to a photo
+                        val f = makeScanPhotoFile(ctx); pendingScan = f
+                        cameraScanIntent(ctx, f)?.let { scanCamera.launch(it) }
+                            ?: Toast.makeText(ctx, "Scanner failed: " + (e.message ?: "unknown"), Toast.LENGTH_LONG).show()
+                    }
+            } catch(e: Exception) {
+                val f = makeScanPhotoFile(ctx); pendingScan = f
+                cameraScanIntent(ctx, f)?.let { scanCamera.launch(it) }
+            }
+        } else {
+            val f = makeScanPhotoFile(ctx); pendingScan = f
+            val i = cameraScanIntent(ctx, f)
+            if(i != null) scanCamera.launch(i)
+        }
+    }
     var showCustomers by rememberSaveable { mutableStateOf(false) }
 
     val scope = rememberCoroutineScope()
@@ -253,9 +330,9 @@ fun InvoiceScreen(isQuote: Boolean) {
             TextButton(onClick = { clearBill(); Toast.makeText(ctx, "Cleared", Toast.LENGTH_SHORT).show() }) { Text("RESET", color = Color.Red) }
         }
         Card(Modifier.padding(vertical=5.dp)) { Column(Modifier.padding(10.dp)) {
-            OutlinedTextField(invNo, {invNo=it}, label={Text("Inv No")}, modifier=Modifier.fillMaxWidth())
-            OutlinedTextField(date, {date=it}, label={Text("Date")}, modifier=Modifier.fillMaxWidth())
-            Row { OutlinedTextField(payMode, {payMode=it}, label={Text("Pay Mode")}, modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(delNote, {delNote=it}, label={Text("Delivery Note")}, modifier=Modifier.weight(1f)) }
+            OutlinedTextField(invNo, {invNo=it}, label={Text("Inv No")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+            OutlinedTextField(date, {date=it}, label={Text("Date")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+            Row { OutlinedTextField(payMode, {payMode=it}, label={Text("Pay Mode")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.width(5.dp)); OutlinedTextField(delNote, {delNote=it}, label={Text("Delivery Note")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })) }
             Text(if(autoPayMode.isBlank()) "Pay Mode fills itself from Cash / UPI / Card below" else "Pay Mode: $autoPayMode", fontSize=10.sp, color=Color(0xFF2E7D32))
         }}
         Card(Modifier.padding(vertical=5.dp)) { Column(Modifier.padding(10.dp)) {
@@ -281,13 +358,13 @@ fun InvoiceScreen(isQuote: Boolean) {
         }}
         Card(Modifier.padding(vertical=5.dp)) { Column(Modifier.padding(10.dp)) {
             Text("Buyer Details", fontWeight=FontWeight.Bold)
-            OutlinedTextField(bName, {bName=it}, label={Text("Name")}, modifier=Modifier.fillMaxWidth())
-            OutlinedTextField(bAddr1, {bAddr1=it}, label={Text("Address Line 1")}, modifier=Modifier.fillMaxWidth())
-            OutlinedTextField(bAddr2, {bAddr2=it}, label={Text("Address Line 2")}, modifier=Modifier.fillMaxWidth())
-            OutlinedTextField(bLandmark, {bLandmark=it}, label={Text("Landmark")}, modifier=Modifier.fillMaxWidth())
-            OutlinedTextField(bPincode, {bPincode=it}, label={Text("Pincode")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.fillMaxWidth())
-            OutlinedTextField(bPhone, {bPhone=it}, label={Text("Phone")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Phone), modifier=Modifier.fillMaxWidth())
-            Row { OutlinedTextField(bGst, {bGst=it}, label={Text("GSTIN")}, modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(bState, {bState=it}, label={Text("State Code")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)) }
+            OutlinedTextField(bName, {bName=it}, label={Text("Name")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+            OutlinedTextField(bAddr1, {bAddr1=it}, label={Text("Address Line 1")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+            OutlinedTextField(bAddr2, {bAddr2=it}, label={Text("Address Line 2")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+            OutlinedTextField(bLandmark, {bLandmark=it}, label={Text("Landmark")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+            OutlinedTextField(bPincode, {bPincode=it}, label={Text("Pincode")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+            OutlinedTextField(bPhone, { bPhone = it; applyCustomerByPhone(it) }, label={Text("Phone")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Phone, imeAction=ImeAction.Next), modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+            Row { OutlinedTextField(bGst, {bGst=it}, label={Text("GSTIN")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.width(5.dp)); OutlinedTextField(bState, {bState=it}, label={Text("State Code")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })) }
             if(calc.interState) Text("Other state: IGST will be charged", fontSize=10.sp, color=Color(0xFF2E7D32))
         }}
         Card(Modifier.padding(vertical=5.dp)) { Column(Modifier.padding(10.dp)) {
@@ -316,22 +393,14 @@ fun InvoiceScreen(isQuote: Boolean) {
         }}
         Card(Modifier.padding(vertical=5.dp)) { Column(Modifier.padding(10.dp)) {
             Text("Add Item", fontWeight=FontWeight.Bold)
-            OutlinedTextField(iDesc, {iDesc=it}, label={Text("Item Name")}, modifier=Modifier.fillMaxWidth())
+            OutlinedTextField(iDesc, {iDesc=it}, label={Text("Item Name")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(iSerial, {iSerial=it}, label={Text("Serial / IMEI")}, modifier=Modifier.weight(1f))
-                IconButton(onClick = {
-                    try {
-                        scanClient.startScan()
-                            .addOnSuccessListener { b -> val v = b.rawValue; if(v != null) { iSerial = v; Toast.makeText(ctx, "Scanned", Toast.LENGTH_SHORT).show() } }
-                            .addOnFailureListener { e -> Toast.makeText(ctx, "Scanner unavailable: " + (e.message ?: "Play Services needed"), Toast.LENGTH_LONG).show() }
-                    } catch(e: Exception) {
-                        Toast.makeText(ctx, "Scanner unavailable: " + (e.message ?: "Play Services needed"), Toast.LENGTH_LONG).show()
-                    }
-                }) { Icon(Icons.Default.QrCodeScanner, "Scan IMEI") }
+                OutlinedTextField(iSerial, { iSerial = it; applyStockByImei(it) }, label={Text("Serial / IMEI")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+                IconButton(onClick = { startImeiScan() }) { Icon(Icons.Default.QrCodeScanner, "Scan IMEI") }
             }
-            Row { OutlinedTextField(iHsn, {iHsn=it}, label={Text("HSN")}, modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(iUnit, {iUnit=it}, label={Text("Unit")}, modifier=Modifier.weight(1f)) }
-            Row { OutlinedTextField(iQty, {iQty=it}, label={Text("Qty")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(iRate, {iRate=it}, label={Text("Rate (Inc. Tax)")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)) }
-            Row(Modifier.padding(top=5.dp)) { OutlinedTextField(iTax, {iTax=it}, label={Text("GST %")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(iDisc, {iDisc=it}, label={Text("Disc %")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)) }
+            Row { OutlinedTextField(iHsn, {iHsn=it}, label={Text("HSN")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.width(5.dp)); OutlinedTextField(iUnit, {iUnit=it}, label={Text("Unit")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })) }
+            Row { OutlinedTextField(iQty, {iQty=it}, label={Text("Qty")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.width(5.dp)); OutlinedTextField(iRate, {iRate=it}, label={Text("Rate (Inc. Tax)")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })) }
+            Row(Modifier.padding(top=5.dp)) { OutlinedTextField(iTax, {iTax=it}, label={Text("GST %")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.width(5.dp)); OutlinedTextField(iDisc, {iDisc=it}, label={Text("Disc %")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })) }
             Button(onClick={
                 if(iDesc.isNotEmpty()) {
                     items = items + InvItem(iDesc, iSerial, iHsn, iQty.toDoubleOrNull() ?: 1.0, iRate.toDoubleOrNull() ?: 0.0, iUnit,
@@ -349,9 +418,9 @@ fun InvoiceScreen(isQuote: Boolean) {
         }
         Card(Modifier.padding(vertical=5.dp)) { Column(Modifier.padding(10.dp)) {
             Text("Charges & Payment", fontWeight=FontWeight.Bold)
-            Row { OutlinedTextField(billDisc, {billDisc=it}, label={Text("Bill Discount \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(exchange, {exchange=it}, label={Text("Exchange \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)) }
-            Row { OutlinedTextField(cash, {cash=it}, label={Text("Cash \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(upi, {upi=it}, label={Text("UPI \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(card, {card=it}, label={Text("Card \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)) }
-            OutlinedTextField(finance, {finance=it}, label={Text("Finance / EMI Scheme")}, modifier=Modifier.fillMaxWidth())
+            Row { OutlinedTextField(billDisc, {billDisc=it}, label={Text("Bill Discount \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.width(5.dp)); OutlinedTextField(exchange, {exchange=it}, label={Text("Exchange \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })) }
+            Row { OutlinedTextField(cash, {cash=it}, label={Text("Cash \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.width(5.dp)); OutlinedTextField(upi, {upi=it}, label={Text("UPI \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.width(5.dp)); OutlinedTextField(card, {card=it}, label={Text("Card \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })) }
+            OutlinedTextField(finance, {finance=it}, label={Text("Finance / EMI Scheme")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
         }}
         Card(Modifier.padding(vertical=5.dp)) { Column(Modifier.padding(10.dp)) {
             Text("Summary", fontWeight=FontWeight.Bold)
@@ -440,6 +509,7 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
     return state.value
 }
 @Composable fun LedgerScreen() {
+    val focusManager = LocalFocusManager.current
     val ctx = LocalContext.current
     val prefs = remember { ctx.getSharedPreferences("penkhata_data", android.content.Context.MODE_PRIVATE) }
     val scope = rememberCoroutineScope()
@@ -483,14 +553,14 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
         }}
         Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(10.dp)) {
             Text("Add Entry", fontWeight = FontWeight.Bold)
-            OutlinedTextField(p, {p=it}, label={Text("Party")}, modifier=Modifier.fillMaxWidth())
+            OutlinedTextField(p, {p=it}, label={Text("Party")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
             Row {
                 Button(onClick={t="DEBIT"}, colors=ButtonDefaults.buttonColors(containerColor=if(t=="DEBIT")Color.Red else Color.Gray), modifier=Modifier.weight(1f)){Text("OWES (DEBIT)")}
                 Spacer(Modifier.width(5.dp))
                 Button(onClick={t="CREDIT"}, colors=ButtonDefaults.buttonColors(containerColor=if(t=="CREDIT")Color.Green else Color.Gray), modifier=Modifier.weight(1f)){Text("PAID (CREDIT)")}
             }
-            OutlinedTextField(a, {a=it}, label={Text("Amount")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.fillMaxWidth())
-            OutlinedTextField(d, {d=it}, label={Text("Note")}, modifier=Modifier.fillMaxWidth())
+            OutlinedTextField(a, {a=it}, label={Text("Amount")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+            OutlinedTextField(d, {d=it}, label={Text("Note")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
             Button(onClick={
                 val amt = a.toDoubleOrNull() ?: 0.0
                 if(p.isNotBlank() && amt > 0.0) {
@@ -532,6 +602,7 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
 }
 
 @Composable fun StockScreen() {
+    val focusManager = LocalFocusManager.current
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var reload by remember { mutableStateOf(0) }
@@ -541,6 +612,33 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
     var mrp by rememberSaveable { mutableStateOf("") }; var qty by rememberSaveable { mutableStateOf("1") }
     var supplier by rememberSaveable { mutableStateOf("") }
     val stockScan = remember { GmsBarcodeScanning.getClient(ctx, GmsBarcodeScannerOptions.Builder().build()) }
+    var pendingStockScan by remember { mutableStateOf<File?>(null) }
+    val stockCamera = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
+        val f = pendingStockScan
+        if(res.resultCode == android.app.Activity.RESULT_OK && f != null && f.exists()) {
+            decodeBarcodeFromImage(ctx, f) { v -> imei = if(imei.isBlank()) v else imei.trimEnd() + "\n" + v }
+        }
+        pendingStockScan = null
+    }
+    fun startStockScan() {
+        if(playScannerAvailable(ctx)) {
+            try {
+                stockScan.startScan()
+                    .addOnSuccessListener { b -> val v = b.rawValue; if(v != null) imei = if(imei.isBlank()) v else imei.trimEnd() + "\n" + v }
+                    .addOnFailureListener {
+                        val f = makeScanPhotoFile(ctx); pendingStockScan = f
+                        cameraScanIntent(ctx, f)?.let { stockCamera.launch(it) }
+                    }
+            } catch(e: Exception) {
+                val f = makeScanPhotoFile(ctx); pendingStockScan = f
+                cameraScanIntent(ctx, f)?.let { stockCamera.launch(it) }
+            }
+        } else {
+            val f = makeScanPhotoFile(ctx); pendingStockScan = f
+            val i = cameraScanIntent(ctx, f)
+            if(i != null) stockCamera.launch(i)
+        }
+    }
     val totalUnits = stock.sumOf { it.qty }
     val totalValue = stock.sumOf { it.cost * it.qty }
     val lowCount = stock.count { it.qty <= 1 }
@@ -549,22 +647,14 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
         if(loadingStock) LoadingRow("Reading stock...")
         Card(Modifier.padding(vertical = 10.dp)) { Column(Modifier.padding(10.dp)) {
             Text("Add Stock", fontWeight = FontWeight.Bold)
-            OutlinedTextField(model, {model=it}, label={Text("Model / Item Name")}, modifier=Modifier.fillMaxWidth())
+            OutlinedTextField(model, {model=it}, label={Text("Model / Item Name")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(imei, {imei=it}, label={Text("IMEI / Serial - one per line (optional)")}, minLines=2, modifier=Modifier.weight(1f))
-                IconButton(onClick = {
-                    try {
-                        stockScan.startScan()
-                            .addOnSuccessListener { b -> val v = b.rawValue; if(v != null) { imei = if(imei.isBlank()) v else imei.trimEnd() + "\n" + v } }
-                            .addOnFailureListener { e -> Toast.makeText(ctx, "Scanner unavailable: " + (e.message ?: "Play Services needed"), Toast.LENGTH_LONG).show() }
-                    } catch(e: Exception) {
-                        Toast.makeText(ctx, "Scanner unavailable: " + (e.message ?: "Play Services needed"), Toast.LENGTH_LONG).show()
-                    }
-                }) { Icon(Icons.Default.QrCodeScanner, "Scan IMEI") }
+                OutlinedTextField(imei, {imei=it}, label={Text("IMEI / Serial - one per line (optional)")}, minLines=2, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+                IconButton(onClick = { startStockScan() }) { Icon(Icons.Default.QrCodeScanner, "Scan IMEI") }
             }
-            Row { OutlinedTextField(hsn, {hsn=it}, label={Text("HSN")}, modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(qty, {qty=it}, label={Text("Qty")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)) }
-            Row { OutlinedTextField(cost, {cost=it}, label={Text("Purchase \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(mrp, {mrp=it}, label={Text("MRP \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)) }
-            OutlinedTextField(supplier, {supplier=it}, label={Text("Supplier")}, modifier=Modifier.fillMaxWidth())
+            Row { OutlinedTextField(hsn, {hsn=it}, label={Text("HSN")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.width(5.dp)); OutlinedTextField(qty, {qty=it}, label={Text("Qty")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })) }
+            Row { OutlinedTextField(cost, {cost=it}, label={Text("Purchase \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.width(5.dp)); OutlinedTextField(mrp, {mrp=it}, label={Text("MRP \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })) }
+            OutlinedTextField(supplier, {supplier=it}, label={Text("Supplier")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
             Button(onClick = {
                 if(model.isNotBlank()) {
                     val imeis = imei.split("\n", ",", " ").map{ it.trim() }.filter{ it.isNotBlank() }.distinct()
@@ -615,6 +705,7 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
     }
 }
 @Composable fun GSTReportScreen() {
+    val focusManager = LocalFocusManager.current
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var offset by rememberSaveable { mutableStateOf(0) }
@@ -685,7 +776,7 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
             Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Expenses"); Text("\u20b9${fmt(expenseTotal)}") }
             Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Net", fontWeight = FontWeight.Bold); Text("\u20b9${fmt(profit - expenseTotal)}", fontWeight = FontWeight.Bold) }
             Spacer(Modifier.height(8.dp))
-            Row { OutlinedTextField(expNote, {expNote=it}, label={Text("Expense note")}, modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(expAmount, {expAmount=it}, label={Text("\u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.width(90.dp)) }
+            Row { OutlinedTextField(expNote, {expNote=it}, label={Text("Expense note")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.width(5.dp)); OutlinedTextField(expAmount, {expAmount=it}, label={Text("\u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.width(90.dp), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })) }
             Button(onClick = {
                 val amt = expAmount.toDoubleOrNull() ?: 0.0
                 if(expNote.isNotBlank() && amt > 0.0) {
@@ -711,6 +802,7 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
 }
 
 @Composable fun FileHistoryScreen() {
+    val focusManager = LocalFocusManager.current
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var query by rememberSaveable { mutableStateOf("") }
@@ -741,7 +833,7 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
     Column(Modifier.padding(16.dp)) {
         Text("FILES", fontSize = 24.sp, fontWeight = FontWeight.Bold)
         OutlinedTextField(query, {query=it}, label={Text("Search IMEI, phone, buyer or invoice no")},
-            leadingIcon = { Icon(Icons.Default.Search, "Search") }, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp))
+            leadingIcon = { Icon(Icons.Default.Search, "Search") }, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
         if(busy) LoadingRow("Building the PDF...")
         else if(loadingBills || loadingHits) LoadingRow("Reading bills...")
         if(query.trim().length >= 2) {
@@ -796,6 +888,7 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
 }
 
 @Composable fun SettingsScreen(currentPin: String, onDataChanged: () -> Unit, onPinSave: (String)->Unit) {
+    val focusManager = LocalFocusManager.current
     val ctx=LocalContext.current
     val prefs=remember{ctx.getSharedPreferences("penkhata_data",Context.MODE_PRIVATE)}
     val backupLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
@@ -824,7 +917,7 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
             }
         }
     }
-    var sName by remember{mutableStateOf(prefs.getString("sName","")?:"")}; var sState by remember{mutableStateOf(prefs.getString("sState","21")?:"21")}; var sPrefix by remember{mutableStateOf(prefs.getString("sPrefix","INV")?:"INV")}; var sAddr1 by remember{mutableStateOf(prefs.getString("sAddr1","")?:(prefs.getString("sAddr","")?:"").lineSequence().firstOrNull()?.trim()?:"")}; var sAddr2 by remember{mutableStateOf(prefs.getString("sAddr2","")?:(prefs.getString("sAddr","")?:"").lineSequence().drop(1).joinToString(" ").trim())}; var sPhone by remember{mutableStateOf(prefs.getString("sPhone","")?:"")}; var sEmail by remember{mutableStateOf(prefs.getString("sEmail","")?:"")}; var sLandmark by remember{mutableStateOf(prefs.getString("sLandmark","")?:"")}; var sPincode by remember{mutableStateOf(prefs.getString("sPincode","")?:"")}; var sUpi by remember{mutableStateOf(prefs.getString("sUpi","")?:"")}; var sGst by remember{mutableStateOf(prefs.getString("sGst","")?:"")}; var sBank by remember{mutableStateOf(prefs.getString("sBank","")?:"")}; var sIfsc by remember{mutableStateOf(prefs.getString("sIfsc","")?:"")}; var sJuris by remember{mutableStateOf(prefs.getString("sJuris","")?:"")}; var defTax by remember{mutableStateOf(prefs.getString("defTax","18")?:"18")}; var newPin by remember{mutableStateOf(currentPin)}; Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())){Text("SETTINGS",fontSize=24.sp,fontWeight=FontWeight.Bold); OutlinedTextField(newPin,{newPin=it},label={Text("Set Login PIN")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.NumberPassword),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sName,{sName=it},label={Text("Firm Name")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sState,{sState=it},label={Text("My State Code (GST, e.g. 21)")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sPrefix,{sPrefix=it},label={Text("Invoice Prefix")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sAddr1,{sAddr1=it},label={Text("Address Line 1")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sAddr2,{sAddr2=it},label={Text("Address Line 2")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sPhone,{sPhone=it},label={Text("Phone")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Phone),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sEmail,{sEmail=it},label={Text("Email")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Email),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sLandmark,{sLandmark=it},label={Text("Landmark")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sPincode,{sPincode=it},label={Text("Pincode")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),modifier=Modifier.fillMaxWidth()); OutlinedTextField(sUpi,{sUpi=it},label={Text("UPI ID (for the payment QR)")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sGst,{sGst=it},label={Text("GSTIN")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sBank,{sBank=it},label={Text("Bank Name & Acc")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sIfsc,{sIfsc=it},label={Text("IFSC")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(sJuris,{sJuris=it},label={Text("Jurisdiction")},modifier=Modifier.fillMaxWidth()); OutlinedTextField(defTax,{defTax=it},label={Text("Default Tax %")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),modifier=Modifier.fillMaxWidth()); Text("PenKhata "+APP_VERSION, fontSize=10.sp, color=Color.Gray, modifier=Modifier.padding(top=8.dp)); Button(onClick={prefs.edit().putString("sName",sName).putString("sState",sState).putString("sPrefix",sPrefix).putString("sAddr1",sAddr1).putString("sAddr2",sAddr2).putString("sPhone",sPhone).putString("sEmail",sEmail).putString("sLandmark",sLandmark).putString("sPincode",sPincode).putString("sUpi",sUpi).putString("sGst",sGst).putString("sBank",sBank).putString("sIfsc",sIfsc).putString("sJuris",sJuris).putString("defTax",defTax).apply(); onPinSave(newPin); Toast.makeText(ctx,"Saved",Toast.LENGTH_SHORT).show()},modifier=Modifier.fillMaxWidth()){Text("SAVE")}; Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Backup & Restore", fontWeight=FontWeight.Bold); Text("Saves settings, invoices, ledger and the PDF bills to one file you choose, so a reinstall does not mean re-typing everything. The app PIN is not included.", fontSize=10.sp); Spacer(Modifier.height(8.dp)); Button(onClick={ backupLauncher.launch("penkhata-backup-"+SimpleDateFormat("yyyyMMdd-HHmm", Locale.ENGLISH).format(Date())+".zip") }, modifier=Modifier.fillMaxWidth()){ Text("BACKUP DATA") }; Spacer(Modifier.height(6.dp)); Button(onClick={ restoreLauncher.launch(arrayOf("application/json","text/plain","*/*")) }, modifier=Modifier.fillMaxWidth()){ Text("RESTORE DATA") } }}; Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Reset", fontWeight=FontWeight.Bold); Text("Master reset clears bills, PDFs, customers, stock, ledger and expenses but keeps every setting on this screen. Total reset clears those as well and starts the app empty.", fontSize=10.sp); Spacer(Modifier.height(8.dp)); Button(onClick={ confirmMaster = true }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFEF6C00))){ Text("MASTER RESET (KEEP SETTINGS)") }; Spacer(Modifier.height(6.dp)); Button(onClick={ confirmAll = true }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFC62828))){ Text("TOTAL RESET (EVERYTHING)") } }}; if(confirmMaster) AlertDialog(onDismissRequest={ confirmMaster = false }, title={ Text("Master reset?") }, text={ Text("Deletes every bill, PDF, customer, stock line, ledger entry and expense. Your outlet details and PIN stay.") }, confirmButton={ TextButton(onClick={ scope.launch { val n = withContext(Dispatchers.IO){ wipeTransactions(ctx) }; confirmMaster = false; onDataChanged(); Toast.makeText(ctx, "Cleared $n files.", Toast.LENGTH_LONG).show() } }){ Text("DELETE") } }, dismissButton={ TextButton(onClick={ confirmMaster = false }){ Text("CANCEL") } }); if(confirmAll) AlertDialog(onDismissRequest={ confirmAll = false }, title={ Text("Total reset?") }, text={ Text("Deletes everything: bills, PDFs, customers, stock, ledger, expenses, all settings and the PIN. The app goes back to a fresh install.") }, confirmButton={ TextButton(onClick={ scope.launch { val n = withContext(Dispatchers.IO){ wipeEverything(ctx) }; confirmAll = false; onDataChanged(); Toast.makeText(ctx, "Cleared $n files and all settings. Restart the app.", Toast.LENGTH_LONG).show() } }){ Text("DELETE EVERYTHING") } }, dismissButton={ TextButton(onClick={ confirmAll = false }){ Text("CANCEL") } }); Spacer(Modifier.height(60.dp))} }
+    var sName by remember{mutableStateOf(prefs.getString("sName","")?:"")}; var sState by remember{mutableStateOf(prefs.getString("sState","21")?:"21")}; var sPrefix by remember{mutableStateOf(prefs.getString("sPrefix","INV")?:"INV")}; var sAddr1 by remember{mutableStateOf(prefs.getString("sAddr1","")?:(prefs.getString("sAddr","")?:"").lineSequence().firstOrNull()?.trim()?:"")}; var sAddr2 by remember{mutableStateOf(prefs.getString("sAddr2","")?:(prefs.getString("sAddr","")?:"").lineSequence().drop(1).joinToString(" ").trim())}; var sPhone by remember{mutableStateOf(prefs.getString("sPhone","")?:"")}; var sEmail by remember{mutableStateOf(prefs.getString("sEmail","")?:"")}; var sLandmark by remember{mutableStateOf(prefs.getString("sLandmark","")?:"")}; var sPincode by remember{mutableStateOf(prefs.getString("sPincode","")?:"")}; var sUpi by remember{mutableStateOf(prefs.getString("sUpi","")?:"")}; var sGst by remember{mutableStateOf(prefs.getString("sGst","")?:"")}; var sBank by remember{mutableStateOf(prefs.getString("sBank","")?:"")}; var sIfsc by remember{mutableStateOf(prefs.getString("sIfsc","")?:"")}; var sJuris by remember{mutableStateOf(prefs.getString("sJuris","")?:"")}; var defTax by remember{mutableStateOf(prefs.getString("defTax","18")?:"18")}; var newPin by remember{mutableStateOf(currentPin)}; Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())){Text("SETTINGS",fontSize=24.sp,fontWeight=FontWeight.Bold); OutlinedTextField(newPin,{newPin=it},label={Text("Set Login PIN")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.NumberPassword, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sName,{sName=it},label={Text("Firm Name")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sState,{sState=it},label={Text("My State Code (GST, e.g. 21)")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sPrefix,{sPrefix=it},label={Text("Invoice Prefix")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sAddr1,{sAddr1=it},label={Text("Address Line 1")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sAddr2,{sAddr2=it},label={Text("Address Line 2")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sPhone,{sPhone=it},label={Text("Phone")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Phone, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sEmail,{sEmail=it},label={Text("Email")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Email, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sLandmark,{sLandmark=it},label={Text("Landmark")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sPincode,{sPincode=it},label={Text("Pincode")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sUpi,{sUpi=it},label={Text("UPI ID (for the payment QR)")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sGst,{sGst=it},label={Text("GSTIN")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sBank,{sBank=it},label={Text("Bank Name & Acc")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sIfsc,{sIfsc=it},label={Text("IFSC")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sJuris,{sJuris=it},label={Text("Jurisdiction")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(defTax,{defTax=it},label={Text("Default Tax %")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Text("PenKhata "+APP_VERSION, fontSize=10.sp, color=Color.Gray, modifier=Modifier.padding(top=8.dp)); Button(onClick={prefs.edit().putString("sName",sName).putString("sState",sState).putString("sPrefix",sPrefix).putString("sAddr1",sAddr1).putString("sAddr2",sAddr2).putString("sPhone",sPhone).putString("sEmail",sEmail).putString("sLandmark",sLandmark).putString("sPincode",sPincode).putString("sUpi",sUpi).putString("sGst",sGst).putString("sBank",sBank).putString("sIfsc",sIfsc).putString("sJuris",sJuris).putString("defTax",defTax).apply(); onPinSave(newPin); Toast.makeText(ctx,"Saved",Toast.LENGTH_SHORT).show()},modifier=Modifier.fillMaxWidth()){Text("SAVE")}; Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Backup & Restore", fontWeight=FontWeight.Bold); Text("Saves settings, invoices, ledger and the PDF bills to one file you choose, so a reinstall does not mean re-typing everything. The app PIN is not included.", fontSize=10.sp); Spacer(Modifier.height(8.dp)); Button(onClick={ backupLauncher.launch("penkhata-backup-"+SimpleDateFormat("yyyyMMdd-HHmm", Locale.ENGLISH).format(Date())+".zip") }, modifier=Modifier.fillMaxWidth()){ Text("BACKUP DATA") }; Spacer(Modifier.height(6.dp)); Button(onClick={ restoreLauncher.launch(arrayOf("application/json","text/plain","*/*")) }, modifier=Modifier.fillMaxWidth()){ Text("RESTORE DATA") } }}; Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Reset", fontWeight=FontWeight.Bold); Text("Master reset clears bills, PDFs, customers, stock, ledger and expenses but keeps every setting on this screen. Total reset clears those as well and starts the app empty.", fontSize=10.sp); Spacer(Modifier.height(8.dp)); Button(onClick={ confirmMaster = true }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFEF6C00))){ Text("MASTER RESET (KEEP SETTINGS)") }; Spacer(Modifier.height(6.dp)); Button(onClick={ confirmAll = true }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFC62828))){ Text("TOTAL RESET (EVERYTHING)") } }}; if(confirmMaster) AlertDialog(onDismissRequest={ confirmMaster = false }, title={ Text("Master reset?") }, text={ Text("Deletes every bill, PDF, customer, stock line, ledger entry and expense. Your outlet details and PIN stay.") }, confirmButton={ TextButton(onClick={ scope.launch { val n = withContext(Dispatchers.IO){ wipeTransactions(ctx) }; confirmMaster = false; onDataChanged(); Toast.makeText(ctx, "Cleared $n files.", Toast.LENGTH_LONG).show() } }){ Text("DELETE") } }, dismissButton={ TextButton(onClick={ confirmMaster = false }){ Text("CANCEL") } }); if(confirmAll) AlertDialog(onDismissRequest={ confirmAll = false }, title={ Text("Total reset?") }, text={ Text("Deletes everything: bills, PDFs, customers, stock, ledger, expenses, all settings and the PIN. The app goes back to a fresh install.") }, confirmButton={ TextButton(onClick={ scope.launch { val n = withContext(Dispatchers.IO){ wipeEverything(ctx) }; confirmAll = false; onDataChanged(); Toast.makeText(ctx, "Cleared $n files and all settings. Restart the app.", Toast.LENGTH_LONG).show() } }){ Text("DELETE EVERYTHING") } }, dismissButton={ TextButton(onClick={ confirmAll = false }){ Text("CANCEL") } }); Spacer(Modifier.height(60.dp))} }
 
 // --- LOGIC ---
 data class InvoiceRec(val invNo: String, val date: String, val whenMs: Long, val buyer: String, val buyerGst: String,
@@ -1082,6 +1175,18 @@ fun saveStock(ctx: Context, list: List<StockEntry>) {
     writeFileAtomic(File(ctx.filesDir, "stock.json"), arr.toString())
 }
 // Purchase cost of a sold item: matched on IMEI first, then on model name. 0 when unknown.
+// Scanning or typing a full IMEI should bring the whole stock line with it.
+fun findStockByImei(list: List<StockEntry>, imei: String): StockEntry? {
+    val q = imei.trim()
+    if(q.length < 10) return null
+    return list.firstOrNull { it.imeiList().contains(q) }
+}
+// Typing a known phone number fills the rest of the buyer from their last bill.
+fun findCustomerByPhone(list: List<BuyerInfo>, phone: String): BuyerInfo? {
+    val q = phone.trim()
+    if(q.length < 10) return null
+    return list.firstOrNull { it.phone.trim() == q }
+}
 fun stockCostFor(list: List<StockEntry>, item: InvItem): Double {
     list.firstOrNull { it.imeiList().contains(item.serial) }?.let { return it.cost }
     list.firstOrNull { it.model.isNotBlank() && item.desc.lowercase().contains(it.model.lowercase()) }?.let { return it.cost }
@@ -1166,6 +1271,17 @@ fun backupJson(ctx: Context): String {
 
 // Backup is a zip: backup.json plus every generated PDF, so a restore brings the
 // bills back into the Files tab, not just the settings.
+// Written every time the app is closed, so an accidental exit never costs data.
+// Keeps the newest three and lives in the app's Documents folder.
+fun autoBackup(ctx: Context): File? {
+    return try {
+        val dir = File(ctx.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS), "auto-backups").apply { mkdirs() }
+        val f = File(dir, "auto-" + SimpleDateFormat("yyyyMMdd-HHmm", Locale.ENGLISH).format(Date()) + ".zip")
+        FileOutputStream(f).use { backupZip(ctx, it) }
+        dir.listFiles()?.sortedByDescending { it.lastModified() }?.drop(3)?.forEach { it.delete() }
+        f
+    } catch(e: Exception) { null }
+}
 fun backupZip(ctx: Context, out: OutputStream) {
     ZipOutputStream(out).use { zos ->
         zos.putNextEntry(ZipEntry("backup.json"))
@@ -1617,6 +1733,42 @@ fun createPdf(ctx: Context, isQuote: Boolean, invNo: String, date: String, payMo
     return f
 }
 // Runs on the main thread; kept out of createPdf so drawing and writing can happen on IO.
+// Is the Play Services code scanner usable on this phone?
+fun playScannerAvailable(ctx: Context): Boolean =
+    GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(ctx) == ConnectionResult.SUCCESS
+
+// Fallback: photograph the barcode with the system camera and decode it with the
+// bundled ML Kit model, which needs no Play Services at all.
+fun makeScanPhotoFile(ctx: Context): File {
+    val dir = File(ctx.cacheDir, "scan").apply { mkdirs() }
+    return File(dir, "scan_${System.currentTimeMillis()}.jpg")
+}
+fun decodeBarcodeFromImage(ctx: Context, f: File, onResult: (String) -> Unit) {
+    try {
+        val image = InputImage.fromFilePath(ctx, android.net.Uri.fromFile(f))
+        BarcodeScanning.getClient().process(image)
+            .addOnSuccessListener { barcodes ->
+                val v = barcodes.firstOrNull()?.rawValue
+                if(v.isNullOrBlank()) Toast.makeText(ctx, "No barcode found in the photo", Toast.LENGTH_LONG).show()
+                else onResult(v)
+            }
+            .addOnFailureListener { e -> Toast.makeText(ctx, "Could not read the photo: " + (e.message ?: "unknown"), Toast.LENGTH_LONG).show() }
+    } catch(e: Exception) {
+        Toast.makeText(ctx, "Could not read the photo: " + (e.message ?: "unknown"), Toast.LENGTH_LONG).show()
+    }
+}
+fun cameraScanIntent(ctx: Context, target: File): Intent? {
+    return try {
+        val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.provider", target)
+        Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE).apply {
+            putExtra(android.provider.MediaStore.EXTRA_OUTPUT, uri)
+            addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+    } catch(e: Exception) {
+        Toast.makeText(ctx, "Camera scan unavailable: " + (e.message ?: "unknown"), Toast.LENGTH_LONG).show()
+        null
+    }
+}
 fun openPdf(ctx: Context, f: File) {
     // getting a shareable uri can fail on its own (provider path not configured, file gone);
     // saying "no PDF viewer" for that sent us chasing the wrong problem once already
