@@ -912,8 +912,10 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
                 val isZip = bytes.size > 2 && bytes[0] == 'P'.code.toByte() && bytes[1] == 'K'.code.toByte()
                 val msg = if(isZip) restoreZip(ctx, ByteArrayInputStream(bytes)) else restoreJson(ctx, String(bytes, Charsets.UTF_8))
                 // the restored files must also reach the database, not just the folder
-                withContext(Dispatchers.IO) { importJsonIfNeeded(ctx) }
-                onDataChanged()
+                scope.launch {
+                    withContext(Dispatchers.IO) { importJsonIfNeeded(ctx) }
+                    onDataChanged()
+                }
                 Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
             } catch(e: Exception) {
                 Toast.makeText(ctx, "Restore failed: " + (e.message ?: "unknown error"), Toast.LENGTH_LONG).show()
