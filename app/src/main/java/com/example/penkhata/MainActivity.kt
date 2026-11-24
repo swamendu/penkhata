@@ -1447,11 +1447,28 @@ fun PurchaseScreen(onDone: () -> Unit) {
     val scope = rememberCoroutineScope()
     var offset by rememberSaveable { mutableStateOf(0) }
     var reload by remember { mutableStateOf(0) }
+
     val (invoices, loadingInvoices) = loadState(emptyList<InvoiceRec>(), reload) { withContext(Dispatchers.IO) { loadInvoices(ctx) } }
     val (expenses, _) = loadState(emptyList<Expense>(), reload) { withContext(Dispatchers.IO) { loadExpenses(ctx) } }
     var expNote by rememberSaveable { mutableStateOf("") }
     var expAmount by rememberSaveable { mutableStateOf("") }
     val (startMs, endMs) = monthRange(offset)
+    val xlsxLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")) { uri ->
+        if(uri != null) {
+            try {
+                ctx.contentResolver.openOutputStream(uri)?.use { it.write(exportWorkbook(ctx)) }
+                Toast.makeText(ctx, "Workbook exported", Toast.LENGTH_LONG).show()
+            } catch(e: Exception) { Toast.makeText(ctx, "Export failed: " + (e.message ?: "unknown"), Toast.LENGTH_LONG).show() }
+        }
+    }
+    val csvLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri ->
+        if(uri != null) {
+            try {
+                ctx.contentResolver.openOutputStream(uri)?.use { it.write(exportCsvBills(ctx, startMs, endMs).toByteArray()) }
+                Toast.makeText(ctx, "CSV exported", Toast.LENGTH_LONG).show()
+            } catch(e: Exception) { Toast.makeText(ctx, "Export failed: " + (e.message ?: "unknown"), Toast.LENGTH_LONG).show() }
+        }
+    }
     val monthInv = invoices.filter { it.whenMs in startMs until endMs }.sortedBy { it.whenMs }
     val monthExp = expenses.filter { it.ms in startMs until endMs }
     val grossSales = monthInv.sumOf { it.total }
@@ -1523,6 +1540,19 @@ fun PurchaseScreen(onDone: () -> Unit) {
                     }
                 }
             }, modifier = Modifier.fillMaxWidth().padding(top = 5.dp)) { Text("ADD EXPENSE") }
+        }}
+        Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(16.dp)) {
+            Text("Export", fontWeight = FontWeight.Bold)
+            Divider(Modifier.padding(vertical = 5.dp))
+            Text("XLSX carries everything: bills, lines, ledger, stock, expenses, settings. CSV carries this month's bills.", fontSize = 10.sp)
+            Spacer(Modifier.height(8.dp))
+            Button(onClick = {
+                xlsxLauncher.launch("PenKhata-export-" + SimpleDateFormat("yyyyMMdd", Locale.ENGLISH).format(Date()) + ".xlsx")
+            }, modifier = Modifier.fillMaxWidth()) { Text("EXPORT XLSX") }
+            Spacer(Modifier.height(6.dp))
+            Button(onClick = {
+                csvLauncher.launch("PenKhata-bills-" + SimpleDateFormat("MMMyyyy", Locale.ENGLISH).format(Date(startMs)) + ".csv")
+            }, modifier = Modifier.fillMaxWidth()) { Text("EXPORT CSV (THIS MONTH)") }
         }}
         if(dayTotals.isNotEmpty()) Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(16.dp)) {
             Text("Day book", fontWeight = FontWeight.Bold)
@@ -2681,6 +2711,29 @@ fun xlsxBytes(sheets: List<Pair<String, List<List<String>>>>): ByteArray {
 }
 
 // The same data as the backup, in a workbook you can open and read yourself.
+// CSV for a spreadsheet or an accountant. Fields with commas, quotes or newlines
+// are quoted, with inner quotes doubled.
+fun csvField(v: String): String {
+    return if(v.contains(',') || v.contains('"') || v.contains('\n')) "\"" + v.replace("\"", "\"\"") + "\"" else v
+}
+fun csvRow(cells: List<String>): String = cells.joinToString(",") { csvField(it) } + "\r\n"
+fun exportCsvBills(ctx: Context, startMs: Long, endMs: Long): String {
+    val sb = StringBuilder()
+    sb.append(csvRow(listOf("Invoice","Date","Buyer","Phone","GSTIN","State","Taxable","CGST","SGST","IGST","Total","Paid","Balance","Cost","Profit")))
+    try {
+        db(ctx).readableDatabase.rawQuery(
+            "SELECT inv,date,buyer,bphone,bgst,bstate,taxable,cgst,sgst,igst,total,paid,balance,cogs,profit FROM bills WHERE quote=0 AND ms>=? AND ms<? ORDER BY ms",
+            arrayOf(startMs.toString(), endMs.toString())).use { c ->
+            while(c.moveToNext()) {
+                val cells = mutableListOf<String>()
+                for(i in 0..4) cells.add(c.getString(i) ?: "")
+                for(i in 5..14) cells.add(fmt(c.getDouble(i)))
+                sb.append(csvRow(cells))
+            }
+        }
+    } catch(e: Exception) { }
+    return sb.toString()
+}
 fun exportWorkbook(ctx: Context): ByteArray {
     val inv = mutableListOf(listOf("Invoice","Date","Buyer","Phone","GSTIN","State","Taxable","CGST","SGST","IGST","Total","Paid","Balance","Profit"))
     val lines = mutableListOf(listOf("Invoice","Description","Serial/IMEI","HSN","Qty","Rate","GST %","Taxable","Tax"))
