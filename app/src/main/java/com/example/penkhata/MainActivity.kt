@@ -18,6 +18,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -73,7 +74,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "5.6 · reports"
+const val APP_VERSION = "5.7 · charts"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -535,6 +536,7 @@ fun MainAppScreen() {
     remember { migratePlainPin(prefs) }
     var hasPinState by remember { mutableStateOf(hasPin(prefs)) }
     var isLocked by remember { mutableStateOf(hasPin(prefs)) }
+    var menuOpen by remember { mutableStateOf(false) }
     // lock again when the app goes to the background, not just on a cold start
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner, hasPinState) {
@@ -585,14 +587,43 @@ fun MainAppScreen() {
             NavigationBarItem(selected = currentScreen=="history", onClick = { currentScreen="history" }, icon = { Icon(Icons.Default.History, "Files") }, label = { Text("Files") })
             NavigationBarItem(selected = currentScreen=="settings", onClick = { currentScreen="settings" }, icon = { Icon(Icons.Default.Settings, "Set") }, label = { Text("Set") })
         }}
-    ) { p -> Box(Modifier.padding(p)) { key(dataVersion) { when(currentScreen) {
+    ) { p -> Box(Modifier.padding(p)) {
+        if(menuOpen) Box(Modifier.fillMaxSize().background(Color(0x99000000)).clickable { menuOpen = false }) {
+            Card(Modifier.fillMaxWidth(0.8f).fillMaxHeight()) { Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
+                Text("MENU", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Divider(Modifier.padding(vertical = 8.dp))
+                listOf(
+                    "dashboard" to "Entry / Billing",
+                    "ledger" to "Ledger",
+                    "stock" to "Stock",
+                    "reports" to "Reports",
+                    "history" to "Files",
+                    "settings" to "Settings"
+                ).forEach { (id, label) ->
+                    Text(label, fontSize = 14.sp, modifier = Modifier.fillMaxWidth()
+                        .clickable { currentScreen = id; menuOpen = false }
+                        .padding(vertical = 10.dp))
+                }
+                Divider(Modifier.padding(vertical = 8.dp))
+                Text("Acting as " + activePerson(prefs) + " (" + activeRole(prefs) + ")", fontSize = 10.sp, color = Color.Gray)
+            }}
+        }
+        Column(Modifier.fillMaxSize()) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("\u2630", fontSize = 22.sp, modifier = Modifier.clickable { menuOpen = true }.padding(8.dp))
+            Text(activeBranchCode(prefs).ifBlank { "PenKhata" }, fontSize = 11.sp, color = Color.Gray, modifier = Modifier.weight(1f))
+            Text(activeRole(prefs), fontSize = 9.sp, color = Color.Gray)
+        }
+        Box(Modifier.weight(1f)) { key(dataVersion) { when(currentScreen) {
         "dashboard" -> InvoiceScreen(false)
         "ledger" -> LedgerScreen()
         "stock" -> StockScreen()
         "reports" -> GSTReportScreen()
         "history" -> FileHistoryScreen()
         else -> SettingsScreen(hasPin(prefs), onDataChanged = { dataVersion++ }) { new -> storePin(prefs, new); hasPinState = hasPin(prefs) }
-    }}}}
+            }}}
+        }
+    }}
 }
 
 @Composable
@@ -1441,6 +1472,51 @@ fun PurchaseScreen(onDone: () -> Unit) {
         Spacer(Modifier.height(50.dp))
     }
 }
+// A plain bar chart, drawn with boxes: no library, no layout surprises.
+@Composable
+fun BarChart(data: List<Pair<String, Double>>, barColor: Color = Color(0xFF2E7D32)) {
+    if(data.isEmpty()) return
+    val max = data.maxOfOrNull { it.second } ?: 0.0
+    Row(Modifier.fillMaxWidth().height(130.dp), verticalAlignment = Alignment.Bottom) {
+        data.forEach { (label, value) ->
+            Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(if(value <= 0.0) "" else compactAmount(value), fontSize = 7.sp, maxLines = 1)
+                val h = if(max <= 0.0) 2.dp else (value / max * 90.0).coerceAtLeast(2.0).dp
+                Box(Modifier.width(18.dp).height(h).background(barColor))
+                Spacer(Modifier.height(2.dp))
+                Text(label, fontSize = 7.sp, maxLines = 1)
+            }
+        }
+    }
+}
+fun compactAmount(v: Double): String = when {
+    v >= 10000000 -> String.format("%.1fCr", v / 10000000)
+    v >= 100000 -> String.format("%.1fL", v / 100000)
+    v >= 1000 -> String.format("%.0fk", v / 1000)
+    else -> String.format("%.0f", v)
+}
+// Sales for the last n months, oldest first, for the trend chart.
+fun monthlySales(ctx: Context, months: Int): List<Pair<String, Double>> {
+    val out = mutableListOf<Pair<String, Double>>()
+    try {
+        val cal = Calendar.getInstance()
+        cal.set(Calendar.DAY_OF_MONTH, 1)
+        for(i in months - 1 downTo 0) {
+            val c = cal.clone() as Calendar
+            c.add(Calendar.MONTH, -i)
+            c.set(Calendar.DAY_OF_MONTH, 1); c.set(Calendar.HOUR_OF_DAY, 0); c.set(Calendar.MINUTE, 0); c.set(Calendar.SECOND, 0); c.set(Calendar.MILLISECOND, 0)
+            val start = c.timeInMillis
+            c.add(Calendar.MONTH, 1)
+            val end = c.timeInMillis
+            var sum = 0.0
+            db(ctx).readableDatabase.rawQuery("SELECT total FROM bills WHERE quote=0 AND cancelled=0 AND ms>=? AND ms<?",
+                arrayOf(start.toString(), end.toString())).use { cur -> while(cur.moveToNext()) sum += cur.getDouble(0) }
+            out.add(SimpleDateFormat("MMM", Locale.ENGLISH).format(Date(start)) to sum)
+        }
+    } catch(e: Exception) { }
+    return out
+}
+
 @Composable fun GSTReportScreen() {
     val focusManager = LocalFocusManager.current
     val ctx = LocalContext.current
@@ -1566,6 +1642,14 @@ fun PurchaseScreen(onDone: () -> Unit) {
                 registerLauncher.launch("Installation-Register-" + SimpleDateFormat("MMMyyyy", Locale.ENGLISH).format(Date(startMs)) + ".xlsx")
             }, modifier = Modifier.fillMaxWidth()) { Text("INSTALLATION REGISTER (XLSX)") }
         }}
+        val trend by produceState(initialValue = emptyList<Pair<String, Double>>(), offset) {
+            value = withContext(Dispatchers.IO) { monthlySales(ctx, 6) }
+        }
+        Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(16.dp)) {
+            Text("Sales trend \u00b7 last 6 months", fontWeight = FontWeight.Bold)
+            Divider(Modifier.padding(vertical = 5.dp))
+            BarChart(trend)
+        }}
         val brandRows by produceState(initialValue = emptyList<Triple<String, Double, Double>>(), startMs, endMs) {
             value = withContext(Dispatchers.IO) { brandSales(ctx, startMs, endMs) }
         }
@@ -1578,6 +1662,8 @@ fun PurchaseScreen(onDone: () -> Unit) {
                     Text("\u20b9" + fmt(b.second), fontSize = 10.sp)
                 }
             }
+            Divider(Modifier.padding(vertical = 4.dp))
+            BarChart(brandRows.take(8).map { it.first.take(6) to it.second }, Color(0xFF1565C0))
         }}
         if(dayTotals.isNotEmpty()) Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(16.dp)) {
             Text("Day book", fontWeight = FontWeight.Bold)
