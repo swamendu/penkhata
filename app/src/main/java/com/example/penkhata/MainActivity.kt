@@ -1,6 +1,7 @@
 package com.example.penkhata
 
 import android.content.Context
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.graphics.*
 import android.graphics.pdf.PdfDocument
@@ -56,7 +57,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "2.8 \u00b7 iteration 15"
+const val APP_VERSION = "2.8.1 \u00b7 hotfix"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0)
 val InvItemListSaver: Saver<List<InvItem>, String> = Saver(
@@ -963,16 +964,23 @@ fun shareBillFile(ctx: Context, ms: Long) {
     if(f != null) sharePdf(ctx, f) else Toast.makeText(ctx, "Could not rebuild this bill", Toast.LENGTH_LONG).show()
 }
 fun sharePdf(ctx: Context, f: File) {
+    val uri = try {
+        FileProvider.getUriForFile(ctx, "${ctx.packageName}.provider", f)
+    } catch(e: Exception) {
+        Toast.makeText(ctx, "Could not prepare the PDF: " + (e.message ?: e.javaClass.simpleName), Toast.LENGTH_LONG).show()
+        return
+    }
     try {
-        val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.provider", f)
         val send = Intent(Intent.ACTION_SEND).apply {
             type = "application/pdf"
             putExtra(Intent.EXTRA_STREAM, uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         ctx.startActivity(Intent.createChooser(send, "Share bill"))
+    } catch(e: ActivityNotFoundException) {
+        Toast.makeText(ctx, "No app can share a PDF on this phone", Toast.LENGTH_LONG).show()
     } catch(e: Exception) {
-        Toast.makeText(ctx, "Could not share the file", Toast.LENGTH_SHORT).show()
+        Toast.makeText(ctx, "Could not share the file: " + (e.message ?: e.javaClass.simpleName), Toast.LENGTH_LONG).show()
     }
 }
 fun openBillPdf(ctx: Context, name: String) {
@@ -1596,12 +1604,22 @@ fun createPdf(ctx: Context, isQuote: Boolean, invNo: String, date: String, payMo
 }
 // Runs on the main thread; kept out of createPdf so drawing and writing can happen on IO.
 fun openPdf(ctx: Context, f: File) {
+    // getting a shareable uri can fail on its own (provider path not configured, file gone);
+    // saying "no PDF viewer" for that sent us chasing the wrong problem once already
+    val uri = try {
+        FileProvider.getUriForFile(ctx, "${ctx.packageName}.provider", f)
+    } catch(e: Exception) {
+        Toast.makeText(ctx, "Could not prepare the PDF: " + (e.message ?: e.javaClass.simpleName), Toast.LENGTH_LONG).show()
+        return
+    }
     try {
         ctx.startActivity(Intent.createChooser(Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(FileProvider.getUriForFile(ctx, "${ctx.packageName}.provider", f), "application/pdf")
+            setDataAndType(uri, "application/pdf")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }, "View"))
+    } catch(e: ActivityNotFoundException) {
+        Toast.makeText(ctx, "No PDF viewer is installed on this phone", Toast.LENGTH_LONG).show()
     } catch(e: Exception) {
-        Toast.makeText(ctx, "Saved to Files, but no PDF viewer is installed", Toast.LENGTH_LONG).show()
+        Toast.makeText(ctx, "Could not open the PDF: " + (e.message ?: e.javaClass.simpleName), Toast.LENGTH_LONG).show()
     }
 }

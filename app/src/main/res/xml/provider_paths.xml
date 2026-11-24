@@ -1,1 +1,7 @@
-<paths xmlns:android="http://schemas.android.com/apk/res/android"><external-path name="external_files" path="."/></paths>
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Bill PDFs are built into the app cache, so the FileProvider must be allowed to
+     serve files from there; external-path stays for PDFs written by older builds. -->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <external-path name="external_files" path="." />
+    <cache-path name="bills" path="." />
+</paths>
