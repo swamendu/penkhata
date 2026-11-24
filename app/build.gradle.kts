@@ -43,6 +43,8 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
     implementation("com.google.zxing:core:3.5.4")
-    implementation("com.google.mlkit:barcode-scanning:17.3.0")
+    // unbundled: Play Services downloads the model on demand, so the APK stays small.
+    // (the bundled com.google.mlkit:barcode-scanning adds ~21 MB)
+    implementation("com.google.android.gms:play-services-mlkit-barcode-scanning:18.3.1")
     debugImplementation("androidx.compose.ui:ui-tooling-preview")
 }
