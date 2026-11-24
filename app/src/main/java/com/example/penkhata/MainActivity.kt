@@ -74,7 +74,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "5.7 · charts"
+const val APP_VERSION = "5.7.1 · hotfix"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -588,9 +588,27 @@ fun MainAppScreen() {
             NavigationBarItem(selected = currentScreen=="settings", onClick = { currentScreen="settings" }, icon = { Icon(Icons.Default.Settings, "Set") }, label = { Text("Set") })
         }}
     ) { p -> Box(Modifier.padding(p)) {
+        Column(Modifier.fillMaxSize()) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("\u2630", fontSize = 22.sp, modifier = Modifier.clickable { menuOpen = true }.padding(8.dp))
+            Text(activeBranchCode(prefs).ifBlank { "PenKhata" }, fontSize = 11.sp, color = Color.Gray, modifier = Modifier.weight(1f))
+            Text(activeRole(prefs), fontSize = 9.sp, color = Color.Gray)
+        }
+        Box(Modifier.weight(1f)) { key(dataVersion) { when(currentScreen) {
+        "dashboard" -> InvoiceScreen(false)
+        "ledger" -> LedgerScreen()
+        "stock" -> StockScreen()
+        "reports" -> GSTReportScreen()
+        "history" -> FileHistoryScreen()
+        else -> SettingsScreen(hasPin(prefs), onDataChanged = { dataVersion++ }) { new -> storePin(prefs, new); hasPinState = hasPin(prefs) }
+            }}}
+        }
         if(menuOpen) Box(Modifier.fillMaxSize().background(Color(0x99000000)).clickable { menuOpen = false }) {
-            Card(Modifier.fillMaxWidth(0.8f).fillMaxHeight()) { Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
-                Text("MENU", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Card(Modifier.fillMaxWidth(0.8f).fillMaxHeight().background(Color.White)) { Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
+                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
+                    Text("MENU", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                    Text("\u2715", fontSize = 18.sp, modifier = Modifier.clickable { menuOpen = false }.padding(6.dp))
+                }
                 Divider(Modifier.padding(vertical = 8.dp))
                 listOf(
                     "dashboard" to "Entry / Billing",
@@ -607,21 +625,6 @@ fun MainAppScreen() {
                 Divider(Modifier.padding(vertical = 8.dp))
                 Text("Acting as " + activePerson(prefs) + " (" + activeRole(prefs) + ")", fontSize = 10.sp, color = Color.Gray)
             }}
-        }
-        Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("\u2630", fontSize = 22.sp, modifier = Modifier.clickable { menuOpen = true }.padding(8.dp))
-            Text(activeBranchCode(prefs).ifBlank { "PenKhata" }, fontSize = 11.sp, color = Color.Gray, modifier = Modifier.weight(1f))
-            Text(activeRole(prefs), fontSize = 9.sp, color = Color.Gray)
-        }
-        Box(Modifier.weight(1f)) { key(dataVersion) { when(currentScreen) {
-        "dashboard" -> InvoiceScreen(false)
-        "ledger" -> LedgerScreen()
-        "stock" -> StockScreen()
-        "reports" -> GSTReportScreen()
-        "history" -> FileHistoryScreen()
-        else -> SettingsScreen(hasPin(prefs), onDataChanged = { dataVersion++ }) { new -> storePin(prefs, new); hasPinState = hasPin(prefs) }
-            }}}
         }
     }}
 }
