@@ -73,7 +73,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "5.4 · stock in hand"
+const val APP_VERSION = "5.5 · stock audit"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -295,6 +295,72 @@ fun loadPurchases(ctx: Context): List<Purchase> {
         db(ctx).readableDatabase.rawQuery("SELECT ms,distributor,invoiceNo,date,taxable,gst,total,creditDays,note FROM purchases ORDER BY ms DESC", null).use { c ->
             while(c.moveToNext()) out.add(Purchase(c.getLong(0), c.getString(1) ?: "", c.getString(2) ?: "", c.getString(3) ?: "",
                 c.getDouble(4), c.getDouble(5), c.getDouble(6), c.getInt(7), c.getString(8) ?: "", emptyList()))
+        }
+    } catch(e: Exception) { }
+    return out
+}
+
+// ---------------------------------------------------------------- stock audit
+data class AuditLine(val stockId: Long, val model: String, val brand: String, val bookQty: Int, val countedQty: Int,
+                     val cost: Double, val missingSerials: String)
+data class StockAudit(val ms: Long, val date: String, val countedBy: String, val note: String,
+                      val bookUnits: Int, val countedUnits: Int, val varianceUnits: Int,
+                      val bookValue: Double, val varianceValue: Double, val lines: List<AuditLine>)
+
+// A physical count: what the book says, what the shelf says, and the difference.
+// The stock is corrected to the counted figure, and the audit keeps the reason.
+fun saveAudit(ctx: Context, a: StockAudit): Boolean {
+    return try {
+        val w = db(ctx).writableDatabase
+        val prefs = ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE)
+        w.beginTransaction()
+        try {
+            val cv = android.content.ContentValues()
+            cv.put("ms", a.ms); cv.put("date", a.date); cv.put("branch", activeBranchCode(prefs))
+            cv.put("countedBy", a.countedBy); cv.put("note", a.note)
+            cv.put("bookUnits", a.bookUnits); cv.put("countedUnits", a.countedUnits)
+            cv.put("varianceUnits", a.varianceUnits); cv.put("bookValue", a.bookValue); cv.put("varianceValue", a.varianceValue)
+            w.insertWithOnConflict("audits", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE)
+            w.delete("audit_lines", "ms=?", arrayOf(a.ms.toString()))
+            for(l in a.lines) {
+                val lv = android.content.ContentValues()
+                lv.put("ms", a.ms); lv.put("stockId", l.stockId); lv.put("model", l.model); lv.put("brand", l.brand)
+                lv.put("bookQty", l.bookQty); lv.put("countedQty", l.countedQty); lv.put("cost", l.cost)
+                lv.put("missingSerials", l.missingSerials)
+                w.insert("audit_lines", null, lv)
+            }
+            w.setTransactionSuccessful()
+        } finally { w.endTransaction() }
+        // bring the shelf and the book together
+        val stock = loadStock(ctx).toMutableList()
+        for(l in a.lines) {
+            val idx = stock.indexOfFirst { it.id == l.stockId }
+            if(idx >= 0 && stock[idx].qty != l.countedQty) {
+                val e = stock[idx]
+                val imeis = e.imeiList()
+                val kept = if(imeis.size > l.countedQty) imeis.take(l.countedQty) else imeis
+                stock[idx] = e.copy(qty = l.countedQty, imei = kept.joinToString("\n"))
+            }
+        }
+        saveStock(ctx, stock)
+        true
+    } catch(e: Exception) { false }
+}
+fun loadAudits(ctx: Context): List<StockAudit> {
+    val out = mutableListOf<StockAudit>()
+    try {
+        db(ctx).readableDatabase.rawQuery("SELECT ms,date,countedBy,note,bookUnits,countedUnits,varianceUnits,bookValue,varianceValue FROM audits ORDER BY ms DESC", null).use { c ->
+            while(c.moveToNext()) out.add(StockAudit(c.getLong(0), c.getString(1) ?: "", c.getString(2) ?: "", c.getString(3) ?: "",
+                c.getInt(4), c.getInt(5), c.getInt(6), c.getDouble(7), c.getDouble(8), emptyList()))
+        }
+    } catch(e: Exception) { }
+    return out
+}
+fun loadAuditLines(ctx: Context, ms: Long): List<AuditLine> {
+    val out = mutableListOf<AuditLine>()
+    try {
+        db(ctx).readableDatabase.rawQuery("SELECT stockId,model,brand,bookQty,countedQty,cost,missingSerials FROM audit_lines WHERE ms=?", arrayOf(ms.toString())).use { c ->
+            while(c.moveToNext()) out.add(AuditLine(c.getLong(0), c.getString(1) ?: "", c.getString(2) ?: "", c.getInt(3), c.getInt(4), c.getDouble(5), c.getString(6) ?: ""))
         }
     } catch(e: Exception) { }
     return out
@@ -944,6 +1010,103 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
 }
 
 @Composable
+fun StockAuditScreen(onDone: () -> Unit) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val prefs = remember { ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE) }
+    var reload by remember { mutableStateOf(0) }
+    var note by rememberSaveable { mutableStateOf("") }
+    var saving by remember { mutableStateOf(false) }
+    // counted figures keyed by stock row id, defaulting to the book quantity
+    var counted by remember { mutableStateOf(mapOf<Long, String>()) }
+    val stock by produceState(initialValue = emptyList<StockEntry>(), reload) { value = withContext(Dispatchers.IO) { loadStock(ctx) } }
+    val audits by produceState(initialValue = emptyList<StockAudit>(), reload) { value = withContext(Dispatchers.IO) { loadAudits(ctx) } }
+
+    fun countedFor(e: StockEntry): Int = counted[e.id]?.toIntOrNull() ?: e.qty
+
+    Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
+        Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
+            Text("STOCK AUDIT", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            TextButton(onClick = { onDone() }) { Text("BACK") }
+        }
+        Text("Count what is actually on the shelf. Anything different is recorded against " + activePerson(prefs) + ".", fontSize = 10.sp, color = Color.Gray)
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(note, {note=it}, label={Text("Note (e.g. month end count)")}, modifier=Modifier.fillMaxWidth())
+        Spacer(Modifier.height(6.dp))
+
+        if(stock.isEmpty()) Text("No stock to count.", fontSize = 11.sp)
+        stock.sortedBy { it.model.lowercase() }.forEach { e ->
+            Card(Modifier.padding(vertical = 3.dp)) { Column(Modifier.padding(10.dp)) {
+                Text(e.model, fontWeight = FontWeight.Bold, maxLines = 1, fontSize = 12.sp)
+                Text((if(e.brand.isBlank()) "" else e.brand + " \u00b7 ") + "book " + e.qty + "  \u00b7  cost \u20b9" + fmt(e.cost), fontSize = 10.sp, color = Color.Gray)
+                if(e.imeiList().isNotEmpty()) Text(e.imeiList().joinToString(", "), fontSize = 9.sp, maxLines = 2)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        counted[e.id] ?: e.qty.toString(),
+                        { v -> counted = counted + (e.id to v) },
+                        label = { Text("Counted") },
+                        modifier = Modifier.width(120.dp),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Next)
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    val diff = countedFor(e) - e.qty
+                    Text(if(diff == 0) "matches" else (if(diff > 0) "+" else "") + diff + " units", fontSize = 11.sp,
+                        color = if(diff == 0) Color(0xFF2E7D32) else Color.Red)
+                }
+            }}
+        }
+
+        Spacer(Modifier.height(10.dp))
+        val bookUnits = stock.sumOf { it.qty }
+        val countedUnits = stock.sumOf { countedFor(it) }
+        val varianceValue = stock.sumOf { (countedFor(it) - it.qty) * it.cost }
+        Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(10.dp)) {
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Book units", fontSize = 11.sp); Text("$bookUnits", fontSize = 11.sp) }
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Counted units", fontSize = 11.sp); Text("$countedUnits", fontSize = 11.sp) }
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
+                Text("Variance", fontWeight = FontWeight.Bold)
+                Text("${countedUnits - bookUnits} units  \u00b7  \u20b9${fmt(varianceValue)}",
+                    fontWeight = FontWeight.Bold, color = if(countedUnits == bookUnits) Color(0xFF2E7D32) else Color.Red)
+            }
+            Button(onClick = {
+                saving = true
+                scope.launch {
+                    val a = StockAudit(System.currentTimeMillis(), SimpleDateFormat("dd-MMM-yyyy", Locale.ENGLISH).format(Date()),
+                        activePerson(prefs), note.trim(), bookUnits, countedUnits, countedUnits - bookUnits,
+                        stock.sumOf { it.cost * it.qty }, varianceValue,
+                        stock.map { e ->
+                            val c = countedFor(e)
+                            val missing = if(e.imeiList().size > c) e.imeiList().drop(c).joinToString(", ") else ""
+                            AuditLine(e.id, e.model, e.brand, e.qty, c, e.cost, missing)
+                        })
+                    val ok = withContext(Dispatchers.IO) { saveAudit(ctx, a) }
+                    saving = false
+                    if(ok) {
+                        Toast.makeText(ctx, "Audit saved. Stock corrected to the counted figures.", Toast.LENGTH_LONG).show()
+                        counted = mapOf(); note = ""; reload++
+                    } else {
+                        Toast.makeText(ctx, "Could not save the audit", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }, enabled = !saving, modifier = Modifier.fillMaxWidth()) { Text(if(saving) "SAVING..." else "SAVE AUDIT") }
+        }}
+
+        if(audits.isNotEmpty()) Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(10.dp)) {
+            Text("Previous audits", fontWeight = FontWeight.Bold)
+            audits.take(10).forEach { a ->
+                Column(Modifier.padding(vertical = 3.dp)) {
+                    Text(a.date + "  \u00b7  " + a.countedBy, fontSize = 11.sp)
+                    Text("book " + a.bookUnits + " \u00b7 counted " + a.countedUnits + " \u00b7 variance " + a.varianceUnits +
+                         "  (\u20b9" + fmt(a.varianceValue) + ")" + (if(a.note.isBlank()) "" else "  \u00b7  " + a.note),
+                        fontSize = 9.sp, color = if(a.varianceUnits == 0) Color.Gray else Color.Red)
+                }
+                Divider()
+            }
+        }}
+    }
+}
+
+@Composable
 fun PurchaseScreen(onDone: () -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1079,7 +1242,9 @@ fun PurchaseScreen(onDone: () -> Unit) {
 
 @Composable fun StockScreen() {
     var showPurchase by rememberSaveable { mutableStateOf(false) }
+    var showAudit by rememberSaveable { mutableStateOf(false) }
     if(showPurchase) { PurchaseScreen { showPurchase = false }; return }
+    if(showAudit) { StockAuditScreen { showAudit = false }; return }
     val focusManager = LocalFocusManager.current
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1129,7 +1294,11 @@ fun PurchaseScreen(onDone: () -> Unit) {
     Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
         Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
             Text("STOCK", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-            Button(onClick = { showPurchase = true }) { Text("PURCHASE IN") }
+            Row {
+                Button(onClick = { showPurchase = true }) { Text("PURCHASE IN") }
+                Spacer(Modifier.width(4.dp))
+                OutlinedButton(onClick = { showAudit = true }) { Text("AUDIT") }
+            }
         }
         if(loadingStock) LoadingRow("Reading stock...")
         Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(12.dp)) {
@@ -2212,6 +2381,11 @@ class PenDb(ctx: Context) : android.database.sqlite.SQLiteOpenHelper(ctx, "penkh
                 taxable REAL DEFAULT 0, gst REAL DEFAULT 0, total REAL DEFAULT 0, creditDays INTEGER DEFAULT 0, note TEXT DEFAULT '')""")
             db.execSQL("""CREATE TABLE IF NOT EXISTS purchase_lines(ms INTEGER, model TEXT, brand TEXT, category TEXT, hsn TEXT,
                 qty INTEGER DEFAULT 0, cost REAL DEFAULT 0, gstRate REAL DEFAULT 18, serials TEXT DEFAULT '')""")
+            db.execSQL("""CREATE TABLE IF NOT EXISTS audits(ms INTEGER PRIMARY KEY, date TEXT, branch TEXT, countedBy TEXT,
+                note TEXT DEFAULT '', bookUnits INTEGER DEFAULT 0, countedUnits INTEGER DEFAULT 0,
+                varianceUnits INTEGER DEFAULT 0, bookValue REAL DEFAULT 0, varianceValue REAL DEFAULT 0)""")
+            db.execSQL("""CREATE TABLE IF NOT EXISTS audit_lines(ms INTEGER, stockId INTEGER, model TEXT, brand TEXT,
+                bookQty INTEGER DEFAULT 0, countedQty INTEGER DEFAULT 0, cost REAL DEFAULT 0, missingSerials TEXT DEFAULT '')""")
         } catch(e: Exception) { }
     }
     override fun onConfigure(db: android.database.sqlite.SQLiteDatabase) {
