@@ -61,7 +61,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "2.9 \u00b7 iteration 16"
+const val APP_VERSION = "3.0 \u00b7 iteration 17"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0)
 val InvItemListSaver: Saver<List<InvItem>, String> = Saver(
@@ -226,11 +226,25 @@ fun InvoiceScreen(isQuote: Boolean) {
         if(ims.isEmpty()) listOf(e to "") else ims.map { e to it }
     }
     val scanClient = remember { GmsBarcodeScanning.getClient(ctx, GmsBarcodeScannerOptions.Builder().build()) }
+    fun applyStockByImei(imeiNo: String) {
+        val e = findStockByImei(stockList, imeiNo) ?: return
+        iDesc = e.model
+        iHsn = e.hsn
+        if(e.mrp > 0.0) iRate = if(e.mrp == e.mrp.toLong().toDouble()) e.mrp.toLong().toString() else e.mrp.toString()
+        iQty = "1"
+        Toast.makeText(ctx, "Filled from stock: " + e.model, Toast.LENGTH_SHORT).show()
+    }
+    fun applyCustomerByPhone(phoneNo: String) {
+        val c = findCustomerByPhone(customers, phoneNo) ?: return
+        bName = c.name; bAddr1 = c.addr1; bAddr2 = c.addr2; bLandmark = c.landmark
+        bPincode = c.pincode; bGst = c.gst; bState = c.state
+        Toast.makeText(ctx, "Customer details filled: " + c.name, Toast.LENGTH_SHORT).show()
+    }
     var pendingScan by remember { mutableStateOf<File?>(null) }
     val scanCamera = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
         val f = pendingScan
         if(res.resultCode == android.app.Activity.RESULT_OK && f != null && f.exists()) {
-            decodeBarcodeFromImage(ctx, f) { v -> iSerial = v; Toast.makeText(ctx, "Scanned", Toast.LENGTH_SHORT).show() }
+            decodeBarcodeFromImage(ctx, f) { v -> iSerial = v; applyStockByImei(v) }
         }
         pendingScan = null
     }
@@ -238,7 +252,7 @@ fun InvoiceScreen(isQuote: Boolean) {
         if(playScannerAvailable(ctx)) {
             try {
                 scanClient.startScan()
-                    .addOnSuccessListener { b -> val v = b.rawValue; if(v != null) { iSerial = v; Toast.makeText(ctx, "Scanned", Toast.LENGTH_SHORT).show() } }
+                    .addOnSuccessListener { b -> val v = b.rawValue; if(v != null) { iSerial = v; applyStockByImei(v) } }
                     .addOnFailureListener { e ->
                         // Play Services scanner refused: fall back to a photo
                         val f = makeScanPhotoFile(ctx); pendingScan = f
@@ -319,7 +333,7 @@ fun InvoiceScreen(isQuote: Boolean) {
             OutlinedTextField(bAddr2, {bAddr2=it}, label={Text("Address Line 2")}, modifier=Modifier.fillMaxWidth())
             OutlinedTextField(bLandmark, {bLandmark=it}, label={Text("Landmark")}, modifier=Modifier.fillMaxWidth())
             OutlinedTextField(bPincode, {bPincode=it}, label={Text("Pincode")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.fillMaxWidth())
-            OutlinedTextField(bPhone, {bPhone=it}, label={Text("Phone")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Phone), modifier=Modifier.fillMaxWidth())
+            OutlinedTextField(bPhone, { bPhone = it; applyCustomerByPhone(it) }, label={Text("Phone")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Phone), modifier=Modifier.fillMaxWidth())
             Row { OutlinedTextField(bGst, {bGst=it}, label={Text("GSTIN")}, modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(bState, {bState=it}, label={Text("State Code")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)) }
             if(calc.interState) Text("Other state: IGST will be charged", fontSize=10.sp, color=Color(0xFF2E7D32))
         }}
@@ -351,7 +365,7 @@ fun InvoiceScreen(isQuote: Boolean) {
             Text("Add Item", fontWeight=FontWeight.Bold)
             OutlinedTextField(iDesc, {iDesc=it}, label={Text("Item Name")}, modifier=Modifier.fillMaxWidth())
             Row(verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(iSerial, {iSerial=it}, label={Text("Serial / IMEI")}, modifier=Modifier.weight(1f))
+                OutlinedTextField(iSerial, { iSerial = it; applyStockByImei(it) }, label={Text("Serial / IMEI")}, modifier=Modifier.weight(1f))
                 IconButton(onClick = { startImeiScan() }) { Icon(Icons.Default.QrCodeScanner, "Scan IMEI") }
             }
             Row { OutlinedTextField(iHsn, {iHsn=it}, label={Text("HSN")}, modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(iUnit, {iUnit=it}, label={Text("Unit")}, modifier=Modifier.weight(1f)) }
@@ -1126,6 +1140,18 @@ fun saveStock(ctx: Context, list: List<StockEntry>) {
     writeFileAtomic(File(ctx.filesDir, "stock.json"), arr.toString())
 }
 // Purchase cost of a sold item: matched on IMEI first, then on model name. 0 when unknown.
+// Scanning or typing a full IMEI should bring the whole stock line with it.
+fun findStockByImei(list: List<StockEntry>, imei: String): StockEntry? {
+    val q = imei.trim()
+    if(q.length < 10) return null
+    return list.firstOrNull { it.imeiList().contains(q) }
+}
+// Typing a known phone number fills the rest of the buyer from their last bill.
+fun findCustomerByPhone(list: List<BuyerInfo>, phone: String): BuyerInfo? {
+    val q = phone.trim()
+    if(q.length < 10) return null
+    return list.firstOrNull { it.phone.trim() == q }
+}
 fun stockCostFor(list: List<StockEntry>, item: InvItem): Double {
     list.firstOrNull { it.imeiList().contains(item.serial) }?.let { return it.cost }
     list.firstOrNull { it.model.isNotBlank() && item.desc.lowercase().contains(it.model.lowercase()) }?.let { return it.cost }
