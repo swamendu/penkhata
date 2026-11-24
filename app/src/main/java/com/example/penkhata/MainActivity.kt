@@ -150,7 +150,7 @@ fun computeBill(items: List<InvItem>, billDiscount: Double, exchange: Double, ca
     val grand = rounded - exchange
     return BillCalc(gross, itemDisc, bd, taxableAfter, 
         if(interState) 0.0 else taxAfter / 2, if(interState) 0.0 else taxAfter / 2, if(interState) taxAfter else 0.0, taxAfter,
-        roundOff, grand, exchange, cash, upi, card, paid, grand - paid, interState, divisor)
+        roundOff, grand, exchange, divisor, cash, upi, card, paid, grand - paid, interState)
 }
 
 fun fmt(v: Double): String = String.format("%.2f", v)
@@ -1259,7 +1259,7 @@ fun convertQuoteToInvoice(ctx: Context, quoteMs: Long): File? {
         o.optString("bpin"), o.optString("bphone"), o.optString("bgst"), o.optString("bstate"))
     val bd = o.optDouble("bd", 0.0); val exch = o.optDouble("exch", 0.0)
     val cash = o.optDouble("cash", 0.0); val upi = o.optDouble("upi", 0.0); val card = o.optDouble("card", 0.0)
-    val calc = computeBill(lines, bd, exch, cash, upi, card, seller.state, buyer.state, discountDivisor(prefs))
+    val calc = computeBill(lines, bd, exch, cash, upi, card, seller.state, buyer.state, discountDivisor(ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE)))
     val prefs = ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE)
     val invNo = nextInvoiceNo(prefs)
     val dateStr = SimpleDateFormat("dd-MMM-yyyy", Locale.ENGLISH).format(Date())
