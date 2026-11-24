@@ -66,7 +66,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "3.1 \u00b7 iteration 18"
+const val APP_VERSION = "3.2.1 \u00b7 iteration 19a"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0)
 val InvItemListSaver: Saver<List<InvItem>, String> = Saver(
@@ -170,6 +170,7 @@ fun MainAppScreen() {
     var currentScreen by remember { mutableStateOf("dashboard") }
     // bumped after a restore or a reset: every screen rebuilds and re-reads its data
     var dataVersion by remember { mutableStateOf(0) }
+    LaunchedEffect(Unit) { withContext(Dispatchers.IO) { importJsonIfNeeded(ctx) }; dataVersion++ }
 
     var showExit by remember { mutableStateOf(false) }
     var exiting by remember { mutableStateOf(false) }
@@ -910,14 +911,18 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
                 val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: ByteArray(0)
                 val isZip = bytes.size > 2 && bytes[0] == 'P'.code.toByte() && bytes[1] == 'K'.code.toByte()
                 val msg = if(isZip) restoreZip(ctx, ByteArrayInputStream(bytes)) else restoreJson(ctx, String(bytes, Charsets.UTF_8))
-                onDataChanged()
+                // the restored files must also reach the database, not just the folder
+                scope.launch {
+                    withContext(Dispatchers.IO) { importJsonIfNeeded(ctx) }
+                    onDataChanged()
+                }
                 Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
             } catch(e: Exception) {
                 Toast.makeText(ctx, "Restore failed: " + (e.message ?: "unknown error"), Toast.LENGTH_LONG).show()
             }
         }
     }
-    var sName by remember{mutableStateOf(prefs.getString("sName","")?:"")}; var sState by remember{mutableStateOf(prefs.getString("sState","21")?:"21")}; var sPrefix by remember{mutableStateOf(prefs.getString("sPrefix","INV")?:"INV")}; var sAddr1 by remember{mutableStateOf(prefs.getString("sAddr1","")?:(prefs.getString("sAddr","")?:"").lineSequence().firstOrNull()?.trim()?:"")}; var sAddr2 by remember{mutableStateOf(prefs.getString("sAddr2","")?:(prefs.getString("sAddr","")?:"").lineSequence().drop(1).joinToString(" ").trim())}; var sPhone by remember{mutableStateOf(prefs.getString("sPhone","")?:"")}; var sEmail by remember{mutableStateOf(prefs.getString("sEmail","")?:"")}; var sLandmark by remember{mutableStateOf(prefs.getString("sLandmark","")?:"")}; var sPincode by remember{mutableStateOf(prefs.getString("sPincode","")?:"")}; var sUpi by remember{mutableStateOf(prefs.getString("sUpi","")?:"")}; var sGst by remember{mutableStateOf(prefs.getString("sGst","")?:"")}; var sBank by remember{mutableStateOf(prefs.getString("sBank","")?:"")}; var sIfsc by remember{mutableStateOf(prefs.getString("sIfsc","")?:"")}; var sJuris by remember{mutableStateOf(prefs.getString("sJuris","")?:"")}; var defTax by remember{mutableStateOf(prefs.getString("defTax","18")?:"18")}; var newPin by remember{mutableStateOf(currentPin)}; Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())){Text("SETTINGS",fontSize=24.sp,fontWeight=FontWeight.Bold); OutlinedTextField(newPin,{newPin=it},label={Text("Set Login PIN")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.NumberPassword, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sName,{sName=it},label={Text("Firm Name")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sState,{sState=it},label={Text("My State Code (GST, e.g. 21)")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sPrefix,{sPrefix=it},label={Text("Invoice Prefix")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sAddr1,{sAddr1=it},label={Text("Address Line 1")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sAddr2,{sAddr2=it},label={Text("Address Line 2")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sPhone,{sPhone=it},label={Text("Phone")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Phone, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sEmail,{sEmail=it},label={Text("Email")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Email, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sLandmark,{sLandmark=it},label={Text("Landmark")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sPincode,{sPincode=it},label={Text("Pincode")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sUpi,{sUpi=it},label={Text("UPI ID (for the payment QR)")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sGst,{sGst=it},label={Text("GSTIN")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sBank,{sBank=it},label={Text("Bank Name & Acc")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sIfsc,{sIfsc=it},label={Text("IFSC")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sJuris,{sJuris=it},label={Text("Jurisdiction")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(defTax,{defTax=it},label={Text("Default Tax %")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Text("PenKhata "+APP_VERSION, fontSize=10.sp, color=Color.Gray, modifier=Modifier.padding(top=8.dp)); Button(onClick={prefs.edit().putString("sName",sName).putString("sState",sState).putString("sPrefix",sPrefix).putString("sAddr1",sAddr1).putString("sAddr2",sAddr2).putString("sPhone",sPhone).putString("sEmail",sEmail).putString("sLandmark",sLandmark).putString("sPincode",sPincode).putString("sUpi",sUpi).putString("sGst",sGst).putString("sBank",sBank).putString("sIfsc",sIfsc).putString("sJuris",sJuris).putString("defTax",defTax).apply(); onPinSave(newPin); Toast.makeText(ctx,"Saved",Toast.LENGTH_SHORT).show()},modifier=Modifier.fillMaxWidth()){Text("SAVE")}; Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Backup & Restore", fontWeight=FontWeight.Bold); Text("Saves settings, invoices, ledger and the PDF bills to one file you choose, so a reinstall does not mean re-typing everything. The app PIN is not included.", fontSize=10.sp); Spacer(Modifier.height(8.dp)); Button(onClick={ backupLauncher.launch("penkhata-backup-"+SimpleDateFormat("yyyyMMdd-HHmm", Locale.ENGLISH).format(Date())+".zip") }, modifier=Modifier.fillMaxWidth()){ Text("BACKUP DATA") }; Spacer(Modifier.height(6.dp)); Button(onClick={ restoreLauncher.launch(arrayOf("application/json","text/plain","*/*")) }, modifier=Modifier.fillMaxWidth()){ Text("RESTORE DATA") } }}; Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Reset", fontWeight=FontWeight.Bold); Text("Master reset clears bills, PDFs, customers, stock, ledger and expenses but keeps every setting on this screen. Total reset clears those as well and starts the app empty.", fontSize=10.sp); Spacer(Modifier.height(8.dp)); Button(onClick={ confirmMaster = true }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFEF6C00))){ Text("MASTER RESET (KEEP SETTINGS)") }; Spacer(Modifier.height(6.dp)); Button(onClick={ confirmAll = true }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFC62828))){ Text("TOTAL RESET (EVERYTHING)") } }}; if(confirmMaster) AlertDialog(onDismissRequest={ confirmMaster = false }, title={ Text("Master reset?") }, text={ Text("Deletes every bill, PDF, customer, stock line, ledger entry and expense. Your outlet details and PIN stay.") }, confirmButton={ TextButton(onClick={ scope.launch { val n = withContext(Dispatchers.IO){ wipeTransactions(ctx) }; confirmMaster = false; onDataChanged(); Toast.makeText(ctx, "Cleared $n files.", Toast.LENGTH_LONG).show() } }){ Text("DELETE") } }, dismissButton={ TextButton(onClick={ confirmMaster = false }){ Text("CANCEL") } }); if(confirmAll) AlertDialog(onDismissRequest={ confirmAll = false }, title={ Text("Total reset?") }, text={ Text("Deletes everything: bills, PDFs, customers, stock, ledger, expenses, all settings and the PIN. The app goes back to a fresh install.") }, confirmButton={ TextButton(onClick={ scope.launch { val n = withContext(Dispatchers.IO){ wipeEverything(ctx) }; confirmAll = false; onDataChanged(); Toast.makeText(ctx, "Cleared $n files and all settings. Restart the app.", Toast.LENGTH_LONG).show() } }){ Text("DELETE EVERYTHING") } }, dismissButton={ TextButton(onClick={ confirmAll = false }){ Text("CANCEL") } }); Spacer(Modifier.height(60.dp))} }
+    var sName by remember{mutableStateOf(prefs.getString("sName","")?:"")}; var sState by remember{mutableStateOf(prefs.getString("sState","21")?:"21")}; var sPrefix by remember{mutableStateOf(prefs.getString("sPrefix","INV")?:"INV")}; var sAddr1 by remember{mutableStateOf(prefs.getString("sAddr1","")?:(prefs.getString("sAddr","")?:"").lineSequence().firstOrNull()?.trim()?:"")}; var sAddr2 by remember{mutableStateOf(prefs.getString("sAddr2","")?:(prefs.getString("sAddr","")?:"").lineSequence().drop(1).joinToString(" ").trim())}; var sPhone by remember{mutableStateOf(prefs.getString("sPhone","")?:"")}; var sEmail by remember{mutableStateOf(prefs.getString("sEmail","")?:"")}; var sLandmark by remember{mutableStateOf(prefs.getString("sLandmark","")?:"")}; var sPincode by remember{mutableStateOf(prefs.getString("sPincode","")?:"")}; var sUpi by remember{mutableStateOf(prefs.getString("sUpi","")?:"")}; var sGst by remember{mutableStateOf(prefs.getString("sGst","")?:"")}; var sBank by remember{mutableStateOf(prefs.getString("sBank","")?:"")}; var sIfsc by remember{mutableStateOf(prefs.getString("sIfsc","")?:"")}; var sJuris by remember{mutableStateOf(prefs.getString("sJuris","")?:"")}; var defTax by remember{mutableStateOf(prefs.getString("defTax","18")?:"18")}; var newPin by remember{mutableStateOf(currentPin)}; Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())){Text("SETTINGS",fontSize=24.sp,fontWeight=FontWeight.Bold); OutlinedTextField(newPin,{newPin=it},label={Text("Set Login PIN")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.NumberPassword, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sName,{sName=it},label={Text("Firm Name")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sState,{sState=it},label={Text("My State Code (GST, e.g. 21)")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sPrefix,{sPrefix=it},label={Text("Invoice Prefix")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sAddr1,{sAddr1=it},label={Text("Address Line 1")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sAddr2,{sAddr2=it},label={Text("Address Line 2")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sPhone,{sPhone=it},label={Text("Phone")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Phone, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sEmail,{sEmail=it},label={Text("Email")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Email, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sLandmark,{sLandmark=it},label={Text("Landmark")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sPincode,{sPincode=it},label={Text("Pincode")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sUpi,{sUpi=it},label={Text("UPI ID (for the payment QR)")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sGst,{sGst=it},label={Text("GSTIN")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sBank,{sBank=it},label={Text("Bank Name & Acc")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sIfsc,{sIfsc=it},label={Text("IFSC")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(sJuris,{sJuris=it},label={Text("Jurisdiction")},modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); OutlinedTextField(defTax,{defTax=it},label={Text("Default Tax %")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Text("PenKhata "+APP_VERSION, fontSize=10.sp, color=Color.Gray, modifier=Modifier.padding(top=8.dp)); val dbBills by produceState(initialValue = -1, ctx) { value = withContext(Dispatchers.IO) { countRows(ctx, "bills") } }; val dbStock by produceState(initialValue = -1, ctx) { value = withContext(Dispatchers.IO) { countRows(ctx, "stock") } }; Text("Database: " + (if(dbBills < 0) "reading..." else "$dbBills bills, $dbStock stock lines"), fontSize=10.sp, color=Color.Gray); Button(onClick={prefs.edit().putString("sName",sName).putString("sState",sState).putString("sPrefix",sPrefix).putString("sAddr1",sAddr1).putString("sAddr2",sAddr2).putString("sPhone",sPhone).putString("sEmail",sEmail).putString("sLandmark",sLandmark).putString("sPincode",sPincode).putString("sUpi",sUpi).putString("sGst",sGst).putString("sBank",sBank).putString("sIfsc",sIfsc).putString("sJuris",sJuris).putString("defTax",defTax).apply(); onPinSave(newPin); Toast.makeText(ctx,"Saved",Toast.LENGTH_SHORT).show()},modifier=Modifier.fillMaxWidth()){Text("SAVE")}; Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Backup & Restore", fontWeight=FontWeight.Bold); Text("Saves settings, invoices, ledger and the PDF bills to one file you choose, so a reinstall does not mean re-typing everything. The app PIN is not included.", fontSize=10.sp); Spacer(Modifier.height(8.dp)); Button(onClick={ backupLauncher.launch("penkhata-backup-"+SimpleDateFormat("yyyyMMdd-HHmm", Locale.ENGLISH).format(Date())+".zip") }, modifier=Modifier.fillMaxWidth()){ Text("BACKUP DATA") }; Spacer(Modifier.height(6.dp)); Button(onClick={ restoreLauncher.launch(arrayOf("application/json","text/plain","*/*")) }, modifier=Modifier.fillMaxWidth()){ Text("RESTORE DATA") } }}; Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Reset", fontWeight=FontWeight.Bold); Text("Master reset clears bills, PDFs, customers, stock, ledger and expenses but keeps every setting on this screen. Total reset clears those as well and starts the app empty.", fontSize=10.sp); Spacer(Modifier.height(8.dp)); Button(onClick={ confirmMaster = true }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFEF6C00))){ Text("MASTER RESET (KEEP SETTINGS)") }; Spacer(Modifier.height(6.dp)); Button(onClick={ confirmAll = true }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFC62828))){ Text("TOTAL RESET (EVERYTHING)") } }}; if(confirmMaster) AlertDialog(onDismissRequest={ confirmMaster = false }, title={ Text("Master reset?") }, text={ Text("Deletes every bill, PDF, customer, stock line, ledger entry and expense. Your outlet details and PIN stay.") }, confirmButton={ TextButton(onClick={ scope.launch { val n = withContext(Dispatchers.IO){ wipeTransactions(ctx) }; confirmMaster = false; onDataChanged(); Toast.makeText(ctx, "Cleared $n files.", Toast.LENGTH_LONG).show() } }){ Text("DELETE") } }, dismissButton={ TextButton(onClick={ confirmMaster = false }){ Text("CANCEL") } }); if(confirmAll) AlertDialog(onDismissRequest={ confirmAll = false }, title={ Text("Total reset?") }, text={ Text("Deletes everything: bills, PDFs, customers, stock, ledger, expenses, all settings and the PIN. The app goes back to a fresh install.") }, confirmButton={ TextButton(onClick={ scope.launch { val n = withContext(Dispatchers.IO){ wipeEverything(ctx) }; confirmAll = false; onDataChanged(); Toast.makeText(ctx, "Cleared $n files and all settings. Restart the app.", Toast.LENGTH_LONG).show() } }){ Text("DELETE EVERYTHING") } }, dismissButton={ TextButton(onClick={ confirmAll = false }){ Text("CANCEL") } }); Spacer(Modifier.height(60.dp))} }
 
 // --- LOGIC ---
 data class InvoiceRec(val invNo: String, val date: String, val whenMs: Long, val buyer: String, val buyerGst: String,
@@ -1150,6 +1155,113 @@ fun shareReminder(ctx: Context, party: String, amount: Double, firm: String) {
         Toast.makeText(ctx, "No app to send the reminder", Toast.LENGTH_SHORT).show()
     }
 }
+
+// ---------------------------------------------------------------- database
+// SQLite replaces the per-file JSON store: indexed lookups, crash-safe writes and a
+// single file to back up. The JSON files are imported once and left in place.
+class PenDb(ctx: Context) : android.database.sqlite.SQLiteOpenHelper(ctx, "penkhata.db", null, 1) {
+    override fun onCreate(db: android.database.sqlite.SQLiteDatabase) {
+        db.execSQL("""CREATE TABLE bills(ms INTEGER PRIMARY KEY, quote INTEGER, inv TEXT, date TEXT, payMode TEXT, delNote TEXT,
+            buyer TEXT, bgst TEXT, baddr1 TEXT, baddr2 TEXT, blmk TEXT, bpin TEXT, bphone TEXT, bstate TEXT,
+            total REAL, taxable REAL, cgst REAL, sgst REAL, igst REAL, tax REAL, interState INTEGER,
+            cogs REAL, profit REAL, paid REAL, balance REAL, bd REAL, exch REAL, cash REAL, upi REAL, card REAL,
+            finance TEXT, seller TEXT, lines TEXT)""")
+        db.execSQL("CREATE INDEX idx_bills_inv ON bills(inv)")
+        db.execSQL("CREATE INDEX idx_bills_ms ON bills(ms)")
+        db.execSQL("CREATE INDEX idx_bills_buyer ON bills(buyer)")
+        db.execSQL("CREATE INDEX idx_bills_phone ON bills(bphone)")
+        db.execSQL("""CREATE TABLE ledger(id INTEGER PRIMARY KEY, date TEXT, party TEXT, type TEXT, amt REAL, descr TEXT)""")
+        db.execSQL("CREATE INDEX idx_ledger_party ON ledger(party)")
+        db.execSQL("""CREATE TABLE stock(id INTEGER PRIMARY KEY, model TEXT, imei TEXT, hsn TEXT, cost REAL, mrp REAL, qty INTEGER, supplier TEXT, addedOn TEXT)""")
+        db.execSQL("CREATE INDEX idx_stock_model ON stock(model)")
+        db.execSQL("""CREATE TABLE expenses(id INTEGER PRIMARY KEY, ms INTEGER, note TEXT, amount REAL)""")
+        db.execSQL("""CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT)""")
+    }
+    override fun onUpgrade(db: android.database.sqlite.SQLiteDatabase, oldVersion: Int, newVersion: Int) { }
+    override fun onConfigure(db: android.database.sqlite.SQLiteDatabase) {
+        super.onConfigure(db)
+        db.enableWriteAheadLogging()
+    }
+}
+
+fun db(ctx: Context): PenDb = PenDb(ctx.applicationContext)
+
+fun countRows(ctx: Context, table: String): Int {
+    return try { db(ctx).readableDatabase.rawQuery("SELECT COUNT(*) FROM $table", null).use { if(it.moveToFirst()) it.getInt(0) else 0 } } catch(e: Exception) { 0 }
+}
+
+// One-time move of the JSON files into the database. Safe to run twice: it only
+// runs when the table is empty, and it never deletes the JSON.
+fun importJsonIfNeeded(ctx: Context) {
+    val p = ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE)
+    val d = db(ctx)
+    val w = d.writableDatabase
+    w.beginTransaction()
+    try {
+        if(countRows(ctx, "bills") == 0) {
+            ctx.filesDir.listFiles()?.filter { it.name.startsWith("inv_") }?.forEach { f ->
+                val o = try { JSONObject(f.readText()) } catch(e: Exception) { null } ?: return@forEach
+                val ms = if(o.has("ms")) o.optLong("ms") else (Regex("\\d+").find(f.name.removePrefix("inv_"))?.value?.toLongOrNull() ?: 0L)
+                val cv = android.content.ContentValues()
+                cv.put("ms", ms); cv.put("quote", if(o.optBoolean("quote", false)) 1 else 0)
+                cv.put("inv", o.optString("inv")); cv.put("date", o.optString("date"))
+                cv.put("payMode", o.optString("payMode")); cv.put("delNote", o.optString("delNote"))
+                cv.put("buyer", o.optString("buyer")); cv.put("bgst", o.optString("bgst"))
+                cv.put("baddr1", o.optString("baddr1")); cv.put("baddr2", o.optString("baddr2"))
+                cv.put("blmk", o.optString("blmk")); cv.put("bpin", o.optString("bpin"))
+                cv.put("bphone", o.optString("bphone")); cv.put("bstate", o.optString("bstate"))
+                cv.put("total", o.optDouble("total", 0.0)); cv.put("taxable", o.optDouble("taxable", 0.0))
+                cv.put("cgst", o.optDouble("cgst", 0.0)); cv.put("sgst", o.optDouble("sgst", 0.0))
+                cv.put("igst", o.optDouble("igst", 0.0)); cv.put("tax", o.optDouble("tax", 0.0))
+                cv.put("interState", if(o.optBoolean("interState", false)) 1 else 0)
+                cv.put("cogs", o.optDouble("cogs", 0.0)); cv.put("profit", o.optDouble("profit", 0.0))
+                cv.put("paid", o.optDouble("paid", 0.0)); cv.put("balance", o.optDouble("balance", 0.0))
+                cv.put("bd", o.optDouble("bd", 0.0)); cv.put("exch", o.optDouble("exch", 0.0))
+                cv.put("cash", o.optDouble("cash", 0.0)); cv.put("upi", o.optDouble("upi", 0.0)); cv.put("card", o.optDouble("card", 0.0))
+                cv.put("finance", o.optString("finance")); cv.put("seller", o.optJSONObject("seller")?.toString() ?: "")
+                cv.put("lines", o.optJSONArray("lines")?.toString() ?: "[]")
+                w.insertWithOnConflict("bills", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE)
+            }
+        }
+        if(countRows(ctx, "ledger") == 0) {
+            ctx.filesDir.listFiles()?.filter { it.name.startsWith("led_") }?.forEach { f ->
+                val o = try { JSONObject(f.readText()) } catch(e: Exception) { null } ?: return@forEach
+                val id = if(o.has("id")) o.optLong("id") else (Regex("\\d+").find(f.name.removePrefix("led_"))?.value?.toLongOrNull() ?: 0L)
+                val cv = android.content.ContentValues()
+                cv.put("id", id); cv.put("date", o.optString("date")); cv.put("party", o.optString("party"))
+                cv.put("type", o.optString("type")); cv.put("amt", o.optDouble("amt", 0.0)); cv.put("descr", o.optString("desc"))
+                w.insertWithOnConflict("ledger", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE)
+            }
+        }
+        if(countRows(ctx, "stock") == 0) {
+            val arr = try { JSONArray(File(ctx.filesDir, "stock.json").readText()) } catch(e: Exception) { JSONArray() }
+            for(i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val cv = android.content.ContentValues()
+                cv.put("id", o.optLong("id")); cv.put("model", o.optString("model")); cv.put("imei", o.optString("imei"))
+                cv.put("hsn", o.optString("hsn")); cv.put("cost", o.optDouble("cost", 0.0)); cv.put("mrp", o.optDouble("mrp", 0.0))
+                cv.put("qty", o.optInt("qty", 0)); cv.put("supplier", o.optString("supplier")); cv.put("addedOn", o.optString("addedOn"))
+                w.insertWithOnConflict("stock", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE)
+            }
+        }
+        if(countRows(ctx, "expenses") == 0) {
+            ctx.filesDir.listFiles()?.filter { it.name.startsWith("exp_") }?.forEach { f ->
+                val o = try { JSONObject(f.readText()) } catch(e: Exception) { null } ?: return@forEach
+                val cv = android.content.ContentValues()
+                cv.put("id", o.optLong("id")); cv.put("ms", o.optLong("ms")); cv.put("note", o.optString("note"))
+                cv.put("amount", o.optDouble("amount", 0.0))
+                w.insertWithOnConflict("expenses", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE)
+            }
+        }
+        w.setTransactionSuccessful()
+        p.edit().putBoolean("dbImported", true).apply()
+    } catch(e: Exception) {
+        // leave the flag unset so the import is retried on the next launch
+    } finally {
+        w.endTransaction()
+    }
+}
+
 fun loadStock(ctx: Context): List<StockEntry> {
     val f = File(ctx.filesDir, "stock.json")
     if(!f.exists()) return emptyList()
@@ -1219,6 +1331,11 @@ fun deductStock(ctx: Context, items: List<InvItem>) {
 // Clears transactions but keeps every setting, so the shop can start a new period
 // without re-typing the outlet details.
 fun wipeTransactions(ctx: Context): Int {
+    // clear the database tables too, otherwise reports would still see deleted bills
+    try {
+        val w = db(ctx).writableDatabase
+        for(t in listOf("bills", "ledger", "stock", "expenses")) w.delete(t, null, null)
+    } catch(e: Exception) { }
     var n = 0
     ctx.filesDir.listFiles()?.forEach { f ->
         if(f.name.startsWith("inv_") || f.name.startsWith("led_") || f.name.startsWith("exp_") || f.name == "stock.json") {
