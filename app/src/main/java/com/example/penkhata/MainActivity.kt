@@ -73,7 +73,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "3.8 · iteration 23"
+const val APP_VERSION = "3.9 · iteration 24"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0)
 val InvItemListSaver: Saver<List<InvItem>, String> = Saver(
@@ -886,8 +886,12 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
     var query by rememberSaveable { mutableStateOf("") }
     var reload by remember { mutableStateOf(0) }
     var busy by remember { mutableStateOf(false) }
+    var showQuotes by rememberSaveable { mutableStateOf(false) }
     val (bills, loadingBills) = loadState(emptyList<InvoiceRec>(), reload) {
-        withContext(Dispatchers.IO) { loadInvoices(ctx, true) }
+        withContext(Dispatchers.IO) { loadInvoices(ctx, false) }
+    }
+    val (quotes, _) = loadState(emptyList<InvoiceRec>(), reload) {
+        withContext(Dispatchers.IO) { loadQuotes(ctx) }
     }
     val (hits, loadingHits) = loadState(emptyList<BillHit>(), query, reload) {
         withContext(Dispatchers.IO) { if(query.trim().length >= 2) searchBills(ctx, query) else emptyList() }
@@ -898,6 +902,20 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
             val f = withContext(Dispatchers.IO) { renderBill(ctx, ms) }
             busy = false
             if(f != null) openPdf(ctx, f) else Toast.makeText(ctx, "This bill has no item details stored (saved by an older version), so it cannot be rebuilt", Toast.LENGTH_LONG).show()
+        }
+    }
+    fun convertQuote(ms: Long) {
+        scope.launch {
+            busy = true
+            val f = withContext(Dispatchers.IO) { convertQuoteToInvoice(ctx, ms) }
+            busy = false
+            if(f != null) {
+                Toast.makeText(ctx, "Quotation converted into an invoice", Toast.LENGTH_LONG).show()
+                reload++
+                openPdf(ctx, f)
+            } else {
+                Toast.makeText(ctx, "Could not convert this quotation", Toast.LENGTH_LONG).show()
+            }
         }
     }
     fun shareBill(ms: Long) {
@@ -914,6 +932,10 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
             leadingIcon = { Icon(Icons.Default.Search, "Search") }, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
         if(busy) LoadingRow("Building the PDF...")
         else if(loadingBills || loadingHits) LoadingRow("Reading bills...")
+        Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+            TextButton(onClick = { showQuotes = false }) { Text(if(showQuotes) "BILLS (${bills.size})" else "BILLS (${bills.size})", fontWeight = if(!showQuotes) FontWeight.Bold else FontWeight.Normal) }
+            TextButton(onClick = { showQuotes = true }) { Text("QUOTES (${quotes.size})", fontWeight = if(showQuotes) FontWeight.Bold else FontWeight.Normal) }
+        }
         if(query.trim().length >= 2) {
             Text(if(hits.isEmpty()) "No bill matches" else "${hits.size} bill(s) match", fontSize = 10.sp)
             LazyColumn {
@@ -929,6 +951,25 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
                         Row {
                             TextButton(onClick = { openBill(hit.rec.whenMs) }) { Text("VIEW", fontSize = 10.sp) }
                             TextButton(onClick = { shareBill(hit.rec.whenMs) }) { Text("SHARE", fontSize = 10.sp) }
+                        }
+                    }
+                    Divider()
+                }
+            }
+        } else if(showQuotes) {
+            Text(if(quotes.isEmpty()) "No quotations saved yet - use the Quote screen on Entry" else "${quotes.size} quotation(s)", fontSize = 10.sp)
+            LazyColumn {
+                items(quotes) { rec ->
+                    Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+                        Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
+                            Text(rec.invNo, fontWeight = FontWeight.Bold)
+                            Text("\u20b9${fmt(rec.total)}", fontWeight = FontWeight.Bold)
+                        }
+                        Text(SimpleDateFormat("dd-MMM-yyyy", Locale.ENGLISH).format(Date(rec.whenMs)) +
+                             (if(rec.buyer.isBlank()) "" else "  \u00b7  " + rec.buyer), fontSize = 10.sp)
+                        Row {
+                            TextButton(onClick = { convertQuote(rec.whenMs) }) { Text("CONVERT TO INVOICE", fontSize = 10.sp, color = Color(0xFF2E7D32)) }
+                            TextButton(onClick = { openBill(rec.whenMs) }) { Text("VIEW", fontSize = 10.sp) }
                         }
                     }
                     Divider()
@@ -1136,6 +1177,59 @@ fun loadInvoices(ctx: Context, includeQuotes: Boolean = false): List<InvoiceRec>
     return out
 }
 // Every buyer seen on a saved bill, newest first, for one-tap fill on the entry screen.
+fun loadQuotes(ctx: Context): List<InvoiceRec> {
+    val out = mutableListOf<InvoiceRec>()
+    try {
+        db(ctx).readableDatabase.rawQuery("SELECT inv,date,ms,buyer,bgst,total,taxable,cgst,sgst,igst,tax,cogs,profit,interState,paid,balance,lines FROM bills WHERE quote=1 ORDER BY ms DESC", null).use { c ->
+            while(c.moveToNext()) {
+                out.add(InvoiceRec(c.getString(0) ?: "", c.getString(1) ?: "", c.getLong(2), c.getString(3) ?: "", c.getString(4) ?: "",
+                    c.getDouble(5), c.getDouble(6), c.getDouble(7), c.getDouble(8), c.getDouble(9), c.getDouble(10),
+                    c.getDouble(11), c.getDouble(12), c.getInt(13) != 0, c.getDouble(14), c.getDouble(15), emptyMap()))
+            }
+        }
+    } catch(e: Exception) { }
+    return out
+}
+
+// Turns a saved quotation into a real bill: new number, today's date, stock and
+// invoice records updated exactly as if it had been typed in.
+fun convertQuoteToInvoice(ctx: Context, quoteMs: Long): File? {
+    val o = billJson(ctx, quoteMs) ?: return null
+    val lines = mutableListOf<InvItem>()
+    try {
+        val arr = o.optJSONArray("lines") ?: JSONArray()
+        for(i in 0 until arr.length()) {
+            val l = arr.optJSONObject(i) ?: continue
+            lines.add(InvItem(l.optString("desc"), l.optString("serial"), l.optString("hsn"),
+                l.optDouble("qty", 1.0), l.optDouble("rate", 0.0), l.optString("unit"),
+                l.optDouble("taxRate", 18.0), l.optDouble("discount", 0.0)))
+        }
+    } catch(e: Exception) { }
+    if(lines.isEmpty()) return null
+    val sel = o.optJSONObject("seller") ?: JSONObject()
+    val seller = SellerInfo(sel.optString("name"), sel.optString("addr"), sel.optString("phone"), sel.optString("email"),
+        sel.optString("landmark"), sel.optString("pincode"), sel.optString("gst"), sel.optString("bank"),
+        sel.optString("ifsc"), sel.optString("juris"), sel.optString("upi"), sel.optString("state"))
+    val buyer = BuyerInfo(o.optString("buyer"), o.optString("baddr1"), o.optString("baddr2"), o.optString("blmk"),
+        o.optString("bpin"), o.optString("bphone"), o.optString("bgst"), o.optString("bstate"))
+    val bd = o.optDouble("bd", 0.0); val exch = o.optDouble("exch", 0.0)
+    val cash = o.optDouble("cash", 0.0); val upi = o.optDouble("upi", 0.0); val card = o.optDouble("card", 0.0)
+    val calc = computeBill(lines, bd, exch, cash, upi, card, seller.state, buyer.state)
+    val prefs = ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE)
+    val invNo = nextInvoiceNo(prefs)
+    val dateStr = SimpleDateFormat("dd-MMM-yyyy", Locale.ENGLISH).format(Date())
+    val ms = System.currentTimeMillis()
+    saveInvoiceData(ctx, ms, false, invNo, dateStr, o.optString("payMode"), o.optString("delNote"), buyer, seller,
+        bd, exch, cash, upi, card, o.optString("finance"), calc, lines)
+    deductStock(ctx, lines)
+    bumpInvoiceNo(prefs)
+    return createPdf(ctx, false, invNo, dateStr, o.optString("payMode"), o.optString("delNote"),
+        seller.name, seller.addr, seller.phone, seller.email, seller.landmark, seller.pincode, seller.gst,
+        seller.bank, seller.ifsc, seller.juris, buyer.name, buyer.addr1, buyer.addr2, buyer.landmark,
+        buyer.pincode, buyer.phone, buyer.gst, buyer.state, lines, calc, o.optString("finance"), ms,
+        seller.upi, billOutDir(ctx))
+}
+
 fun loadCustomers(ctx: Context): List<BuyerInfo> {
     val out = mutableListOf<BuyerInfo>()
     try {
