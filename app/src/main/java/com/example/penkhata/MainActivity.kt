@@ -711,6 +711,12 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
     val scope = rememberCoroutineScope()
     var offset by rememberSaveable { mutableStateOf(0) }
     var reload by remember { mutableStateOf(0) }
+
+    val (invoices, loadingInvoices) = loadState(emptyList<InvoiceRec>(), reload) { withContext(Dispatchers.IO) { loadInvoices(ctx) } }
+    val (expenses, _) = loadState(emptyList<Expense>(), reload) { withContext(Dispatchers.IO) { loadExpenses(ctx) } }
+    var expNote by rememberSaveable { mutableStateOf("") }
+    var expAmount by rememberSaveable { mutableStateOf("") }
+    val (startMs, endMs) = monthRange(offset)
     val xlsxLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")) { uri ->
         if(uri != null) {
             try {
@@ -727,11 +733,6 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
             } catch(e: Exception) { Toast.makeText(ctx, "Export failed: " + (e.message ?: "unknown"), Toast.LENGTH_LONG).show() }
         }
     }
-    val (invoices, loadingInvoices) = loadState(emptyList<InvoiceRec>(), reload) { withContext(Dispatchers.IO) { loadInvoices(ctx) } }
-    val (expenses, _) = loadState(emptyList<Expense>(), reload) { withContext(Dispatchers.IO) { loadExpenses(ctx) } }
-    var expNote by rememberSaveable { mutableStateOf("") }
-    var expAmount by rememberSaveable { mutableStateOf("") }
-    val (startMs, endMs) = monthRange(offset)
     val monthInv = invoices.filter { it.whenMs in startMs until endMs }.sortedBy { it.whenMs }
     val monthExp = expenses.filter { it.ms in startMs until endMs }
     val grossSales = monthInv.sumOf { it.total }
