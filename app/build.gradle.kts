@@ -5,16 +5,18 @@ plugins {
 android {
     namespace = "com.example.penkhata"
     compileSdk = 34
-    defaultConfig { applicationId = "com.example.penkhata"; minSdk = 26; targetSdk = 34; versionCode = 30; versionName = "3.7" }
+    defaultConfig { applicationId = "com.example.penkhata"; minSdk = 26; targetSdk = 34; versionCode = 31; versionName = "3.8" }
     buildFeatures { compose = true }
     composeOptions { kotlinCompilerExtensionVersion = "1.5.1" }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_1_8; targetCompatibility = JavaVersion.VERSION_1_8 }
     kotlinOptions { jvmTarget = "1.8" }
+    // Your own release keystore, supplied by the workflow from repository secrets.
+    // Without it the release build is signed with the debug key so it still installs.
+    val releaseKeystore = System.getenv("KEYSTORE_PATH")?.takeIf { !it.isNullOrBlank() && file(it).exists() }
     signingConfigs {
         create("release") {
-            val ks = System.getenv("KEYSTORE_PATH")
-            if (!ks.isNullOrBlank() && file(ks).exists()) {
-                storeFile = file(ks)
+            if (releaseKeystore != null) {
+                storeFile = file(releaseKeystore)
                 storePassword = System.getenv("KEYSTORE_PASSWORD")
                 keyAlias = System.getenv("KEY_ALIAS")
                 keyPassword = System.getenv("KEY_PASSWORD")
@@ -30,7 +32,7 @@ android {
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             // Signed with your keystore when the secrets are present, otherwise with the
             // debug key so the APK still installs for testing.
-            signingConfig = if (!System.getenv("KEYSTORE_PATH").isNullOrBlank()) signingConfigs.getByName("release") else signingConfigs.getByName("debug")
+            signingConfig = if (releaseKeystore != null) signingConfigs.getByName("release") else signingConfigs.getByName("debug")
         }
         getByName("debug") { isMinifyEnabled = false }
     }
