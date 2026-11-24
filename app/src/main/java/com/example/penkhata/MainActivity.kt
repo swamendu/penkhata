@@ -2735,6 +2735,72 @@ fun xlsxBytes(sheets: List<Pair<String, List<List<String>>>>): ByteArray {
     return bos.toByteArray()
 }
 
+// The Installation Register: one row per item sold, in the column order brand
+// claim teams ask for. This is the sheet the shop files, not a generic export.
+fun buildRegisterXlsx(ctx: Context, startMs: Long, endMs: Long): ByteArray {
+    val prefs = ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE)
+    val branch = loadBranches(ctx).firstOrNull { it.code == activeBranchCode(prefs) } ?: loadBranches(ctx).firstOrNull()
+    val salesmanPhone = loadPeople(ctx).associate { it.name to it.phone }
+    val rows = mutableListOf<List<String>>()
+    rows.add(listOf(prefs.getString("sName", "") ?: ""))
+    rows.add(listOf("REGD OFFICE : " + (prefs.getString("sAddr1", "") ?: "")))
+    rows.add(listOf("Branch : " + (branch?.code ?: "") + (if((branch?.gstin ?: "").isBlank()) "" else " (GSTIN : " + branch!!.gstin + ")")))
+    rows.add(listOf("BRANCH ADDRESS : " + (branch?.address ?: "")))
+    rows.add(listOf("Installation Register"))
+    val fmtD = SimpleDateFormat("dd-MM-yyyy", Locale.ENGLISH)
+    rows.add(listOf("Period : " + fmtD.format(Date(startMs)) + " To " + fmtD.format(Date(endMs - 1)) + " (Financial Year : " + fyLabel() + ")"))
+    rows.add(listOf("Sl.","Branch","Date","Bill Number","Product Name","Customer Name","Address","Pincode","District",
+        "Delivery Address","Near Location","Mobile No","Phone","Delivery Dt","Remarks","Brand","Class","Salesman",
+        "Salesman MobNo","Product Value","Qty","Product Srl No."))
+    var sl = 0
+    try {
+        db(ctx).readableDatabase.rawQuery(
+            "SELECT inv,date,buyer,baddr1,baddr2,bpin,bstate,blmk,bphone,branch,salesman,deliveryDate,cancelReason,lines FROM bills " +
+            "WHERE quote=0 AND cancelled=0 AND ms>=? AND ms<? ORDER BY ms",
+            arrayOf(startMs.toString(), endMs.toString())).use { c ->
+            while(c.moveToNext()) {
+                val addr = listOf(c.getString(3) ?: "", c.getString(4) ?: "").filter { it.isNotBlank() }.joinToString(", ")
+                val arr = try { JSONArray(c.getString(13) ?: "[]") } catch(e: Exception) { JSONArray() }
+                for(i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val qty = o.optDouble("qty", 1.0)
+                    val value = o.optDouble("taxable", 0.0) + o.optDouble("tax", 0.0)
+                    val salesman = c.getString(10) ?: ""
+                    sl++
+                    rows.add(listOf(sl.toString(), c.getString(9) ?: "", c.getString(1) ?: "", c.getString(0) ?: "",
+                        o.optString("desc"), c.getString(2) ?: "", addr, c.getString(5) ?: "", c.getString(6) ?: "",
+                        addr, c.getString(7) ?: "", c.getString(8) ?: "", c.getString(8) ?: "",
+                        c.getString(11) ?: "", c.getString(12) ?: "",
+                        o.optString("brand"), o.optString("cls"), salesman, salesmanPhone[salesman] ?: "",
+                        fmt(value), if(qty == qty.toLong().toDouble()) qty.toLong().toString() else fmt(qty), o.optString("serial")))
+                }
+            }
+        }
+    } catch(e: Exception) { }
+    return xlsxBytes(listOf("Register" to rows))
+}
+
+// Brand-wise sales for a period: what each brand actually did.
+fun brandSales(ctx: Context, startMs: Long, endMs: Long): List<Triple<String, Double, Double>> {
+    val map = mutableMapOf<String, Pair<Double, Double>>()
+    try {
+        db(ctx).readableDatabase.rawQuery("SELECT lines FROM bills WHERE quote=0 AND cancelled=0 AND ms>=? AND ms<?",
+            arrayOf(startMs.toString(), endMs.toString())).use { c ->
+            while(c.moveToNext()) {
+                val arr = try { JSONArray(c.getString(0) ?: "[]") } catch(e: Exception) { JSONArray() }
+                for(i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val b = o.optString("brand").ifBlank { "UNBRANDED" }
+                    val val0 = o.optDouble("taxable", 0.0) + o.optDouble("tax", 0.0)
+                    val cur = map[b] ?: (0.0 to 0.0)
+                    map[b] = (cur.first + val0) to (cur.second + o.optDouble("qty", 0.0))
+                }
+            }
+        }
+    } catch(e: Exception) { }
+    return map.entries.map { Triple(it.key, it.value.first, it.value.second) }.sortedByDescending { it.second }
+}
+
 // The same data as the backup, in a workbook you can open and read yourself.
 // CSV for a spreadsheet or an accountant. Fields with commas, quotes or newlines
 // are quoted, with inner quotes doubled.
