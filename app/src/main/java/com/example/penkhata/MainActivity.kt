@@ -774,6 +774,8 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
     var hsn by rememberSaveable { mutableStateOf("") }; var cost by rememberSaveable { mutableStateOf("") }
     var mrp by rememberSaveable { mutableStateOf("") }; var qty by rememberSaveable { mutableStateOf("1") }
     var supplier by rememberSaveable { mutableStateOf("") }
+    var brand by rememberSaveable { mutableStateOf("") }
+    var cls by rememberSaveable { mutableStateOf("Mobile") }
     val stockScan = remember { GmsBarcodeScanning.getClient(ctx, GmsBarcodeScannerOptions.Builder().build()) }
     var pendingStockScan by remember { mutableStateOf<File?>(null) }
     val stockCamera = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
