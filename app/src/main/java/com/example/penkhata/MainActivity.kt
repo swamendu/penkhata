@@ -73,7 +73,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "4.0 · iteration 25"
+const val APP_VERSION = "4.1 · iteration 26"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0)
 val InvItemListSaver: Saver<List<InvItem>, String> = Saver(
@@ -267,7 +267,7 @@ fun MainAppScreen() {
             NavigationBarItem(selected = currentScreen=="dashboard", onClick = { currentScreen="dashboard" }, icon = { Icon(Icons.Default.EditNote, "Bill") }, label = { Text("Entry") })
             NavigationBarItem(selected = currentScreen=="ledger", onClick = { currentScreen="ledger" }, icon = { Icon(Icons.Default.AccountBalanceWallet, "Ledger") }, label = { Text("Ledger") })
             NavigationBarItem(selected = currentScreen=="stock", onClick = { currentScreen="stock" }, icon = { Icon(Icons.Default.Inventory, "Stock") }, label = { Text("Stock") })
-            NavigationBarItem(selected = currentScreen=="reports", onClick = { currentScreen="reports" }, icon = { Icon(Icons.Default.Assessment, "GST") }, label = { Text("GST") })
+            NavigationBarItem(selected = currentScreen=="reports", onClick = { currentScreen="reports" }, icon = { Icon(Icons.Default.Assessment, "GST") }, label = { Text("Reports") })
             NavigationBarItem(selected = currentScreen=="history", onClick = { currentScreen="history" }, icon = { Icon(Icons.Default.History, "Files") }, label = { Text("Files") })
             NavigationBarItem(selected = currentScreen=="settings", onClick = { currentScreen="settings" }, icon = { Icon(Icons.Default.Settings, "Set") }, label = { Text("Set") })
         }}
@@ -619,7 +619,18 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
                 Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f).clickable { filter = if(filter == acc.party) "" else acc.party }) {
                         Text(acc.party, fontWeight = FontWeight.Bold, maxLines = 1)
-                        Text("Bills due \u20b9${fmt(acc.billDue)}  \u00b7  khata \u20b9${fmt(acc.manual)}", fontSize = 10.sp)
+                        val age = partyAgeDays(entries, invoices, acc.party, System.currentTimeMillis())
+                        val ageText = when {
+                            acc.net <= 0.004 -> ""
+                            age >= 90 -> "  \u00b7  oldest ${age}d"
+                            age >= 60 -> "  \u00b7  oldest ${age}d"
+                            age >= 30 -> "  \u00b7  oldest ${age}d"
+                            age > 0 -> "  \u00b7  ${age}d"
+                            else -> "  \u00b7  today"
+                        }
+                        Text("Bills due \u20b9${fmt(acc.billDue)}  \u00b7  khata \u20b9${fmt(acc.manual)}" + ageText,
+                             fontSize = 10.sp,
+                             color = if(age >= 60 && acc.net > 0.004) Color.Red else Color.Unspecified)
                     }
                     Text("\u20b9${fmt(acc.net)}", color = if(acc.net > 0.004) Color.Red else Color(0xFF2E7D32), fontWeight = FontWeight.Bold)
                     if(acc.net > 0.004) IconButton(onClick = { shareReminder(ctx, acc.party, acc.net, prefs.getString("sName","") ?: "") }) {
@@ -1493,6 +1504,13 @@ fun partyAccounts(entries: List<LedgerEntry>, invoices: List<InvoiceRec>): List<
             mine.filter { it.type == "CREDIT" }.sumOf { it.amount },
             invoices.filter { it.buyer.trim().equals(name, true) }.sumOf { it.balance })
     }.sortedByDescending { it.net }
+}
+// Days since the oldest thing this party still owes for: an unpaid bill or a khata debit.
+fun partyAgeDays(entries: List<LedgerEntry>, invoices: List<InvoiceRec>, party: String, nowMs: Long): Long {
+    val mine = entries.filter { it.party.trim().equals(party, true) && it.type == "DEBIT" }
+    val bills = invoices.filter { it.buyer.trim().equals(party, true) && it.balance > 0.004 }
+    val oldest = (mine.map { it.id } + bills.map { it.whenMs }).filter { it > 0L }.minOrNull() ?: return 0L
+    return ((nowMs - oldest) / (24L * 60L * 60L * 1000L)).coerceAtLeast(0L)
 }
 fun shareReminder(ctx: Context, party: String, amount: Double, firm: String) {
     val who = if(firm.isBlank()) "us" else firm
