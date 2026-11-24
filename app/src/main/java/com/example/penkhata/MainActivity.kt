@@ -74,7 +74,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "5.7.2 · hotfix"
+const val APP_VERSION = "5.7.3 · hotfix"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -2576,12 +2576,26 @@ class PenDb(ctx: Context) : android.database.sqlite.SQLiteOpenHelper(ctx, "penkh
         } catch(e: Exception) { }
     }
     override fun onConfigure(db: android.database.sqlite.SQLiteDatabase) {
+        try {
+            db.enableWriteAheadLogging()
+            db.rawQuery("PRAGMA busy_timeout=5000", null).use { it.moveToFirst() }
+        } catch(e: Exception) { }
         super.onConfigure(db)
         db.enableWriteAheadLogging()
     }
 }
 
-fun db(ctx: Context): PenDb = PenDb(ctx.applicationContext)
+// One database helper per process. Creating a helper per call meant several
+// connections: a restore held the write lock on one while a screen read on
+// another, and SQLite answered SQLITE_BUSY (code 5) - which crashed the restore.
+private var dbInstance: PenDb? = null
+fun db(ctx: Context): PenDb {
+    val existing = dbInstance
+    if(existing != null) return existing
+    return synchronized(PenDb::class.java) {
+        dbInstance ?: PenDb(ctx.applicationContext).also { dbInstance = it }
+    }
+}
 
 fun countRows(ctx: Context, table: String): Int {
     return try { db(ctx).readableDatabase.rawQuery("SELECT COUNT(*) FROM $table", null).use { if(it.moveToFirst()) it.getInt(0) else 0 } } catch(e: Exception) { 0 }
