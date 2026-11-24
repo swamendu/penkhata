@@ -73,7 +73,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "3.9 · iteration 24"
+const val APP_VERSION = "4.0 · iteration 25"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0)
 val InvItemListSaver: Saver<List<InvItem>, String> = Saver(
@@ -904,6 +904,17 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
             if(f != null) openPdf(ctx, f) else Toast.makeText(ctx, "This bill has no item details stored (saved by an older version), so it cannot be rebuilt", Toast.LENGTH_LONG).show()
         }
     }
+    var cancelTarget by remember { mutableStateOf<Long?>(null) }
+    var cancelReason by rememberSaveable { mutableStateOf("") }
+    fun cancel(ms: Long, reason: String) {
+        scope.launch {
+            busy = true
+            val ok = withContext(Dispatchers.IO) { cancelBill(ctx, ms, reason.ifBlank { "Cancelled" }) }
+            busy = false
+            reload++
+            Toast.makeText(ctx, if(ok) "Bill cancelled and stock returned" else "Could not cancel this bill", Toast.LENGTH_LONG).show()
+        }
+    }
     fun convertQuote(ms: Long) {
         scope.launch {
             busy = true
@@ -926,6 +937,17 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
             if(f != null) sharePdf(ctx, f) else Toast.makeText(ctx, "This bill has no item details stored (saved by an older version), so it cannot be rebuilt", Toast.LENGTH_LONG).show()
         }
     }
+    if(cancelTarget != null) AlertDialog(
+        onDismissRequest = { cancelTarget = null },
+        title = { Text("Cancel this bill?") },
+        text = { Column {
+            Text("The bill stops counting in reports, search and the ledger, and its goods go back into stock. The record is kept for the audit trail.", fontSize = 11.sp)
+            OutlinedTextField(cancelReason, {cancelReason=it}, label={Text("Reason (optional)")}, modifier=Modifier.fillMaxWidth(),
+                keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+        } },
+        confirmButton = { TextButton(onClick = { val t = cancelTarget; cancelTarget = null; if(t != null) cancel(t, cancelReason); cancelReason = "" }) { Text("CANCEL BILL") } },
+        dismissButton = { TextButton(onClick = { cancelTarget = null; cancelReason = "" }) { Text("KEEP") } }
+    )
     Column(Modifier.padding(16.dp)) {
         Text("FILES", fontSize = 24.sp, fontWeight = FontWeight.Bold)
         OutlinedTextField(query, {query=it}, label={Text("Search IMEI, phone, buyer or invoice no")},
@@ -989,6 +1011,7 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
                         Row {
                             TextButton(onClick = { openBill(rec.whenMs) }) { Text("VIEW", fontSize = 10.sp) }
                             TextButton(onClick = { shareBill(rec.whenMs) }) { Text("SHARE", fontSize = 10.sp) }
+                            TextButton(onClick = { cancelTarget = rec.whenMs }) { Text("CANCEL", fontSize = 10.sp, color = Color.Red) }
                         }
                     }
                     Divider()
@@ -1154,7 +1177,7 @@ fun repairAggregates(ctx: Context): Int {
 }
 fun loadInvoices(ctx: Context, includeQuotes: Boolean = false): List<InvoiceRec> {
     val out = mutableListOf<InvoiceRec>()
-    val where = if(includeQuotes) "" else " WHERE quote=0"
+    val where = if(includeQuotes) " WHERE cancelled=0" else " WHERE quote=0 AND cancelled=0"
     try {
         db(ctx).readableDatabase.rawQuery("SELECT inv,date,ms,buyer,bgst,total,taxable,cgst,sgst,igst,tax,cogs,profit,interState,paid,balance,lines FROM bills$where ORDER BY ms DESC", null).use { c ->
             while(c.moveToNext()) {
@@ -1180,7 +1203,7 @@ fun loadInvoices(ctx: Context, includeQuotes: Boolean = false): List<InvoiceRec>
 fun loadQuotes(ctx: Context): List<InvoiceRec> {
     val out = mutableListOf<InvoiceRec>()
     try {
-        db(ctx).readableDatabase.rawQuery("SELECT inv,date,ms,buyer,bgst,total,taxable,cgst,sgst,igst,tax,cogs,profit,interState,paid,balance,lines FROM bills WHERE quote=1 ORDER BY ms DESC", null).use { c ->
+        db(ctx).readableDatabase.rawQuery("SELECT inv,date,ms,buyer,bgst,total,taxable,cgst,sgst,igst,tax,cogs,profit,interState,paid,balance,lines FROM bills WHERE quote=1 AND cancelled=0 ORDER BY ms DESC", null).use { c ->
             while(c.moveToNext()) {
                 out.add(InvoiceRec(c.getString(0) ?: "", c.getString(1) ?: "", c.getLong(2), c.getString(3) ?: "", c.getString(4) ?: "",
                     c.getDouble(5), c.getDouble(6), c.getDouble(7), c.getDouble(8), c.getDouble(9), c.getDouble(10),
@@ -1230,10 +1253,45 @@ fun convertQuoteToInvoice(ctx: Context, quoteMs: Long): File? {
         seller.upi, billOutDir(ctx))
 }
 
+// Cancelling a bill: the record stays (for the audit trail) but it stops counting
+// in reports, search and the ledger, and its goods go back into stock.
+fun restoreStockForBill(ctx: Context, lines: List<InvItem>) {
+    if(lines.isEmpty()) return
+    val list = loadStock(ctx).toMutableList()
+    var changed = false
+    for(i in lines) {
+        val idx = list.indexOfFirst { it.model.isNotBlank() && i.desc.lowercase().contains(it.model.lowercase()) }
+        if(idx >= 0) {
+            val e = list[idx]
+            val imeis = e.imeiList().toMutableList()
+            if(i.serial.isNotBlank() && !imeis.contains(i.serial)) imeis.add(i.serial)
+            list[idx] = e.copy(qty = e.qty + i.qty.toInt(), imei = imeis.joinToString("\n"))
+            changed = true
+        }
+    }
+    if(changed) saveStock(ctx, list)
+}
+fun cancelBill(ctx: Context, ms: Long, reason: String): Boolean {
+    return try {
+        val o = billJson(ctx, ms) ?: return false
+        val lines = mutableListOf<InvItem>()
+        val arr = o.optJSONArray("lines") ?: JSONArray()
+        for(i in 0 until arr.length()) {
+            val l = arr.optJSONObject(i) ?: continue
+            lines.add(InvItem(l.optString("desc"), l.optString("serial"), l.optString("hsn"),
+                l.optDouble("qty", 1.0), l.optDouble("rate", 0.0), l.optString("unit"),
+                l.optDouble("taxRate", 18.0), l.optDouble("discount", 0.0)))
+        }
+        val cv = android.content.ContentValues()
+        cv.put("cancelled", 1); cv.put("cancelReason", reason)
+        val n = db(ctx).writableDatabase.update("bills", cv, "ms=?", arrayOf(ms.toString()))
+        if(n > 0) { restoreStockForBill(ctx, lines); true } else false
+    } catch(e: Exception) { false }
+}
 fun loadCustomers(ctx: Context): List<BuyerInfo> {
     val out = mutableListOf<BuyerInfo>()
     try {
-        db(ctx).readableDatabase.rawQuery("SELECT buyer,baddr1,baddr2,blmk,bpin,bphone,bgst,bstate FROM bills WHERE buyer<>'' ORDER BY ms DESC", null).use { c ->
+        db(ctx).readableDatabase.rawQuery("SELECT buyer,baddr1,baddr2,blmk,bpin,bphone,bgst,bstate FROM bills WHERE buyer<>'' AND cancelled=0 ORDER BY ms DESC", null).use { c ->
             while(c.moveToNext()) {
                 val b = BuyerInfo(c.getString(0) ?: "", c.getString(1) ?: "", c.getString(2) ?: "", c.getString(3) ?: "",
                     c.getString(4) ?: "", c.getString(5) ?: "", c.getString(6) ?: "", c.getString(7) ?: "")
@@ -1254,7 +1312,7 @@ fun searchBills(ctx: Context, query: String): List<BillHit> {
     val hits = mutableListOf<BillHit>()
     try {
         db(ctx).readableDatabase.rawQuery(
-            "SELECT ms,inv,buyer,total,lines FROM bills WHERE quote=0 AND (inv LIKE ? OR buyer LIKE ? OR bphone LIKE ? OR lines LIKE ?) ORDER BY ms DESC",
+            "SELECT ms,inv,buyer,total,lines FROM bills WHERE quote=0 AND cancelled=0 AND (inv LIKE ? OR buyer LIKE ? OR bphone LIKE ? OR lines LIKE ?) ORDER BY ms DESC",
             arrayOf(like, like, like, like)).use { c ->
             while(c.moveToNext()) {
                 val ms = c.getLong(0)
@@ -1298,7 +1356,7 @@ fun billOutDir(ctx: Context): File = File(ctx.cacheDir, "bills")
 fun billJson(ctx: Context, ms: Long): JSONObject? {
     return try {
         db(ctx).readableDatabase.rawQuery(
-            "SELECT quote,inv,date,payMode,delNote,buyer,baddr1,baddr2,blmk,bpin,bphone,bgst,bstate,bd,exch,cash,upi,card,finance,seller,lines,total,taxable,cgst,sgst,igst,tax,cogs,profit,paid,balance,interState FROM bills WHERE ms=?",
+            "SELECT quote,inv,date,payMode,delNote,buyer,baddr1,baddr2,blmk,bpin,bphone,bgst,bstate,bd,exch,cash,upi,card,finance,seller,lines,total,taxable,cgst,sgst,igst,tax,cogs,profit,paid,balance,interState,cancelled,cancelReason FROM bills WHERE ms=?",
             arrayOf(ms.toString())).use { c ->
             if(!c.moveToFirst()) return null
             val j = JSONObject()
@@ -1317,6 +1375,7 @@ fun billJson(ctx: Context, ms: Long): JSONObject? {
             j.put("igst", c.getDouble(25)); j.put("tax", c.getDouble(26)); j.put("cogs", c.getDouble(27))
             j.put("profit", c.getDouble(28)); j.put("paid", c.getDouble(29)); j.put("balance", c.getDouble(30))
             j.put("interState", c.getInt(31) != 0)
+            j.put("cancelled", c.getInt(32) != 0); j.put("cancelReason", c.getString(33) ?: "")
             j
         }
     } catch(e: Exception) { null }
@@ -1449,13 +1508,13 @@ fun shareReminder(ctx: Context, party: String, amount: Double, firm: String) {
 // ---------------------------------------------------------------- database
 // SQLite replaces the per-file JSON store: indexed lookups, crash-safe writes and a
 // single file to back up. The JSON files are imported once and left in place.
-class PenDb(ctx: Context) : android.database.sqlite.SQLiteOpenHelper(ctx, "penkhata.db", null, 1) {
+class PenDb(ctx: Context) : android.database.sqlite.SQLiteOpenHelper(ctx, "penkhata.db", null, 2) {
     override fun onCreate(db: android.database.sqlite.SQLiteDatabase) {
         db.execSQL("""CREATE TABLE bills(ms INTEGER PRIMARY KEY, quote INTEGER, inv TEXT, date TEXT, payMode TEXT, delNote TEXT,
             buyer TEXT, bgst TEXT, baddr1 TEXT, baddr2 TEXT, blmk TEXT, bpin TEXT, bphone TEXT, bstate TEXT,
             total REAL, taxable REAL, cgst REAL, sgst REAL, igst REAL, tax REAL, interState INTEGER,
             cogs REAL, profit REAL, paid REAL, balance REAL, bd REAL, exch REAL, cash REAL, upi REAL, card REAL,
-            finance TEXT, seller TEXT, lines TEXT)""")
+            finance TEXT, seller TEXT, lines TEXT, cancelled INTEGER DEFAULT 0, cancelReason TEXT DEFAULT '')""")
         db.execSQL("CREATE INDEX idx_bills_inv ON bills(inv)")
         db.execSQL("CREATE INDEX idx_bills_ms ON bills(ms)")
         db.execSQL("CREATE INDEX idx_bills_buyer ON bills(buyer)")
@@ -1467,7 +1526,13 @@ class PenDb(ctx: Context) : android.database.sqlite.SQLiteOpenHelper(ctx, "penkh
         db.execSQL("""CREATE TABLE expenses(id INTEGER PRIMARY KEY, ms INTEGER, note TEXT, amount REAL)""")
         db.execSQL("""CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT)""")
     }
-    override fun onUpgrade(db: android.database.sqlite.SQLiteDatabase, oldVersion: Int, newVersion: Int) { }
+    override fun onUpgrade(db: android.database.sqlite.SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        // v2: a bill can be cancelled instead of deleted, so the record survives
+        if(oldVersion < 2) {
+            db.execSQL("ALTER TABLE bills ADD COLUMN cancelled INTEGER DEFAULT 0")
+            db.execSQL("ALTER TABLE bills ADD COLUMN cancelReason TEXT DEFAULT ''")
+        }
+    }
     override fun onConfigure(db: android.database.sqlite.SQLiteDatabase) {
         super.onConfigure(db)
         db.enableWriteAheadLogging()
