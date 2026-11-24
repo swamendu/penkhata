@@ -36,6 +36,10 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
+import com.google.android.gms.common.ConnectionResult
+import com.google.android.gms.common.GoogleApiAvailability
+import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
@@ -57,7 +61,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "2.8.2 \u00b7 hotfix"
+const val APP_VERSION = "2.9 \u00b7 iteration 16"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0)
 val InvItemListSaver: Saver<List<InvItem>, String> = Saver(
@@ -222,6 +226,35 @@ fun InvoiceScreen(isQuote: Boolean) {
         if(ims.isEmpty()) listOf(e to "") else ims.map { e to it }
     }
     val scanClient = remember { GmsBarcodeScanning.getClient(ctx, GmsBarcodeScannerOptions.Builder().build()) }
+    var pendingScan by remember { mutableStateOf<File?>(null) }
+    val scanCamera = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
+        val f = pendingScan
+        if(res.resultCode == android.app.Activity.RESULT_OK && f != null && f.exists()) {
+            decodeBarcodeFromImage(ctx, f) { v -> iSerial = v; Toast.makeText(ctx, "Scanned", Toast.LENGTH_SHORT).show() }
+        }
+        pendingScan = null
+    }
+    fun startImeiScan() {
+        if(playScannerAvailable(ctx)) {
+            try {
+                scanClient.startScan()
+                    .addOnSuccessListener { b -> val v = b.rawValue; if(v != null) { iSerial = v; Toast.makeText(ctx, "Scanned", Toast.LENGTH_SHORT).show() } }
+                    .addOnFailureListener { e ->
+                        // Play Services scanner refused: fall back to a photo
+                        val f = makeScanPhotoFile(ctx); pendingScan = f
+                        cameraScanIntent(ctx, f)?.let { scanCamera.launch(it) }
+                            ?: Toast.makeText(ctx, "Scanner failed: " + (e.message ?: "unknown"), Toast.LENGTH_LONG).show()
+                    }
+            } catch(e: Exception) {
+                val f = makeScanPhotoFile(ctx); pendingScan = f
+                cameraScanIntent(ctx, f)?.let { scanCamera.launch(it) }
+            }
+        } else {
+            val f = makeScanPhotoFile(ctx); pendingScan = f
+            val i = cameraScanIntent(ctx, f)
+            if(i != null) scanCamera.launch(i)
+        }
+    }
     val (customers, _) = loadState(emptyList<BuyerInfo>(), ctx) { withContext(Dispatchers.IO) { loadCustomers(ctx) } }
     var showCustomers by rememberSaveable { mutableStateOf(false) }
 
@@ -319,15 +352,7 @@ fun InvoiceScreen(isQuote: Boolean) {
             OutlinedTextField(iDesc, {iDesc=it}, label={Text("Item Name")}, modifier=Modifier.fillMaxWidth())
             Row(verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(iSerial, {iSerial=it}, label={Text("Serial / IMEI")}, modifier=Modifier.weight(1f))
-                IconButton(onClick = {
-                    try {
-                        scanClient.startScan()
-                            .addOnSuccessListener { b -> val v = b.rawValue; if(v != null) { iSerial = v; Toast.makeText(ctx, "Scanned", Toast.LENGTH_SHORT).show() } }
-                            .addOnFailureListener { e -> Toast.makeText(ctx, "Scanner unavailable: " + (e.message ?: "Play Services needed"), Toast.LENGTH_LONG).show() }
-                    } catch(e: Exception) {
-                        Toast.makeText(ctx, "Scanner unavailable: " + (e.message ?: "Play Services needed"), Toast.LENGTH_LONG).show()
-                    }
-                }) { Icon(Icons.Default.QrCodeScanner, "Scan IMEI") }
+                IconButton(onClick = { startImeiScan() }) { Icon(Icons.Default.QrCodeScanner, "Scan IMEI") }
             }
             Row { OutlinedTextField(iHsn, {iHsn=it}, label={Text("HSN")}, modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(iUnit, {iUnit=it}, label={Text("Unit")}, modifier=Modifier.weight(1f)) }
             Row { OutlinedTextField(iQty, {iQty=it}, label={Text("Qty")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(iRate, {iRate=it}, label={Text("Rate (Inc. Tax)")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)) }
@@ -541,6 +566,33 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
     var mrp by rememberSaveable { mutableStateOf("") }; var qty by rememberSaveable { mutableStateOf("1") }
     var supplier by rememberSaveable { mutableStateOf("") }
     val stockScan = remember { GmsBarcodeScanning.getClient(ctx, GmsBarcodeScannerOptions.Builder().build()) }
+    var pendingStockScan by remember { mutableStateOf<File?>(null) }
+    val stockCamera = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
+        val f = pendingStockScan
+        if(res.resultCode == android.app.Activity.RESULT_OK && f != null && f.exists()) {
+            decodeBarcodeFromImage(ctx, f) { v -> imei = if(imei.isBlank()) v else imei.trimEnd() + "\n" + v }
+        }
+        pendingStockScan = null
+    }
+    fun startStockScan() {
+        if(playScannerAvailable(ctx)) {
+            try {
+                stockScan.startScan()
+                    .addOnSuccessListener { b -> val v = b.rawValue; if(v != null) imei = if(imei.isBlank()) v else imei.trimEnd() + "\n" + v }
+                    .addOnFailureListener {
+                        val f = makeScanPhotoFile(ctx); pendingStockScan = f
+                        cameraScanIntent(ctx, f)?.let { stockCamera.launch(it) }
+                    }
+            } catch(e: Exception) {
+                val f = makeScanPhotoFile(ctx); pendingStockScan = f
+                cameraScanIntent(ctx, f)?.let { stockCamera.launch(it) }
+            }
+        } else {
+            val f = makeScanPhotoFile(ctx); pendingStockScan = f
+            val i = cameraScanIntent(ctx, f)
+            if(i != null) stockCamera.launch(i)
+        }
+    }
     val totalUnits = stock.sumOf { it.qty }
     val totalValue = stock.sumOf { it.cost * it.qty }
     val lowCount = stock.count { it.qty <= 1 }
@@ -552,15 +604,7 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
             OutlinedTextField(model, {model=it}, label={Text("Model / Item Name")}, modifier=Modifier.fillMaxWidth())
             Row(verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(imei, {imei=it}, label={Text("IMEI / Serial - one per line (optional)")}, minLines=2, modifier=Modifier.weight(1f))
-                IconButton(onClick = {
-                    try {
-                        stockScan.startScan()
-                            .addOnSuccessListener { b -> val v = b.rawValue; if(v != null) { imei = if(imei.isBlank()) v else imei.trimEnd() + "\n" + v } }
-                            .addOnFailureListener { e -> Toast.makeText(ctx, "Scanner unavailable: " + (e.message ?: "Play Services needed"), Toast.LENGTH_LONG).show() }
-                    } catch(e: Exception) {
-                        Toast.makeText(ctx, "Scanner unavailable: " + (e.message ?: "Play Services needed"), Toast.LENGTH_LONG).show()
-                    }
-                }) { Icon(Icons.Default.QrCodeScanner, "Scan IMEI") }
+                IconButton(onClick = { startStockScan() }) { Icon(Icons.Default.QrCodeScanner, "Scan IMEI") }
             }
             Row { OutlinedTextField(hsn, {hsn=it}, label={Text("HSN")}, modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(qty, {qty=it}, label={Text("Qty")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)) }
             Row { OutlinedTextField(cost, {cost=it}, label={Text("Purchase \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)); Spacer(Modifier.width(5.dp)); OutlinedTextField(mrp, {mrp=it}, label={Text("MRP \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number), modifier=Modifier.weight(1f)) }
@@ -1617,6 +1661,42 @@ fun createPdf(ctx: Context, isQuote: Boolean, invNo: String, date: String, payMo
     return f
 }
 // Runs on the main thread; kept out of createPdf so drawing and writing can happen on IO.
+// Is the Play Services code scanner usable on this phone?
+fun playScannerAvailable(ctx: Context): Boolean =
+    GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(ctx) == ConnectionResult.SUCCESS
+
+// Fallback: photograph the barcode with the system camera and decode it with the
+// bundled ML Kit model, which needs no Play Services at all.
+fun makeScanPhotoFile(ctx: Context): File {
+    val dir = File(ctx.cacheDir, "scan").apply { mkdirs() }
+    return File(dir, "scan_${System.currentTimeMillis()}.jpg")
+}
+fun decodeBarcodeFromImage(ctx: Context, f: File, onResult: (String) -> Unit) {
+    try {
+        val image = InputImage.fromFilePath(ctx, android.net.Uri.fromFile(f))
+        BarcodeScanning.getClient().process(image)
+            .addOnSuccessListener { barcodes ->
+                val v = barcodes.firstOrNull()?.rawValue
+                if(v.isNullOrBlank()) Toast.makeText(ctx, "No barcode found in the photo", Toast.LENGTH_LONG).show()
+                else onResult(v)
+            }
+            .addOnFailureListener { e -> Toast.makeText(ctx, "Could not read the photo: " + (e.message ?: "unknown"), Toast.LENGTH_LONG).show() }
+    } catch(e: Exception) {
+        Toast.makeText(ctx, "Could not read the photo: " + (e.message ?: "unknown"), Toast.LENGTH_LONG).show()
+    }
+}
+fun cameraScanIntent(ctx: Context, target: File): Intent? {
+    return try {
+        val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.provider", target)
+        Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE).apply {
+            putExtra(android.provider.MediaStore.EXTRA_OUTPUT, uri)
+            addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+    } catch(e: Exception) {
+        Toast.makeText(ctx, "Camera scan unavailable: " + (e.message ?: "unknown"), Toast.LENGTH_LONG).show()
+        null
+    }
+}
 fun openPdf(ctx: Context, f: File) {
     // getting a shareable uri can fail on its own (provider path not configured, file gone);
     // saying "no PDF viewer" for that sent us chasing the wrong problem once already
