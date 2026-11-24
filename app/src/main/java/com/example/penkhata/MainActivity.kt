@@ -56,7 +56,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "2.7 \u00b7 iteration 14"
+const val APP_VERSION = "2.8 \u00b7 iteration 15"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0)
 val InvItemListSaver: Saver<List<InvItem>, String> = Saver(
@@ -80,6 +80,9 @@ fun StockEntry.imeiLabel(): String {
 }
 data class LedgerEntry(val id: Long, val date: String, val party: String, val type: String, val amount: Double, val desc: String)
 
+data class SellerInfo(val name: String, val addr: String, val phone: String, val email: String, val landmark: String,
+                      val pincode: String, val gst: String, val bank: String, val ifsc: String, val juris: String,
+                      val upi: String, val state: String)
 data class BuyerInfo(val name: String, val addr1: String, val addr2: String, val landmark: String,
                      val pincode: String, val phone: String, val gst: String, val state: String)
 data class BillCalc(
@@ -374,21 +377,28 @@ fun InvoiceScreen(isQuote: Boolean) {
                 val snapBuyer = listOf(bName, bAddr1, bAddr2, bLandmark, bPincode, bPhone, bGst, bState)
                 val snapFinance = finance
                 val billMs = System.currentTimeMillis()
-                val seller = listOf(
-                    sName,
+                // snapshot the outlet details with the bill, so a reprint later shows the
+                // address that was in force when the bill was made
+                val sel = SellerInfo(sName,
                     listOf(prefs.getString("sAddr1","")?:"", prefs.getString("sAddr2","")?:"").filter{it.isNotBlank()}.joinToString("\n"),
-                    prefs.getString("sPhone","")?:"", prefs.getString("sEmail","")?:"", prefs.getString("sLandmark","")?:"", prefs.getString("sPincode","")?:"",
-                    prefs.getString("sGst","")?:"", prefs.getString("sBank","")?:"", prefs.getString("sIfsc","")?:"", prefs.getString("sJuris","")?:"" )
+                    prefs.getString("sPhone","")?:"", prefs.getString("sEmail","")?:"", prefs.getString("sLandmark","")?:"",
+                    prefs.getString("sPincode","")?:"", prefs.getString("sGst","")?:"", prefs.getString("sBank","")?:"",
+                    prefs.getString("sIfsc","")?:"", prefs.getString("sJuris","")?:"", prefs.getString("sUpi","")?:"",
+                    prefs.getString("sState","21")?:"21")
+                val buyer = BuyerInfo(snapBuyer[0], snapBuyer[1], snapBuyer[2], snapBuyer[3], snapBuyer[4], snapBuyer[5], snapBuyer[6], snapBuyer[7])
+                val snapBillDisc = billDisc.toDoubleOrNull() ?: 0.0; val snapExch = exchange.toDoubleOrNull() ?: 0.0
+                val snapCash = cash.toDoubleOrNull() ?: 0.0; val snapUpi = upi.toDoubleOrNull() ?: 0.0; val snapCard = card.toDoubleOrNull() ?: 0.0
                 busy = true
                 scope.launch {
                     val file = try {
                         withContext(Dispatchers.IO) {
-                            saveInvoiceData(ctx, billMs, isQuote, snapInv,
-                                BuyerInfo(snapBuyer[0], snapBuyer[1], snapBuyer[2], snapBuyer[3], snapBuyer[4], snapBuyer[5], snapBuyer[6], snapBuyer[7]),
-                                snapCalc, snapItems)
-                            createPdf(ctx, isQuote, snapInv, snapDate, snapPay, snapNote, seller[0], seller[1], seller[2], seller[3], seller[4], seller[5],
-                                seller[6], seller[7], seller[8], seller[9], snapBuyer[0], snapBuyer[1], snapBuyer[2], snapBuyer[3],
-                                snapBuyer[4], snapBuyer[5], snapBuyer[6], snapBuyer[7], snapItems, snapCalc, snapFinance, billMs, prefs.getString("sUpi","") ?: "")
+                            saveInvoiceData(ctx, billMs, isQuote, snapInv, snapDate, snapPay, snapNote, buyer, sel,
+                                snapBillDisc, snapExch, snapCash, snapUpi, snapCard, snapFinance, snapCalc, snapItems)
+                            // no PDF is kept: this one goes to the cache only so it can be shown now
+                            createPdf(ctx, isQuote, snapInv, snapDate, snapPay, snapNote, sel.name, sel.addr, sel.phone, sel.email,
+                                sel.landmark, sel.pincode, sel.gst, sel.bank, sel.ifsc, sel.juris,
+                                buyer.name, buyer.addr1, buyer.addr2, buyer.landmark, buyer.pincode, buyer.phone, buyer.gst, buyer.state,
+                                snapItems, snapCalc, snapFinance, billMs, sel.upi, billOutDir(ctx))
                         }
                     } catch(e: Exception) {
                         null
@@ -701,23 +711,43 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
 
 @Composable fun FileHistoryScreen() {
     val ctx = LocalContext.current
-    val dir = ctx.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)
+    val scope = rememberCoroutineScope()
     var query by rememberSaveable { mutableStateOf("") }
     var reload by remember { mutableStateOf(0) }
-    val (files, loadingFiles) = loadState(emptyList<File>(), reload) { withContext(Dispatchers.IO) {
-        dir?.listFiles()?.filter { it.extension.equals("pdf", true) }?.sortedByDescending { it.lastModified() } ?: emptyList()
-    } }
-    val (hits, loadingHits) = loadState(emptyList<BillHit>(), query, reload) { withContext(Dispatchers.IO) { if(query.trim().length >= 2) searchBills(ctx, query) else emptyList() } }
+    var busy by remember { mutableStateOf(false) }
+    val (bills, loadingBills) = loadState(emptyList<InvoiceRec>(), reload) {
+        withContext(Dispatchers.IO) { loadInvoices(ctx, true) }
+    }
+    val (hits, loadingHits) = loadState(emptyList<BillHit>(), query, reload) {
+        withContext(Dispatchers.IO) { if(query.trim().length >= 2) searchBills(ctx, query) else emptyList() }
+    }
+    fun openBill(ms: Long) {
+        scope.launch {
+            busy = true
+            val f = withContext(Dispatchers.IO) { renderBill(ctx, ms) }
+            busy = false
+            if(f != null) openPdf(ctx, f) else Toast.makeText(ctx, "Could not rebuild this bill", Toast.LENGTH_LONG).show()
+        }
+    }
+    fun shareBill(ms: Long) {
+        scope.launch {
+            busy = true
+            val f = withContext(Dispatchers.IO) { renderBill(ctx, ms) }
+            busy = false
+            if(f != null) sharePdf(ctx, f) else Toast.makeText(ctx, "Could not rebuild this bill", Toast.LENGTH_LONG).show()
+        }
+    }
     Column(Modifier.padding(16.dp)) {
         Text("FILES", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-        if(loadingFiles || loadingHits) LoadingRow("Searching...")
         OutlinedTextField(query, {query=it}, label={Text("Search IMEI, phone, buyer or invoice no")},
             leadingIcon = { Icon(Icons.Default.Search, "Search") }, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp))
+        if(busy) LoadingRow("Building the PDF...")
+        else if(loadingBills || loadingHits) LoadingRow("Reading bills...")
         if(query.trim().length >= 2) {
             Text(if(hits.isEmpty()) "No bill matches" else "${hits.size} bill(s) match", fontSize = 10.sp)
             LazyColumn {
                 items(hits) { hit ->
-                    Column(Modifier.fillMaxWidth().clickable { openBillPdf(ctx, hit.pdf) }.padding(vertical = 8.dp)) {
+                    Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
                         Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
                             Text(hit.rec.invNo, fontWeight = FontWeight.Bold)
                             Text("\u20b9${fmt(hit.rec.total)}", fontWeight = FontWeight.Bold)
@@ -726,33 +756,41 @@ fun <T> loadState(initial: T, key1: Any?, key2: Any? = null, loader: suspend () 
                              (if(hit.rec.buyer.isBlank()) "" else "  \u00b7  " + hit.rec.buyer), fontSize = 10.sp)
                         if(hit.serial.isNotBlank()) Text("IMEI: ${hit.serial}", fontSize = 10.sp, color = Color(0xFF2E7D32))
                         Row {
-                            TextButton(onClick = { openBillPdf(ctx, hit.pdf) }) { Text("OPEN", fontSize = 10.sp) }
-                            TextButton(onClick = {
-                                val f = File(ctx.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS), hit.pdf)
-                                if(f.exists()) sharePdf(ctx, f) else Toast.makeText(ctx, "PDF not on the phone", Toast.LENGTH_SHORT).show()
-                            }) { Text("SHARE", fontSize = 10.sp) }
+                            TextButton(onClick = { openBill(hit.rec.whenMs) }) { Text("VIEW", fontSize = 10.sp) }
+                            TextButton(onClick = { shareBill(hit.rec.whenMs) }) { Text("SHARE", fontSize = 10.sp) }
                         }
                     }
                     Divider()
                 }
             }
         } else {
+            Text("${bills.size} bill(s) - PDFs are built when you view or share", fontSize = 10.sp)
             LazyColumn {
-                items(files) { fl ->
-                    Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f).clickable { openPdf(ctx, fl) }) {
-                            Text(fl.name, fontWeight = FontWeight.Bold)
-                            Text(SimpleDateFormat("dd MMM HH:mm", Locale.ENGLISH).format(Date(fl.lastModified())), fontSize = 10.sp)
+                items(bills) { rec ->
+                    Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+                        Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
+                            Text(rec.invNo, fontWeight = FontWeight.Bold)
+                            Text("\u20b9${fmt(rec.total)}", fontWeight = FontWeight.Bold)
                         }
-                        IconButton(onClick = { sharePdf(ctx, fl) }) { Icon(Icons.Default.Share, "Share") }
-                        IconButton(onClick = {
-                            if(fl.delete()) reload++
-                        }) { Icon(Icons.Default.Delete, "Del", tint = Color.Red) }
+                        Text(SimpleDateFormat("dd-MMM-yyyy", Locale.ENGLISH).format(Date(rec.whenMs)) +
+                             (if(rec.buyer.isBlank()) "" else "  \u00b7  " + rec.buyer), fontSize = 10.sp)
+                        Row {
+                            TextButton(onClick = { openBill(rec.whenMs) }) { Text("VIEW", fontSize = 10.sp) }
+                            TextButton(onClick = { shareBill(rec.whenMs) }) { Text("SHARE", fontSize = 10.sp) }
+                        }
                     }
                     Divider()
                 }
             }
         }
+        Spacer(Modifier.height(10.dp))
+        TextButton(onClick = {
+            scope.launch {
+                val n = withContext(Dispatchers.IO) { freeStoredPdfs(ctx) }
+                reload++
+                Toast.makeText(ctx, if(n == 0) "Nothing stored to clear" else "Removed $n stored PDF(s)", Toast.LENGTH_LONG).show()
+            }
+        }) { Text("Free space - remove stored PDFs", fontSize = 10.sp) }
     }
 }
 
@@ -795,11 +833,11 @@ data class InvoiceRec(val invNo: String, val date: String, val whenMs: Long, val
                       val rates: Map<Double, Pair<Double, Double>>)
 data class Expense(val id: Long, val ms: Long, val note: String, val amount: Double)
 
-fun loadInvoices(ctx: Context): List<InvoiceRec> {
+fun loadInvoices(ctx: Context, includeQuotes: Boolean = false): List<InvoiceRec> {
     val out = mutableListOf<InvoiceRec>()
     ctx.filesDir.listFiles()?.filter { it.name.startsWith("inv_") }?.forEach { f ->
         val o = try { JSONObject(f.readText()) } catch(e: Exception) { null } ?: return@forEach
-        if(o.optBoolean("quote", false)) return@forEach
+        if(!includeQuotes && o.optBoolean("quote", false)) return@forEach
         // older records have no timestamp: the file name carries the epoch millis
         val ms = if(o.has("ms")) o.optLong("ms") else (Regex("\\d+").find(f.name.removePrefix("inv_"))?.value?.toLongOrNull() ?: 0L)
         val rates = mutableMapOf<Double, Pair<Double, Double>>()
@@ -880,6 +918,49 @@ fun qrBitmap(text: String, size: Int): Bitmap? {
         }
         bmp
     } catch(e: Exception) { null }
+}
+fun billOutDir(ctx: Context): File = File(ctx.cacheDir, "bills")
+
+// Rebuilds the PDF from the stored record, so no PDFs need to be kept on disk.
+fun renderBill(ctx: Context, ms: Long): File? {
+    val o = try { JSONObject(File(ctx.filesDir, "inv_$ms.json").readText()) } catch(e: Exception) { null } ?: return null
+    val lines = mutableListOf<InvItem>()
+    o.optJSONArray("lines")?.let { arr ->
+        for(i in 0 until arr.length()) {
+            val l = arr.optJSONObject(i) ?: continue
+            lines.add(InvItem(l.optString("desc"), l.optString("serial"), l.optString("hsn"),
+                l.optDouble("qty", 1.0), l.optDouble("rate", 0.0), l.optString("unit"),
+                l.optDouble("taxRate", 18.0), l.optDouble("discount", 0.0)))
+        }
+    }
+    val sel = o.optJSONObject("seller")
+    val sellerState = sel?.optString("state") ?: ""
+    val calc = computeBill(lines, o.optDouble("bd", 0.0), o.optDouble("exch", 0.0),
+        o.optDouble("cash", 0.0), o.optDouble("upi", 0.0), o.optDouble("card", 0.0), sellerState, o.optString("bstate"))
+    return try {
+        createPdf(ctx, o.optBoolean("quote", false), o.optString("inv"), o.optString("date"),
+            o.optString("payMode"), o.optString("delNote"),
+            sel?.optString("name") ?: "", sel?.optString("addr") ?: "", sel?.optString("phone") ?: "", sel?.optString("email") ?: "",
+            sel?.optString("landmark") ?: "", sel?.optString("pincode") ?: "", sel?.optString("gst") ?: "",
+            sel?.optString("bank") ?: "", sel?.optString("ifsc") ?: "", sel?.optString("juris") ?: "",
+            o.optString("buyer"), o.optString("baddr1"), o.optString("baddr2"), o.optString("blmk"), o.optString("bpin"), o.optString("bphone"),
+            o.optString("bgst"), o.optString("bstate"), lines, calc, o.optString("finance"), ms,
+            sel?.optString("upi") ?: "", billOutDir(ctx))
+    } catch(e: Exception) { null }
+}
+fun viewBill(ctx: Context, ms: Long) {
+    val f = renderBill(ctx, ms)
+    if(f != null) openPdf(ctx, f) else Toast.makeText(ctx, "Could not rebuild this bill", Toast.LENGTH_LONG).show()
+}
+// Bills are no longer stored as PDFs; this clears any PDFs left by older builds.
+fun freeStoredPdfs(ctx: Context): Int {
+    var n = 0
+    ctx.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)?.listFiles()?.forEach { if(it.extension.equals("pdf", true) && it.delete()) n++ }
+    return n
+}
+fun shareBillFile(ctx: Context, ms: Long) {
+    val f = renderBill(ctx, ms)
+    if(f != null) sharePdf(ctx, f) else Toast.makeText(ctx, "Could not rebuild this bill", Toast.LENGTH_LONG).show()
 }
 fun sharePdf(ctx: Context, f: File) {
     try {
@@ -1143,7 +1224,9 @@ fun restoreJson(ctx: Context, text: String): String {
     return "Restored $settingsCount settings, $inv invoices, $led ledger entries, $exp expenses, $stockCount stock lines. Reopen the app to load them."
 }
 
-fun saveInvoiceData(ctx: Context, ms: Long, isQuote: Boolean, invNo: String, b: BuyerInfo, calc: BillCalc, items: List<InvItem>) {
+fun saveInvoiceData(ctx: Context, ms: Long, isQuote: Boolean, invNo: String, dateStr: String, payMode: String, delNote: String,
+                    b: BuyerInfo, sel: SellerInfo, billDiscount: Double, exchange: Double, cash: Double, upi: Double, card: Double,
+                    finance: String, calc: BillCalc, items: List<InvItem>) {
     val stock = loadStock(ctx)
     var cogs = 0.0
     for(i in items) cogs += stockCostFor(stock, i) * i.qty
@@ -1152,6 +1235,13 @@ fun saveInvoiceData(ctx: Context, ms: Long, isQuote: Boolean, invNo: String, b: 
     j.put("buyer",b.name); j.put("bgst",b.gst)
     j.put("baddr1",b.addr1); j.put("baddr2",b.addr2); j.put("blmk",b.landmark); j.put("bpin",b.pincode)
     j.put("bphone",b.phone); j.put("bstate",b.state)
+    j.put("date",dateStr); j.put("payMode",payMode); j.put("delNote",delNote); j.put("finance",finance)
+    j.put("bd",billDiscount); j.put("exch",exchange); j.put("cash",cash); j.put("upi",upi); j.put("card",card)
+    val sj = JSONObject()
+    sj.put("name",sel.name); sj.put("addr",sel.addr); sj.put("phone",sel.phone); sj.put("email",sel.email)
+    sj.put("landmark",sel.landmark); sj.put("pincode",sel.pincode); sj.put("gst",sel.gst)
+    sj.put("bank",sel.bank); sj.put("ifsc",sel.ifsc); sj.put("juris",sel.juris); sj.put("upi",sel.upi); sj.put("state",sel.state)
+    j.put("seller",sj)
     j.put("total",calc.grand); j.put("taxable",calc.taxable); j.put("tax",calc.totalTax)
     j.put("cgst",calc.cgst); j.put("sgst",calc.sgst); j.put("igst",calc.igst); j.put("interState",calc.interState)
     j.put("cogs",cogs); j.put("profit",calc.taxable-cogs)
@@ -1268,7 +1358,7 @@ fun createPdf(ctx: Context, isQuote: Boolean, invNo: String, date: String, payMo
               sName: String, sAddr: String, sPhone: String, sEmail: String, sLandmark: String, sPincode: String,
               sGst: String, sBank: String, sIfsc: String, sJuris: String,
               bName: String, bAddr1: String, bAddr2: String, bLandmark: String, bPincode: String, bPhone: String,
-              bGst: String, bState: String, items: List<InvItem>, calc: BillCalc, finance: String, ms: Long, sUpi: String): File {
+              bGst: String, bState: String, items: List<InvItem>, calc: BillCalc, finance: String, ms: Long, sUpi: String, outDir: File): File {
     val doc = PdfDocument(); var page = doc.startPage(PdfDocument.PageInfo.Builder(595, 842, 1).create())
     var c = page.canvas; val p = Paint(); val bp = Paint().apply{style=Paint.Style.STROKE; strokeWidth=1f}
     val m=20f; val w=555f; val h=800f; val midX=m+w/2
@@ -1497,7 +1587,10 @@ fun createPdf(ctx: Context, isQuote: Boolean, invNo: String, date: String, payMo
     }
     p.isFakeBoldText=false; p.textSize=8f; p.textAlign=Paint.Align.CENTER
     c.drawText("Computer generated invoice.",midX,m+h+15,p)
-    doc.finishPage(page); val n=if(isQuote)"Quote" else "Inv"; val f=File(ctx.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS),"${n}_${ms}.pdf")
+    doc.finishPage(page)
+    val safeNo = invNo.replace(Regex("[^A-Za-z0-9._-]"), "-").ifBlank { if(isQuote) "Quote" else "Inv" }
+    if(!outDir.exists()) outDir.mkdirs()
+    val f = File(outDir, "${safeNo}_${ms}.pdf")
     doc.writeTo(FileOutputStream(f)); doc.close()
     return f
 }
