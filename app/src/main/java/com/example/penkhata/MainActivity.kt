@@ -80,7 +80,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "7.0.1 · GRN"
+const val APP_VERSION = "7.1 · stock rework"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -515,7 +515,8 @@ fun saveGrn(ctx: Context, g: Grn, lines: List<GrnLine>): Long {
             }
             w.setTransactionSuccessful()
         } finally { w.endTransaction() }
-        postCountedUnits(ctx, grnId)
+        // the opening GRN documents stock that is already in hand, so it must not add it again
+        if(g.no.trim().uppercase() != "OPENING") postCountedUnits(ctx, grnId)
         grnId
     } catch(e: Exception) { -1 }
 }
@@ -1426,6 +1427,78 @@ fun StockAuditScreen(onDone: () -> Unit) {
 }
 
 @Composable
+fun StockMasterScreen(onDone: () -> Unit) {
+    val ctx = LocalContext.current
+    val focusManager = LocalFocusManager.current
+    val scope = rememberCoroutineScope()
+    var reload by remember { mutableStateOf(0) }
+    var newBrand by rememberSaveable { mutableStateOf("") }
+    var newCat by rememberSaveable { mutableStateOf("") }
+    var newDist by rememberSaveable { mutableStateOf("") }
+    var newDistLimit by rememberSaveable { mutableStateOf("") }
+    Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
+        Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
+            Text("STOCK MASTER", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            TextButton(onClick = { onDone() }) { Text("BACK") }
+        }
+        Text("Set these up once. Brands and categories are what a challan line is chosen from.", fontSize = 10.sp, color = Color.Gray)
+        Spacer(Modifier.height(8.dp))
+Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(12.dp)) {
+            var expanded by rememberSaveable { mutableStateOf(true) }
+            Button(onClick = { expanded = !expanded }, modifier = Modifier.fillMaxWidth()) {
+                Text(if(expanded) "HIDE MASTER DATA" else "MASTER DATA  \u00b7  brands, categories, distributors")
+            }
+            if(expanded) {
+                val brands by produceState(initialValue = emptyList<String>(), reload) { value = withContext(Dispatchers.IO) { loadBrands(ctx) } }
+                val cats by produceState(initialValue = emptyList<String>(), reload) { value = withContext(Dispatchers.IO) { loadCategories(ctx) } }
+                val dists by produceState(initialValue = emptyList<Distributor>(), reload) { value = withContext(Dispatchers.IO) { loadDistributors(ctx) } }
+                Divider(Modifier.padding(vertical = 4.dp))
+                Text("Brands (" + brands.size + ")", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                Text(brands.joinToString("  \u00b7  "), fontSize = 9.sp, color = Color.Gray, maxLines = 6)
+                Row {
+                    OutlinedTextField(newBrand, {newBrand=it}, label={Text("Add brand")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+                    Spacer(Modifier.width(4.dp))
+                    Button(onClick = { scope.launch { withContext(Dispatchers.IO) { addBrand(ctx, newBrand) }; newBrand=""; reload++ } }) { Text("ADD") }
+                }
+                Divider(Modifier.padding(vertical = 4.dp))
+                Text("Categories (" + cats.size + ")", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                Text(cats.joinToString("  \u00b7  "), fontSize = 9.sp, color = Color.Gray, maxLines = 4)
+                Row {
+                    OutlinedTextField(newCat, {newCat=it}, label={Text("Add category")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+                    Spacer(Modifier.width(4.dp))
+                    Button(onClick = { scope.launch { withContext(Dispatchers.IO) { addCategory(ctx, newCat) }; newCat=""; reload++ } }) { Text("ADD") }
+                }
+                Divider(Modifier.padding(vertical = 4.dp))
+                Text("Distributors (" + dists.size + ")", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                dists.forEach { d ->
+                    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(d.name, fontSize = 11.sp, maxLines = 1)
+                            Text("limit \u20b9" + fmt(d.creditLimit) + "  \u00b7  " + d.creditDays + " days" + (if(d.brands.isBlank()) "" else "  \u00b7  " + d.brands), fontSize = 9.sp, color = Color.Gray, maxLines = 1)
+                        }
+                        TextButton(onClick = { scope.launch { withContext(Dispatchers.IO) { deleteDistributor(ctx, d.id) }; reload++ } }) { Text("DELETE", fontSize = 9.sp, color = Color.Red) }
+                    }
+                }
+                Row {
+                    OutlinedTextField(newDist, {newDist=it}, label={Text("Distributor name")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+                    Spacer(Modifier.width(4.dp))
+                    OutlinedTextField(newDistLimit, {newDistLimit=it}, label={Text("Credit \u20b9")}, modifier=Modifier.weight(0.7f), keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+                }
+                Button(onClick = {
+                    if(newDist.isNotBlank()) {
+                        scope.launch {
+                            withContext(Dispatchers.IO) { saveDistributor(ctx, Distributor(0, newDist.trim(), "", "", "", newDistLimit.toDoubleOrNull() ?: 0.0, 0, "", true)) }
+                            newDist=""; newDistLimit=""; reload++
+                        }
+                    }
+                }, modifier = Modifier.fillMaxWidth()) { Text("ADD DISTRIBUTOR") }
+            }
+        }}
+        
+    }
+}
+
+@Composable
 fun GrnScreen(onDone: () -> Unit) {
     val ctx = LocalContext.current
     var reload by remember { mutableStateOf(0) }
@@ -1808,9 +1881,11 @@ fun PurchaseScreen(onDone: () -> Unit) {
     var showPurchase by rememberSaveable { mutableStateOf(false) }
     var showAudit by rememberSaveable { mutableStateOf(false) }
     var showGrn by rememberSaveable { mutableStateOf(false) }
+    var showMaster by rememberSaveable { mutableStateOf(false) }
     if(showPurchase) { PurchaseScreen { showPurchase = false }; return }
     if(showAudit) { StockAuditScreen { showAudit = false }; return }
     if(showGrn) { GrnScreen { showGrn = false }; return }
+    if(showMaster) { StockMasterScreen { showMaster = false }; return }
     val focusManager = LocalFocusManager.current
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1864,93 +1939,11 @@ fun PurchaseScreen(onDone: () -> Unit) {
                 Button(onClick = { showGrn = true }) { Text("RECEIVED") }
                 Spacer(Modifier.width(4.dp))
                 OutlinedButton(onClick = { showAudit = true }) { Text("AUDIT") }
+                Spacer(Modifier.width(4.dp))
+                OutlinedButton(onClick = { showMaster = true }) { Text("MASTER") }
             }
         }
         if(loadingStock) LoadingRow("Reading stock...")
-        Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(12.dp)) {
-            var expanded by rememberSaveable { mutableStateOf(false) }
-            Button(onClick = { expanded = !expanded }, modifier = Modifier.fillMaxWidth()) {
-                Text(if(expanded) "HIDE MASTER DATA" else "MASTER DATA  \u00b7  brands, categories, distributors")
-            }
-            if(expanded) {
-                val brands by produceState(initialValue = emptyList<String>(), reload) { value = withContext(Dispatchers.IO) { loadBrands(ctx) } }
-                val cats by produceState(initialValue = emptyList<String>(), reload) { value = withContext(Dispatchers.IO) { loadCategories(ctx) } }
-                val dists by produceState(initialValue = emptyList<Distributor>(), reload) { value = withContext(Dispatchers.IO) { loadDistributors(ctx) } }
-                Divider(Modifier.padding(vertical = 4.dp))
-                Text("Brands (" + brands.size + ")", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                Text(brands.joinToString("  \u00b7  "), fontSize = 9.sp, color = Color.Gray, maxLines = 6)
-                Row {
-                    OutlinedTextField(newBrand, {newBrand=it}, label={Text("Add brand")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
-                    Spacer(Modifier.width(4.dp))
-                    Button(onClick = { scope.launch { withContext(Dispatchers.IO) { addBrand(ctx, newBrand) }; newBrand=""; reload++ } }) { Text("ADD") }
-                }
-                Divider(Modifier.padding(vertical = 4.dp))
-                Text("Categories (" + cats.size + ")", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                Text(cats.joinToString("  \u00b7  "), fontSize = 9.sp, color = Color.Gray, maxLines = 4)
-                Row {
-                    OutlinedTextField(newCat, {newCat=it}, label={Text("Add category")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
-                    Spacer(Modifier.width(4.dp))
-                    Button(onClick = { scope.launch { withContext(Dispatchers.IO) { addCategory(ctx, newCat) }; newCat=""; reload++ } }) { Text("ADD") }
-                }
-                Divider(Modifier.padding(vertical = 4.dp))
-                Text("Distributors (" + dists.size + ")", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                dists.forEach { d ->
-                    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text(d.name, fontSize = 11.sp, maxLines = 1)
-                            Text("limit \u20b9" + fmt(d.creditLimit) + "  \u00b7  " + d.creditDays + " days" + (if(d.brands.isBlank()) "" else "  \u00b7  " + d.brands), fontSize = 9.sp, color = Color.Gray, maxLines = 1)
-                        }
-                        TextButton(onClick = { scope.launch { withContext(Dispatchers.IO) { deleteDistributor(ctx, d.id) }; reload++ } }) { Text("DELETE", fontSize = 9.sp, color = Color.Red) }
-                    }
-                }
-                Row {
-                    OutlinedTextField(newDist, {newDist=it}, label={Text("Distributor name")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
-                    Spacer(Modifier.width(4.dp))
-                    OutlinedTextField(newDistLimit, {newDistLimit=it}, label={Text("Credit \u20b9")}, modifier=Modifier.weight(0.7f), keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
-                }
-                Button(onClick = {
-                    if(newDist.isNotBlank()) {
-                        scope.launch {
-                            withContext(Dispatchers.IO) { saveDistributor(ctx, Distributor(0, newDist.trim(), "", "", "", newDistLimit.toDoubleOrNull() ?: 0.0, 0, "", true)) }
-                            newDist=""; newDistLimit=""; reload++
-                        }
-                    }
-                }, modifier = Modifier.fillMaxWidth()) { Text("ADD DISTRIBUTOR") }
-            }
-        }}
-        Card(Modifier.padding(vertical = 10.dp)) { Column(Modifier.padding(10.dp)) {
-            Text("Add Stock", fontWeight = FontWeight.Bold)
-            OutlinedTextField(model, {model=it}, label={Text("Model / Item Name")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(imei, {imei=it}, label={Text("IMEI / Serial - one per line (optional)")}, minLines=2, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
-                IconButton(onClick = { startStockScan() }) { Icon(Icons.Default.QrCodeScanner, "Scan IMEI") }
-            }
-            Row { OutlinedTextField(hsn, {hsn=it}, label={Text("HSN")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.width(5.dp)); OutlinedTextField(qty, {qty=it}, label={Text("Qty")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })) }
-            Row { OutlinedTextField(cost, {cost=it}, label={Text("Purchase \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.width(5.dp)); OutlinedTextField(mrp, {mrp=it}, label={Text("MRP \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })) }
-            Row {
-                OutlinedTextField(brand, {brand=it}, label={Text("Brand")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
-                Spacer(Modifier.width(5.dp))
-                OutlinedTextField(cls, {cls=it}, label={Text("Class")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
-            }
-            OutlinedTextField(supplier, {supplier=it}, label={Text("Supplier / Distributor")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
-            Button(onClick = {
-                if(model.isNotBlank()) {
-                    val imeis = imei.split("\n", ",", " ").map{ it.trim() }.filter{ it.isNotBlank() }.distinct()
-                    // one IMEI = one handset, so the IMEI count wins over the typed quantity
-                    val units = if(imeis.isNotEmpty()) imeis.size else (qty.toIntOrNull() ?: 1).coerceAtLeast(0)
-                    val entry = StockEntry(System.currentTimeMillis(), model.trim(), imeis.joinToString("\n"), hsn.trim(),
-                        cost.toDoubleOrNull() ?: 0.0, mrp.toDoubleOrNull() ?: 0.0, units,
-                        supplier.trim(), SimpleDateFormat("dd-MMM-yyyy", Locale.ENGLISH).format(Date()),
-                        brand.trim().uppercase(), cls.trim())
-                    scope.launch {
-                        withContext(Dispatchers.IO) { saveStock(ctx, loadStock(ctx) + entry) }
-                        reload++
-                        model=""; imei=""; hsn=""; cost=""; mrp=""; qty="1"; supplier=""; brand=""
-                        Toast.makeText(ctx, "Added to stock", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }, modifier = Modifier.fillMaxWidth()) { Text("ADD TO STOCK") }
-        }}
         Card(Modifier.padding(vertical = 10.dp)) { Column(Modifier.padding(16.dp)) {
             Text("Stock in hand", fontWeight = FontWeight.Bold)
             Divider(Modifier.padding(vertical = 5.dp))
