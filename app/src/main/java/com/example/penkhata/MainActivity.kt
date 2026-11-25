@@ -80,7 +80,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "7.7 · master search"
+const val APP_VERSION = "7.8 · create on the line"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -1958,30 +1958,53 @@ fun ReceiveScreen(onDone: () -> Unit) {
 
     if(newSkuFor != null) AlertDialog(
         onDismissRequest = { newSkuFor = null },
-        title = { Text("New SKU") },
+        title = { Text("New SKU - create it here") },
         text = { Column {
-            Text(newSkuFor ?: "", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-            OutlinedTextField(nsModel, {nsModel=it}, label={Text("Model, e.g. GALAXY F56 5G 8/128")}, modifier=Modifier.fillMaxWidth())
-            OutlinedTextField(nsCategory, {nsCategory=it}, label={Text("Category")}, modifier=Modifier.fillMaxWidth())
-            Row {
-                OutlinedTextField(nsHsn, {nsHsn=it}, label={Text("HSN")}, modifier=Modifier.weight(1f))
-                Spacer(Modifier.width(4.dp))
-                OutlinedTextField(nsGst, {nsGst=it}, label={Text("GST %")}, modifier=Modifier.weight(0.6f))
+            Text("SKU  " + (newSkuFor ?: ""), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            Text("Brand: " + brand, fontSize = 10.sp, color = Color.Gray)
+            OutlinedTextField(nsModel, {nsModel=it}, label={Text("Model, e.g. GALAXY F56 5G 8/128")}, modifier=Modifier.fillMaxWidth(), singleLine = true)
+            // pick one that already exists instead of retyping it
+            val existing = loadModels(ctx).filter {
+                it.brand.equals(brand, true) && (nsModel.isBlank() || it.name.contains(nsModel.trim(), true))
+            }.take(6)
+            if(existing.isNotEmpty()) {
+                Text("Or pick an existing model", fontSize = 9.sp, color = Color.Gray)
+                Column(Modifier.verticalScroll(rememberScrollState()).heightIn(max = 110.dp)) {
+                    existing.forEach { m ->
+                        Text(m.name, fontSize = 11.sp, modifier = Modifier.fillMaxWidth().clickable { nsModel = m.name; nsCategory = m.category }.padding(vertical = 3.dp))
+                    }
+                }
             }
+            Row {
+                OutlinedTextField(nsCategory, {nsCategory=it}, label={Text("Category")}, modifier=Modifier.weight(1f), singleLine = true)
+                Spacer(Modifier.width(4.dp))
+                OutlinedTextField(nsGst, {nsGst=it}, label={Text("GST %")}, modifier=Modifier.weight(0.6f), singleLine = true)
+            }
+            OutlinedTextField(nsHsn, {nsHsn=it}, label={Text("HSN")}, modifier=Modifier.fillMaxWidth(), singleLine = true)
+            Text("Saving creates the model if it is new, and adds the line to this challan.", fontSize = 9.sp, color = Color(0xFF2E7D32))
         } },
         confirmButton = { TextButton(onClick = {
             val sku = newSkuFor ?: return@TextButton
-            if(nsModel.isBlank()) return@TextButton
+            if(nsModel.isBlank()) { Toast.makeText(ctx, "The model name is needed", Toast.LENGTH_SHORT).show(); return@TextButton }
+            val units = lUnits.toIntOrNull() ?: 1
+            val price = lPrice.toDoubleOrNull() ?: 0.0
             scope.launch {
                 withContext(Dispatchers.IO) {
-                    saveSku(ctx, SkuInfo(sku, brand, nsCategory, nsModel, nsVariant, nsHsn,
+                    saveSku(ctx, SkuInfo(sku.trim(), brand, nsCategory, nsModel, "", nsHsn,
                         nsGst.toDoubleOrNull() ?: 18.0, 0.0, identTypeFor(nsCategory)))
                 }
-                lSku = sku; lModel = nsModel; lVariant = nsVariant; lHsn = nsHsn; lGst = nsGst
+                // straight onto the challan, no second trip
+                if(price > 0.0) {
+                    lines = lines + GrnLine(sku.trim(), nsModel, "", nsCategory, nsHsn,
+                        nsGst.toDoubleOrNull() ?: 18.0, units, price, identTypeFor(nsCategory))
+                    lSku = ""; lModel = ""; lUnits = "1"; lPrice = ""
+                } else {
+                    lSku = sku.trim(); lModel = nsModel; lHsn = nsHsn; lGst = nsGst
+                }
                 newSkuFor = null
-                Toast.makeText(ctx, "SKU saved - now add the line", Toast.LENGTH_SHORT).show()
+                Toast.makeText(ctx, "Model and SKU saved" + (if(price > 0.0) ", line added" else ""), Toast.LENGTH_SHORT).show()
             }
-        }) { Text("SAVE SKU") } },
+        }) { Text("SAVE AND ADD") } },
         dismissButton = { TextButton(onClick = { newSkuFor = null }) { Text("CANCEL") } }
     )
 
@@ -2011,7 +2034,10 @@ fun ReceiveScreen(onDone: () -> Unit) {
             }, label={Text("SKU from the challan, e.g. SM-E556B 8/128")}, modifier=Modifier.fillMaxWidth())
             val known = findSku(ctx, lSku)
             if(known != null) Text("= " + known.model + (if(known.variant.isBlank()) "" else "  \u00b7  " + known.variant), fontSize = 10.sp, color = Color(0xFF2E7D32))
-            else if(lSku.isNotBlank()) Text("New SKU - fill the model and variant below", fontSize = 10.sp, color = Color(0xFFB26A00))
+            else if(lSku.isNotBlank()) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("New SKU", fontSize = 10.sp, color = Color(0xFFB26A00), modifier = Modifier.weight(1f))
+                TextButton(onClick = { newSkuFor = lSku.trim(); nsModel = lModel; nsCategory = "Mobile" }) { Text("CREATE IT", fontSize = 10.sp) }
+            }
             OutlinedTextField(lModel, {lModel=it}, label={Text("Model, e.g. GALAXY F56 5G 8/128")}, modifier=Modifier.fillMaxWidth(),
                 keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
             Row {
