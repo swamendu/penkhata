@@ -80,7 +80,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "7.3 · distributor coverage"
+const val APP_VERSION = "7.4 · SKU line"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -1642,6 +1642,10 @@ fun ReceiveScreen(onDone: () -> Unit) {
     var brandQuery by remember { mutableStateOf("") }
     var distQuery by remember { mutableStateOf("") }
     var lSku by rememberSaveable { mutableStateOf("") }
+    var lModel by rememberSaveable { mutableStateOf("") }
+    var lVariant by rememberSaveable { mutableStateOf("") }
+    var lHsn by rememberSaveable { mutableStateOf("") }
+    var lGst by rememberSaveable { mutableStateOf("18") }
     var lUnits by rememberSaveable { mutableStateOf("1") }
     var lPrice by rememberSaveable { mutableStateOf("") }
     var lines by remember { mutableStateOf(listOf<GrnLine>()) }
@@ -1723,7 +1727,8 @@ fun ReceiveScreen(onDone: () -> Unit) {
                     saveSku(ctx, SkuInfo(sku, brand, nsCategory, nsModel, nsVariant, nsHsn,
                         nsGst.toDoubleOrNull() ?: 18.0, 0.0, identTypeFor(nsCategory)))
                 }
-                lSku = sku; newSkuFor = null
+                lSku = sku; lModel = nsModel; lVariant = nsVariant; lHsn = nsHsn; lGst = nsGst
+                newSkuFor = null
                 Toast.makeText(ctx, "SKU saved - now add the line", Toast.LENGTH_SHORT).show()
             }
         }) { Text("SAVE SKU") } },
@@ -1768,10 +1773,12 @@ fun ReceiveScreen(onDone: () -> Unit) {
                 val price = lPrice.toDoubleOrNull() ?: 0.0
                 if(sku.isNotBlank() && units > 0 && price > 0) {
                     val cat = k?.category ?: "Mobile"
-                    lines = lines + GrnLine(sku, k?.model ?: sku, k?.variant ?: "", cat, k?.hsn ?: "",
-                        k?.gstRate ?: 18.0, units, price, identTypeFor(cat))
-                    lSku = ""; lUnits = "1"; lPrice = ""
+                    lines = lines + GrnLine(sku, lModel.ifBlank { k?.model ?: sku }, lVariant.ifBlank { k?.variant ?: "" },
+                        cat, lHsn.ifBlank { k?.hsn ?: "" }, k?.gstRate ?: (lGst.toDoubleOrNull() ?: 18.0),
+                        units, price, identTypeFor(cat))
+                    lSku = ""; lModel = ""; lVariant = ""; lUnits = "1"; lPrice = ""
                 } else if(k == null) {
+                    nsModel = lModel; nsVariant = lVariant
                     newSkuFor = sku
                 }
             }, modifier = Modifier.fillMaxWidth()) { Text("ADD LINE") }
