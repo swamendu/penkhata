@@ -684,6 +684,20 @@ fun InvoiceScreen(isQuote: Boolean) {
     var unlockPin by remember { mutableStateOf("") }
     var custQuery by rememberSaveable { mutableStateOf("") }
     var custResults by remember { mutableStateOf(listOf<BuyerInfo>()) }
+    if(ownerUnlock) AlertDialog(
+        onDismissRequest = { ownerUnlock = false; unlockPin = "" },
+        title = { Text("Bill under a different name?") },
+        text = { Column {
+            Text("The customer record keeps its original name. This changes only this bill, and the owner PIN is required.", fontSize = 11.sp)
+            OutlinedTextField(unlockPin, {unlockPin=it}, label={Text("Owner PIN")}, visualTransformation = PasswordVisualTransformation(),
+                keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.NumberPassword), modifier=Modifier.fillMaxWidth())
+        } },
+        confirmButton = { TextButton(onClick = {
+            if(pinMatches(prefs, unlockPin)) { nameLocked = false; ownerUnlock = false; unlockPin = ""; Toast.makeText(ctx, "Name editable for this bill only", Toast.LENGTH_SHORT).show() }
+            else Toast.makeText(ctx, "Wrong PIN", Toast.LENGTH_SHORT).show()
+        }) { Text("UNLOCK") } },
+        dismissButton = { TextButton(onClick = { ownerUnlock = false; unlockPin = "" }) { Text("CANCEL") } }
+    )
     var bGst by rememberSaveable { mutableStateOf("") }; var bState by rememberSaveable { mutableStateOf("") }
     var iDesc by rememberSaveable { mutableStateOf("") }; var iSerial by rememberSaveable { mutableStateOf("") }
     var iHsn by rememberSaveable { mutableStateOf("") }; var iQty by rememberSaveable { mutableStateOf("1") }
@@ -2076,20 +2090,6 @@ fun monthlySales(ctx: Context, months: Int): List<Pair<String, Double>> {
             }
         }) { Text("SAVE") } },
         dismissButton = { TextButton(onClick = { editBranch = null }) { Text("CLOSE") } }
-    )
-    if(ownerUnlock) AlertDialog(
-        onDismissRequest = { ownerUnlock = false; unlockPin = "" },
-        title = { Text("Bill under a different name?") },
-        text = { Column {
-            Text("The customer record keeps its original name. This changes only this bill, and the owner PIN is required.", fontSize = 11.sp)
-            OutlinedTextField(unlockPin, {unlockPin=it}, label={Text("Owner PIN")}, visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.NumberPassword), modifier=Modifier.fillMaxWidth())
-        } },
-        confirmButton = { TextButton(onClick = {
-            if(pinMatches(prefs, unlockPin)) { nameLocked = false; ownerUnlock = false; unlockPin = ""; Toast.makeText(ctx, "Name editable for this bill only", Toast.LENGTH_SHORT).show() }
-            else Toast.makeText(ctx, "Wrong PIN", Toast.LENGTH_SHORT).show()
-        }) { Text("UNLOCK") } },
-        dismissButton = { TextButton(onClick = { ownerUnlock = false; unlockPin = "" }) { Text("CANCEL") } }
     )
     if(pendingPerson != null) AlertDialog(
         onDismissRequest = { pendingPerson = null },
