@@ -80,7 +80,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "7.5 · model master"
+const val APP_VERSION = "7.6 · brand model sku"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -1568,16 +1568,16 @@ fun StockMasterScreen(onDone: () -> Unit) {
         onDismissRequest = { skuForModel = null },
         title = { Text("Add a SKU to " + (skuForModel?.name ?: "")) },
         text = { Column {
-            OutlinedTextField(skuCode, {skuCode=it}, label={Text("SKU from the box")}, modifier=Modifier.fillMaxWidth())
-            OutlinedTextField(skuVariant, {skuVariant=it}, label={Text("Variant")}, modifier=Modifier.fillMaxWidth())
-            Text("One model, many SKUs. The variant is what tells them apart.", fontSize = 9.sp, color = Color.Gray)
+            Text("Brand: " + (skuForModel?.brand ?: "") + "   Model: " + (skuForModel?.name ?: ""), fontSize = 10.sp, color = Color.Gray)
+            OutlinedTextField(skuCode, {skuCode=it}, label={Text("SKU from the box, e.g. E556B 8/128")}, modifier=Modifier.fillMaxWidth())
+            Text("The model already says 8/128, so only the SKU is needed here.", fontSize = 9.sp, color = Color.Gray)
         } },
         confirmButton = { TextButton(onClick = {
             val m = skuForModel
             if(m != null && skuCode.isNotBlank()) {
                 scope.launch {
                     withContext(Dispatchers.IO) {
-                        saveSku(ctx, SkuInfo(skuCode.trim(), m.brand, m.category, m.name, skuVariant.trim(), "", 18.0, 0.0, identTypeFor(m.category)))
+                        saveSku(ctx, SkuInfo(skuCode.trim(), m.brand, m.category, m.name, "", "", 18.0, 0.0, identTypeFor(m.category)))
                     }
                     skuForModel = null; skuCode = ""; skuVariant = ""; reload++
                     Toast.makeText(ctx, "SKU added under " + m.name, Toast.LENGTH_SHORT).show()
@@ -1657,7 +1657,7 @@ Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(12.dp)) {
                 }
                 Divider(Modifier.padding(vertical = 6.dp))
                 Text("Models (" + loadModels(ctx).size + ")", fontWeight = FontWeight.Bold, fontSize = 11.sp)
-                Text("A model is the name on the box. Its SKUs are the variants - SM-E556B 8/128, SM-E556B 8/256.", fontSize = 9.sp, color = Color.Gray)
+                Text("Brand \u2192 Model \u2192 SKU. SAMSUNG / GALAXY F56 5G 8/128 / E556B 8/128. The model name carries the variant.", fontSize = 9.sp, color = Color.Gray)
                 loadModels(ctx).take(40).forEach { m ->
                     val its = skusForModel(ctx, m.id)
                     Column(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
@@ -1672,14 +1672,14 @@ Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(12.dp)) {
                             }.padding(horizontal = 6.dp))
                         }
                         its.forEach { k ->
-                            Text("      " + k.sku + (if(k.variant.isBlank()) "" else "  \u00b7  " + k.variant), fontSize = 9.sp, color = Color(0xFF2E7D32))
+                            Text("      SKU  " + k.sku, fontSize = 9.sp, color = Color(0xFF2E7D32))
                         }
                     }
                 }
                 Row {
                     OutlinedTextField(newModelBrand, {newModelBrand=it.uppercase()}, label={Text("Brand")}, modifier=Modifier.weight(0.7f))
                     Spacer(Modifier.width(4.dp))
-                    OutlinedTextField(newModelName, {newModelName=it}, label={Text("New model")}, modifier=Modifier.weight(1.3f))
+                    OutlinedTextField(newModelName, {newModelName=it}, label={Text("Model, e.g. GALAXY F56 5G 8/128")}, modifier=Modifier.weight(1.6f))
                 }
                 Row {
                     OutlinedTextField(newModelCat, {newModelCat=it}, label={Text("Category")}, modifier=Modifier.weight(1f))
@@ -1855,8 +1855,7 @@ fun ReceiveScreen(onDone: () -> Unit) {
         title = { Text("New SKU") },
         text = { Column {
             Text(newSkuFor ?: "", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-            OutlinedTextField(nsModel, {nsModel=it}, label={Text("Model")}, modifier=Modifier.fillMaxWidth())
-            OutlinedTextField(nsVariant, {nsVariant=it}, label={Text("Variant (e.g. 8/128)")}, modifier=Modifier.fillMaxWidth())
+            OutlinedTextField(nsModel, {nsModel=it}, label={Text("Model, e.g. GALAXY F56 5G 8/128")}, modifier=Modifier.fillMaxWidth())
             OutlinedTextField(nsCategory, {nsCategory=it}, label={Text("Category")}, modifier=Modifier.fillMaxWidth())
             Row {
                 OutlinedTextField(nsHsn, {nsHsn=it}, label={Text("HSN")}, modifier=Modifier.weight(1f))
@@ -1907,13 +1906,8 @@ fun ReceiveScreen(onDone: () -> Unit) {
             val known = findSku(ctx, lSku)
             if(known != null) Text("= " + known.model + (if(known.variant.isBlank()) "" else "  \u00b7  " + known.variant), fontSize = 10.sp, color = Color(0xFF2E7D32))
             else if(lSku.isNotBlank()) Text("New SKU - fill the model and variant below", fontSize = 10.sp, color = Color(0xFFB26A00))
-            Row {
-                OutlinedTextField(lModel, {lModel=it}, label={Text("Model")}, modifier=Modifier.weight(1f),
-                    keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
-                Spacer(Modifier.width(4.dp))
-                OutlinedTextField(lVariant, {lVariant=it}, label={Text("Variant")}, modifier=Modifier.weight(0.6f),
-                    keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
-            }
+            OutlinedTextField(lModel, {lModel=it}, label={Text("Model, e.g. GALAXY F56 5G 8/128")}, modifier=Modifier.fillMaxWidth(),
+                keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
             Row {
                 OutlinedTextField(lUnits, {lUnits=it}, label={Text("Units")}, modifier=Modifier.weight(0.6f), keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number))
                 Spacer(Modifier.width(4.dp))
