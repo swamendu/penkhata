@@ -80,7 +80,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "7.4 · SKU line"
+const val APP_VERSION = "7.5 · model master"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -421,6 +421,80 @@ fun identLabel(t: String): String = when(t) {
     "SERIAL" -> "Serial number"
     else -> "No serial needed"
 }
+// ---------------------------------------------------------------- models and SKUs
+// A model is maintained once; its SKUs hang under it. Galaxy F56 5G is the model,
+// SM-E556B 8/128 and SM-E556B 8/256 are two SKUs of that same model.
+data class Model(val id: Long, val brand: String, val category: String, val name: String)
+
+fun loadModels(ctx: Context): List<Model> {
+    val out = mutableListOf<Model>()
+    try {
+        db(ctx).readableDatabase.rawQuery("SELECT id,brand,category,name FROM models ORDER BY brand, name", null).use { c ->
+            while(c.moveToNext()) out.add(Model(c.getLong(0), c.getString(1) ?: "", c.getString(2) ?: "", c.getString(3) ?: ""))
+        }
+    } catch(e: Exception) { }
+    return out
+}
+fun findModel(ctx: Context, brand: String, name: String): Model? = try {
+    db(ctx).readableDatabase.rawQuery("SELECT id,brand,category,name FROM models WHERE brand=? AND name=?",
+        arrayOf(brand.trim().uppercase(), name.trim())).use { c ->
+        if(c.moveToFirst()) Model(c.getLong(0), c.getString(1) ?: "", c.getString(2) ?: "", c.getString(3) ?: "") else null
+    }
+} catch(e: Exception) { null }
+fun saveModel(ctx: Context, m: Model): Long {
+    return try {
+        val existing = findModel(ctx, m.brand, m.name)
+        if(existing != null) {
+            val cv = android.content.ContentValues(); cv.put("category", m.category)
+            db(ctx).writableDatabase.update("models", cv, "id=?", arrayOf(existing.id.toString()))
+            existing.id
+        } else {
+            val cv = android.content.ContentValues()
+            cv.put("brand", m.brand.trim().uppercase()); cv.put("category", m.category); cv.put("name", m.name.trim())
+            db(ctx).writableDatabase.insertWithOnConflict("models", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_IGNORE)
+            findModel(ctx, m.brand, m.name)?.id ?: -1L
+        }
+    } catch(e: Exception) { -1L }
+}
+fun skuModelId(ctx: Context, sku: String): Long = try {
+    db(ctx).readableDatabase.rawQuery("SELECT modelId FROM skus WHERE sku=?", arrayOf(sku)).use { if(it.moveToFirst()) it.getLong(0) else 0L }
+} catch(e: Exception) { 0L }
+fun skusForModel(ctx: Context, modelId: Long): List<SkuInfo> = loadSkus(ctx).filter { skuModelId(ctx, it.sku) == modelId }
+fun deleteModel(ctx: Context, id: Long) {
+    try {
+        val w = db(ctx).writableDatabase
+        w.delete("skus", "modelId=?", arrayOf(id.toString()))
+        w.delete("models", "id=?", arrayOf(id.toString()))
+    } catch(e: Exception) { }
+}
+// Give every existing SKU a model row, so nothing is orphaned by the new layer.
+fun migrateModels(ctx: Context) {
+    try {
+        val w = db(ctx).writableDatabase
+        val rows = mutableListOf<Triple<String, String, String>>()
+        db(ctx).readableDatabase.rawQuery("SELECT sku,brand,category,model FROM skus WHERE modelId=0 AND model<>''", null).use { c ->
+            while(c.moveToNext()) rows.add(Triple(c.getString(0) ?: "", c.getString(1) ?: "", c.getString(2) ?: ""))
+        }
+        for((sku, brand, category) in rows) {
+            val modelName = try {
+                db(ctx).readableDatabase.rawQuery("SELECT model FROM skus WHERE sku=?", arrayOf(sku)).use { if(it.moveToFirst()) it.getString(0) ?: "" else "" }
+            } catch(e: Exception) { "" }
+            if(modelName.isBlank()) continue
+            var m = findModel(ctx, brand, modelName)
+            if(m == null) {
+                val cv = android.content.ContentValues()
+                cv.put("brand", brand.uppercase()); cv.put("category", category); cv.put("name", modelName)
+                w.insertWithOnConflict("models", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_IGNORE)
+                m = findModel(ctx, brand, modelName)
+            }
+            if(m != null) {
+                val cv = android.content.ContentValues(); cv.put("modelId", m.id)
+                w.update("skus", cv, "sku=?", arrayOf(sku))
+            }
+        }
+    } catch(e: Exception) { }
+}
+
 fun loadSkus(ctx: Context): List<SkuInfo> {
     val out = mutableListOf<SkuInfo>()
     try {
@@ -442,7 +516,11 @@ fun saveSku(ctx: Context, k: SkuInfo) {
     cv.put("sku", k.sku); cv.put("brand", k.brand); cv.put("category", k.category); cv.put("model", k.model)
     cv.put("variant", k.variant); cv.put("hsn", k.hsn); cv.put("gstRate", k.gstRate); cv.put("mrp", k.mrp)
     cv.put("identType", k.identType)
-    try { db(ctx).writableDatabase.insertWithOnConflict("skus", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE) } catch(e: Exception) { }
+    try {
+        // every SKU hangs under a model, created the first time that model is seen
+        cv.put("modelId", saveModel(ctx, Model(0, k.brand, k.category, k.model)))
+        db(ctx).writableDatabase.insertWithOnConflict("skus", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE)
+    } catch(e: Exception) { }
 }
 fun loadGrns(ctx: Context): List<Grn> {
     val out = mutableListOf<Grn>()
@@ -839,7 +917,7 @@ fun MainAppScreen() {
     // bumped after a restore or a reset: every screen rebuilds and re-reads its data
     var dataVersion by remember { mutableStateOf(0) }
     LaunchedEffect(Unit) {
-        withContext(Dispatchers.IO) { importJsonIfNeeded(ctx); ensureBranch(ctx); seedMasterData(ctx); migrateCustomers(ctx); openingGrn(ctx) }
+        withContext(Dispatchers.IO) { importJsonIfNeeded(ctx); ensureBranch(ctx); seedMasterData(ctx); migrateCustomers(ctx); migrateModels(ctx); openingGrn(ctx) }
         dataVersion++
     }
 
@@ -1480,6 +1558,34 @@ fun StockMasterScreen(onDone: () -> Unit) {
     var coverFor by remember { mutableStateOf("") }
     var coverBrand by remember { mutableStateOf("") }
     var coverCats by remember { mutableStateOf(setOf<String>()) }
+    var newModelBrand by rememberSaveable { mutableStateOf("") }
+    var newModelName by rememberSaveable { mutableStateOf("") }
+    var newModelCat by rememberSaveable { mutableStateOf("Mobile") }
+    var skuForModel by remember { mutableStateOf<Model?>(null) }
+    var skuCode by remember { mutableStateOf("") }
+    var skuVariant by remember { mutableStateOf("") }
+    if(skuForModel != null) AlertDialog(
+        onDismissRequest = { skuForModel = null },
+        title = { Text("Add a SKU to " + (skuForModel?.name ?: "")) },
+        text = { Column {
+            OutlinedTextField(skuCode, {skuCode=it}, label={Text("SKU from the box")}, modifier=Modifier.fillMaxWidth())
+            OutlinedTextField(skuVariant, {skuVariant=it}, label={Text("Variant")}, modifier=Modifier.fillMaxWidth())
+            Text("One model, many SKUs. The variant is what tells them apart.", fontSize = 9.sp, color = Color.Gray)
+        } },
+        confirmButton = { TextButton(onClick = {
+            val m = skuForModel
+            if(m != null && skuCode.isNotBlank()) {
+                scope.launch {
+                    withContext(Dispatchers.IO) {
+                        saveSku(ctx, SkuInfo(skuCode.trim(), m.brand, m.category, m.name, skuVariant.trim(), "", 18.0, 0.0, identTypeFor(m.category)))
+                    }
+                    skuForModel = null; skuCode = ""; skuVariant = ""; reload++
+                    Toast.makeText(ctx, "SKU added under " + m.name, Toast.LENGTH_SHORT).show()
+                }
+            }
+        }) { Text("SAVE SKU") } },
+        dismissButton = { TextButton(onClick = { skuForModel = null }) { Text("CANCEL") } }
+    )
     if(coverFor.isNotBlank()) AlertDialog(
         onDismissRequest = { coverFor = "" },
         title = { Text("What does " + coverFor + " supply?") },
@@ -1548,6 +1654,45 @@ Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(12.dp)) {
                     OutlinedTextField(newCat, {newCat=it}, label={Text("Add category")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
                     Spacer(Modifier.width(4.dp))
                     Button(onClick = { scope.launch { withContext(Dispatchers.IO) { addCategory(ctx, newCat) }; newCat=""; reload++ } }) { Text("ADD") }
+                }
+                Divider(Modifier.padding(vertical = 6.dp))
+                Text("Models (" + loadModels(ctx).size + ")", fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                Text("A model is the name on the box. Its SKUs are the variants - SM-E556B 8/128, SM-E556B 8/256.", fontSize = 9.sp, color = Color.Gray)
+                loadModels(ctx).take(40).forEach { m ->
+                    val its = skusForModel(ctx, m.id)
+                    Column(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(m.brand + "  " + m.name, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                                Text(m.category + "  \u00b7  " + its.size + " SKU" + (if(its.size == 1) "" else "s"), fontSize = 9.sp, color = Color.Gray)
+                            }
+                            TextButton(onClick = { skuForModel = m; skuVariant = ""; skuCode = "" }) { Text("+ SKU", fontSize = 9.sp) }
+                            Text("\u00d7", fontSize = 11.sp, color = Color.Red, modifier = Modifier.clickable {
+                                scope.launch { withContext(Dispatchers.IO) { deleteModel(ctx, m.id) }; reload++ }
+                            }.padding(horizontal = 6.dp))
+                        }
+                        its.forEach { k ->
+                            Text("      " + k.sku + (if(k.variant.isBlank()) "" else "  \u00b7  " + k.variant), fontSize = 9.sp, color = Color(0xFF2E7D32))
+                        }
+                    }
+                }
+                Row {
+                    OutlinedTextField(newModelBrand, {newModelBrand=it.uppercase()}, label={Text("Brand")}, modifier=Modifier.weight(0.7f))
+                    Spacer(Modifier.width(4.dp))
+                    OutlinedTextField(newModelName, {newModelName=it}, label={Text("New model")}, modifier=Modifier.weight(1.3f))
+                }
+                Row {
+                    OutlinedTextField(newModelCat, {newModelCat=it}, label={Text("Category")}, modifier=Modifier.weight(1f))
+                    Spacer(Modifier.width(4.dp))
+                    Button(onClick = {
+                        if(newModelBrand.isNotBlank() && newModelName.isNotBlank()) {
+                            scope.launch {
+                                withContext(Dispatchers.IO) { saveModel(ctx, Model(0, newModelBrand, newModelCat, newModelName)) }
+                                Toast.makeText(ctx, "Model saved", Toast.LENGTH_SHORT).show()
+                                newModelName = ""; reload++
+                            }
+                        }
+                    }) { Text("ADD MODEL") }
                 }
                 Divider(Modifier.padding(vertical = 4.dp))
                 Text("Distributors (" + dists.size + ")", fontSize = 11.sp, fontWeight = FontWeight.Bold)
@@ -3324,6 +3469,8 @@ class PenDb(ctx: Context) : android.database.sqlite.SQLiteOpenHelper(ctx, "penkh
             "branch" to "TEXT DEFAULT ''", "series" to "TEXT DEFAULT ''",
             "salesman" to "TEXT DEFAULT ''", "deliveryDate" to "TEXT DEFAULT ''"))
         healColumns(db, "stock", listOf("brand" to "TEXT DEFAULT ''", "cls" to "TEXT DEFAULT ''"))
+        healColumns(db, "skus", listOf("modelId" to "INTEGER DEFAULT 0"))
+        try { db.execSQL("CREATE TABLE IF NOT EXISTS models(id INTEGER PRIMARY KEY AUTOINCREMENT, brand TEXT, category TEXT, name TEXT, UNIQUE(brand, name))") } catch(e: Exception) { }
         try {
             db.execSQL("""CREATE TABLE IF NOT EXISTS purchases(ms INTEGER PRIMARY KEY, distributor TEXT, invoiceNo TEXT, date TEXT, branch TEXT,
                 taxable REAL DEFAULT 0, gst REAL DEFAULT 0, total REAL DEFAULT 0, creditDays INTEGER DEFAULT 0, note TEXT DEFAULT '')""")
