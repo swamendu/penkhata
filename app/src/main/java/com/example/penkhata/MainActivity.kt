@@ -1754,13 +1754,20 @@ fun ReceiveScreen(onDone: () -> Unit) {
 
         Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(10.dp)) {
             Text("Add a line", fontWeight = FontWeight.Bold)
-            OutlinedTextField(lSku, {lSku=it}, label={Text("SKU from the challan")}, modifier=Modifier.fillMaxWidth())
+            OutlinedTextField(lSku, {
+                lSku = it
+                val k = findSku(ctx, it)
+                if(k != null) { lModel = k.model; lVariant = k.variant; lHsn = k.hsn; lGst = k.gstRate.toString() }
+            }, label={Text("SKU from the challan, e.g. SM-E556B 8/128")}, modifier=Modifier.fillMaxWidth())
+            val known = findSku(ctx, lSku)
+            if(known != null) Text("= " + known.model + (if(known.variant.isBlank()) "" else "  \u00b7  " + known.variant), fontSize = 10.sp, color = Color(0xFF2E7D32))
+            else if(lSku.isNotBlank()) Text("New SKU - fill the model and variant below", fontSize = 10.sp, color = Color(0xFFB26A00))
             Row {
-                TextButton(onClick = {
-                    val k = findSku(ctx, lSku)
-                    if(k != null) { lPrice = if(k.mrp > 0) k.mrp.toString() else lPrice; Toast.makeText(ctx, k.model + " " + k.variant, Toast.LENGTH_SHORT).show() }
-                    else newSkuFor = lSku.trim()
-                }) { Text("LOOK UP / NEW", fontSize = 10.sp) }
+                OutlinedTextField(lModel, {lModel=it}, label={Text("Model")}, modifier=Modifier.weight(1f),
+                    keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+                Spacer(Modifier.width(4.dp))
+                OutlinedTextField(lVariant, {lVariant=it}, label={Text("Variant")}, modifier=Modifier.weight(0.6f),
+                    keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
             }
             Row {
                 OutlinedTextField(lUnits, {lUnits=it}, label={Text("Units")}, modifier=Modifier.weight(0.6f), keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number))
