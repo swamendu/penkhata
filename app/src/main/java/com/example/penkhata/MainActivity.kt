@@ -2336,7 +2336,7 @@ fun upsertCustomer(ctx: Context, b: BuyerInfo, ms: Long) {
         val cv = android.content.ContentValues()
         cv.put("phone", b.phone.trim()); cv.put("name", b.name.trim())
         cv.put("addr1", b.addr1); cv.put("addr2", b.addr2); cv.put("lmk", b.landmark)
-        cv.put("pin", b.pincode); cv.put("gst", b.gstin); cv.put("state", b.state)
+        cv.put("pin", b.pincode); cv.put("gst", b.gst); cv.put("state", b.state)
         cv.put("firstMs", ms); cv.put("lastMs", ms); cv.put("bills", 1)
         w.insertWithOnConflict("customers", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_IGNORE)
         w.execSQL("UPDATE customers SET lastMs=?, bills=bills+1 WHERE phone=?", arrayOf(ms, b.phone.trim()))
