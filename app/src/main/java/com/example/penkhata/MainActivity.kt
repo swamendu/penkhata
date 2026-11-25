@@ -22,6 +22,8 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -80,7 +82,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "7.8.2 · dialog scroll"
+const val APP_VERSION = "7.9 · supplies dialog"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -1623,35 +1625,65 @@ fun StockMasterScreen(onDone: () -> Unit) {
         dismissButton = { TextButton(onClick = { skuForModel = null }) { Text("CANCEL") } }
     )
 
-    if(coverFor.isNotBlank()) AlertDialog(
+    if(coverFor.isNotBlank()) Dialog(
         onDismissRequest = { coverFor = "" },
-        title = { Text("What does " + coverFor + " supply?") },
-        text = { Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
-            Text("Pick a brand he is authorised for, then the categories within it.", fontSize = 10.sp, color = Color.Gray)
-            OutlinedTextField(coverBrand, {coverBrand=it.uppercase()}, label={Text("Brand")}, modifier=Modifier.fillMaxWidth(), singleLine = true)
-            brands.filter { it.contains(coverBrand, true) && coverBrand.isNotBlank() }.take(6).forEach { b ->
-                Text(b, fontSize = 11.sp, modifier = Modifier.fillMaxWidth().clickable { coverBrand = b }.padding(vertical = 3.dp))
-            }
-            Divider(Modifier.padding(vertical = 4.dp))
-            Text("Categories - tick what he supplies", fontWeight = FontWeight.Bold, fontSize = 11.sp)
-            cats.forEach { cat ->
-                val on = coverCats.contains(cat)
-                Row(Modifier.fillMaxWidth().clickable { coverCats = if(on) coverCats - cat else coverCats + cat }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(checked = on, onCheckedChange = { coverCats = if(on) coverCats - cat else coverCats + cat })
-                    Text(cat, fontSize = 11.sp)
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        // a fixed-height card, so the lists inside get a real viewport and can scroll
+        Card(Modifier.fillMaxWidth(0.94f).fillMaxHeight(0.88f).background(Color.White)) {
+            Column(Modifier.padding(16.dp).fillMaxSize()) {
+                Text("What does " + coverFor + " supply?", fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                Text("Step 1: tap the brand. Step 2: tick the categories he supplies.", fontSize = 10.sp, color = Color.Gray)
+                Spacer(Modifier.height(6.dp))
+                OutlinedTextField(coverBrand, {coverBrand=it.uppercase()}, label={Text("Brand")},
+                    modifier = Modifier.fillMaxWidth(), singleLine = true)
+                val brandHits = brands.filter { it.contains(coverBrand, true) && coverBrand.isNotBlank() }
+                if(brandHits.isNotEmpty()) {
+                    Text("Tap to select", fontSize = 9.sp, color = Color.Gray)
+                    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 96.dp)) {
+                        items(brandHits.take(20)) { b ->
+                            Text(b, fontSize = 12.sp, modifier = Modifier.fillMaxWidth()
+                                .clickable { coverBrand = b }
+                                .padding(vertical = 5.dp))
+                        }
+                    }
+                }
+                if(coverBrand.isNotBlank() && brands.any { it.equals(coverBrand.trim(), true) })
+                    Text("Selected: " + coverBrand.trim().uppercase(), fontSize = 10.sp, color = Color(0xFF2E7D32), fontWeight = FontWeight.Bold)
+                Divider(Modifier.padding(vertical = 6.dp))
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Step 2: categories", fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                    Text(coverCats.size.toString() + " ticked", fontSize = 10.sp, color = Color(0xFF2E7D32))
+                }
+                LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
+                    items(cats) { cat ->
+                        val on = coverCats.contains(cat)
+                        Row(Modifier.fillMaxWidth()
+                            .clickable { coverCats = if(on) coverCats - cat else coverCats + cat }
+                            .padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(checked = on, onCheckedChange = { coverCats = if(on) coverCats - cat else coverCats + cat })
+                            Text(cat, fontSize = 12.sp)
+                        }
+                    }
+                }
+                Text(if(coverBrand.isBlank() || coverCats.isEmpty())
+                        "Choose a brand and tick at least one category"
+                     else coverFor + " \u2192 " + coverBrand.trim().uppercase() + " \u00b7 " + coverCats.joinToString(", "),
+                    fontSize = 9.sp, color = if(coverBrand.isBlank() || coverCats.isEmpty()) Color(0xFFB26A00) else Color(0xFF2E7D32))
+                Row(Modifier.fillMaxWidth(), Arrangement.End) {
+                    TextButton(onClick = { coverFor = ""; coverBrand = ""; coverCats = emptySet() }) { Text("CANCEL") }
+                    Button(onClick = {
+                        if(coverBrand.isNotBlank() && coverCats.isNotEmpty()) {
+                            scope.launch {
+                                withContext(Dispatchers.IO) { saveCoverage(ctx, coverFor, coverBrand.trim().uppercase(), coverCats.toList()) }
+                                coverFor = ""; coverBrand = ""; coverCats = emptySet(); reload++
+                            }
+                        } else Toast.makeText(ctx, "Choose a brand and at least one category", Toast.LENGTH_SHORT).show()
+                    }, enabled = coverBrand.isNotBlank() && coverCats.isNotEmpty()) { Text("SAVE") }
                 }
             }
-        } },
-        confirmButton = { TextButton(onClick = {
-            if(coverBrand.isNotBlank() && coverCats.isNotEmpty()) {
-                scope.launch {
-                    withContext(Dispatchers.IO) { saveCoverage(ctx, coverFor, coverBrand.trim().uppercase(), coverCats.toList()) }
-                    coverFor = ""; coverBrand = ""; coverCats = emptySet(); reload++
-                }
-            } else Toast.makeText(ctx, "Choose a brand and at least one category", Toast.LENGTH_SHORT).show()
-        }) { Text("SAVE") } },
-        dismissButton = { TextButton(onClick = { coverFor = "" }) { Text("CANCEL") } }
-    )
+        }
+    }
 
     Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
         Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
