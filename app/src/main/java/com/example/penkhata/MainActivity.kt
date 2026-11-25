@@ -80,7 +80,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "7.1 · stock rework"
+const val APP_VERSION = "7.2 · stock polish"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -1558,6 +1558,8 @@ fun ReceiveScreen(onDone: () -> Unit) {
     var paper by rememberSaveable { mutableStateOf("") }
     var pickDist by remember { mutableStateOf(false) }
     var pickBrand by remember { mutableStateOf(false) }
+    var brandQuery by remember { mutableStateOf("") }
+    var distQuery by remember { mutableStateOf("") }
     var lSku by rememberSaveable { mutableStateOf("") }
     var lUnits by rememberSaveable { mutableStateOf("1") }
     var lPrice by rememberSaveable { mutableStateOf("") }
@@ -1579,15 +1581,33 @@ fun ReceiveScreen(onDone: () -> Unit) {
     val paperVal = paper.toDoubleOrNull() ?: 0.0
     val gap = if(paperVal <= 0.0) 0.0 else paperVal - total
 
-    if(pickDist) AlertDialog(onDismissRequest = { pickDist = false }, title = { Text("Distributor") },
-        text = { Column { if(dists.isEmpty()) Text("Add one under Stock \u2192 MASTER DATA.", fontSize = 11.sp)
-            dists.forEach { d -> Text(d.name, fontSize = 12.sp, modifier = Modifier.fillMaxWidth().clickable { dist = d.name; pickDist = false }.padding(vertical = 6.dp)) } } },
-        confirmButton = { TextButton(onClick = { pickDist = false }) { Text("CLOSE") } })
+    if(pickDist) AlertDialog(
+        onDismissRequest = { pickDist = false },
+        title = { Text("Distributor") },
+        text = { Column {
+            if(dists.isEmpty()) Text("No distributors yet. Add one under Stock \u2192 MASTER.", fontSize = 11.sp)
+            if(dists.size > 6) OutlinedTextField(distQuery, {distQuery=it}, label={Text("Search")}, modifier=Modifier.fillMaxWidth())
+            Column(Modifier.verticalScroll(rememberScrollState()).heightIn(max = 360.dp)) {
+                dists.filter { distQuery.isBlank() || it.name.contains(distQuery.trim(), true) }.forEach { d ->
+                    Text(d.name, fontSize = 12.sp, modifier = Modifier.fillMaxWidth().clickable { dist = d.name; pickDist = false; distQuery = "" }.padding(vertical = 6.dp))
+                }
+            }
+        } },
+        confirmButton = { TextButton(onClick = { pickDist = false; distQuery = "" }) { Text("CLOSE") } })
 
-    if(pickBrand) AlertDialog(onDismissRequest = { pickBrand = false }, title = { Text("Brand") },
-        text = { Column(Modifier.verticalScroll(rememberScrollState())) { brands.forEach { b ->
-            Text(b, fontSize = 12.sp, modifier = Modifier.fillMaxWidth().clickable { brand = b; pickBrand = false }.padding(vertical = 5.dp)) } } },
-        confirmButton = { TextButton(onClick = { pickBrand = false }) { Text("CLOSE") } })
+    if(pickBrand) AlertDialog(
+        onDismissRequest = { pickBrand = false },
+        title = { Text("Brand") },
+        text = { Column {
+            OutlinedTextField(brandQuery, {brandQuery=it}, label={Text("Search")}, modifier=Modifier.fillMaxWidth(),
+                keyboardOptions=KeyboardOptions(imeAction=ImeAction.Search))
+            Column(Modifier.verticalScroll(rememberScrollState()).heightIn(max = 360.dp)) {
+                brands.filter { brandQuery.isBlank() || it.contains(brandQuery.trim(), true) }.forEach { b ->
+                    Text(b, fontSize = 12.sp, modifier = Modifier.fillMaxWidth().clickable { brand = b; pickBrand = false; brandQuery = "" }.padding(vertical = 6.dp))
+                }
+            }
+        } },
+        confirmButton = { TextButton(onClick = { pickBrand = false; brandQuery = "" }) { Text("CLOSE") } })
 
     if(newSkuFor != null) AlertDialog(
         onDismissRequest = { newSkuFor = null },
@@ -1933,14 +1953,18 @@ fun PurchaseScreen(onDone: () -> Unit) {
     val totalValue = stock.sumOf { it.cost * it.qty }
     val lowCount = stock.count { it.qty <= 1 }
     Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
-        Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
-            Text("STOCK", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-            Row {
-                Button(onClick = { showGrn = true }) { Text("RECEIVED") }
-                Spacer(Modifier.width(4.dp))
-                OutlinedButton(onClick = { showAudit = true }) { Text("AUDIT") }
-                Spacer(Modifier.width(4.dp))
-                OutlinedButton(onClick = { showMaster = true }) { Text("MASTER") }
+        Text("STOCK", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+        Row(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+            Button(onClick = { showGrn = true }, modifier = Modifier.weight(1f)) {
+                Text("RECEIVED", fontSize = 11.sp, maxLines = 1)
+            }
+            Spacer(Modifier.width(5.dp))
+            OutlinedButton(onClick = { showAudit = true }, modifier = Modifier.weight(1f)) {
+                Text("AUDIT", fontSize = 11.sp, maxLines = 1)
+            }
+            Spacer(Modifier.width(5.dp))
+            OutlinedButton(onClick = { showMaster = true }, modifier = Modifier.weight(1f)) {
+                Text("MASTER", fontSize = 11.sp, maxLines = 1)
             }
         }
         if(loadingStock) LoadingRow("Reading stock...")
