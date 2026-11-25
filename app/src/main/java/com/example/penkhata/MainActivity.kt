@@ -80,7 +80,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "7.0 · GRN"
+const val APP_VERSION = "7.0.1 · GRN"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -455,8 +455,9 @@ fun loadGrns(ctx: Context): List<Grn> {
     } catch(e: Exception) { }
     return out
 }
-fun grnExists(ctx: Context, distributor: String, no: String): Boolean = try {
-    db(ctx).readableDatabase.rawQuery("SELECT 1 FROM grn WHERE distributor=? AND no=?", arrayOf(distributor, no.trim())).use { it.moveToFirst() }
+fun grnExists(ctx: Context, distributor: String, brand: String, no: String): Boolean = try {
+    db(ctx).readableDatabase.rawQuery("SELECT 1 FROM grn WHERE distributor=? AND brand=? AND no=?",
+        arrayOf(distributor, brand, no.trim())).use { it.moveToFirst() }
 } catch(e: Exception) { false }
 fun unitsForGrn(ctx: Context, grnId: Long): List<StockUnit> {
     val out = mutableListOf<StockUnit>()
@@ -1612,8 +1613,8 @@ fun ReceiveScreen(onDone: () -> Unit) {
             Button(onClick = {
                 if(dist.isBlank() || brand.isBlank() || no.isBlank()) {
                     Toast.makeText(ctx, "Distributor, brand and challan number are required", Toast.LENGTH_SHORT).show()
-                } else if(grnExists(ctx, dist, no)) {
-                    Toast.makeText(ctx, "Challan " + no + " already received from " + dist, Toast.LENGTH_LONG).show()
+                } else if(grnExists(ctx, dist, brand, no)) {
+                    Toast.makeText(ctx, "Challan " + no + " already received from " + dist + " for " + brand, Toast.LENGTH_LONG).show()
                 } else {
                     saving = true
                     scope.launch {
@@ -3209,7 +3210,7 @@ class PenDb(ctx: Context) : android.database.sqlite.SQLiteOpenHelper(ctx, "penkh
                 brand TEXT, date TEXT, docType TEXT, paperTotal REAL DEFAULT 0, taxable REAL DEFAULT 0, gst REAL DEFAULT 0,
                 total REAL DEFAULT 0, creditDays INTEGER DEFAULT 30, status TEXT DEFAULT 'PENDING', branch TEXT,
                 createdAt INTEGER DEFAULT 0)""")
-            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS idx_grn_no ON grn(distributor, no)")
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS idx_grn_no ON grn(distributor, brand, no)")
             db.execSQL("""CREATE TABLE IF NOT EXISTS grn_lines(id INTEGER PRIMARY KEY AUTOINCREMENT, grnId INTEGER,
                 sku TEXT, model TEXT, variant TEXT, category TEXT, hsn TEXT, gstRate REAL DEFAULT 18,
                 units INTEGER DEFAULT 0, price REAL DEFAULT 0, taxable REAL DEFAULT 0, identType TEXT DEFAULT 'NONE')""")
