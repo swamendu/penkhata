@@ -74,7 +74,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "5.9 · numbering"
+const val APP_VERSION = "6.0 · customers"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -573,7 +573,7 @@ fun MainAppScreen() {
     // bumped after a restore or a reset: every screen rebuilds and re-reads its data
     var dataVersion by remember { mutableStateOf(0) }
     LaunchedEffect(Unit) {
-        withContext(Dispatchers.IO) { importJsonIfNeeded(ctx); ensureBranch(ctx); seedMasterData(ctx) }
+        withContext(Dispatchers.IO) { importJsonIfNeeded(ctx); ensureBranch(ctx); seedMasterData(ctx); migrateCustomers(ctx) }
         dataVersion++
     }
 
@@ -679,6 +679,11 @@ fun InvoiceScreen(isQuote: Boolean) {
     var bAddr1 by rememberSaveable { mutableStateOf("") }; var bAddr2 by rememberSaveable { mutableStateOf("") }
     var bLandmark by rememberSaveable { mutableStateOf("") }; var bPincode by rememberSaveable { mutableStateOf("") }
     var bPhone by rememberSaveable { mutableStateOf("") }
+    var nameLocked by rememberSaveable { mutableStateOf(false) }
+    var ownerUnlock by remember { mutableStateOf(false) }
+    var unlockPin by remember { mutableStateOf("") }
+    var custQuery by rememberSaveable { mutableStateOf("") }
+    var custResults by remember { mutableStateOf(listOf<BuyerInfo>()) }
     var bGst by rememberSaveable { mutableStateOf("") }; var bState by rememberSaveable { mutableStateOf("") }
     var iDesc by rememberSaveable { mutableStateOf("") }; var iSerial by rememberSaveable { mutableStateOf("") }
     var iHsn by rememberSaveable { mutableStateOf("") }; var iQty by rememberSaveable { mutableStateOf("1") }
@@ -781,16 +786,23 @@ fun InvoiceScreen(isQuote: Boolean) {
         }}
         Card(Modifier.padding(vertical=5.dp)) { Column(Modifier.padding(10.dp)) {
             Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text("Past Customers (${customers.size})", fontWeight = FontWeight.Bold)
-                TextButton(onClick = { showCustomers = !showCustomers }) { Text(if(showCustomers) "HIDE" else "PICK") }
+                Text("Customers (" + customerCount(ctx) + ")", fontWeight = FontWeight.Bold)
+                TextButton(onClick = { showCustomers = !showCustomers }) { Text(if(showCustomers) "HIDE" else "SEARCH") }
             }
-            if(customers.isEmpty()) Text("No saved customers yet - they appear after your first bill", fontSize = 10.sp)
-            if(showCustomers) customers.forEach { c ->
+            if(showCustomers) {
+                OutlinedTextField(custQuery, { custQuery = it; custResults = searchCustomers(ctx, it, 20) },
+                    label={Text("Phone or name")}, modifier=Modifier.fillMaxWidth(),
+                    keyboardOptions=KeyboardOptions(imeAction=ImeAction.Search),
+                    keyboardActions=KeyboardActions(onSearch={ custResults = searchCustomers(ctx, custQuery, 20) }))
+                Text(if(custQuery.length < 2) "Type at least 2 characters - searches the whole customer list" else "${custResults.size} shown", fontSize = 9.sp, color = Color.Gray)
+            }
+            if(showCustomers) custResults.forEach { c ->
                 Column(Modifier.fillMaxWidth().clickable {
                     bName = c.name; bAddr1 = c.addr1; bAddr2 = c.addr2; bLandmark = c.landmark
                     bPincode = c.pincode; bPhone = c.phone; bGst = c.gst; bState = c.state
+                    nameLocked = true
                     showCustomers = false
-                    Toast.makeText(ctx, "Filled from past bill", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(ctx, "Filled from the customer record", Toast.LENGTH_SHORT).show()
                 }.padding(vertical = 6.dp)) {
                     Text(c.name, fontWeight = FontWeight.Bold, maxLines = 2)
                     if(c.phone.isNotBlank()) Text("Ph: ${c.phone}" + (if(c.gst.isBlank()) "" else "  \u00b7  GSTIN: ${c.gst}"), fontSize = 10.sp)
@@ -802,12 +814,32 @@ fun InvoiceScreen(isQuote: Boolean) {
         }}
         Card(Modifier.padding(vertical=5.dp)) { Column(Modifier.padding(10.dp)) {
             Text("Buyer Details", fontWeight=FontWeight.Bold)
-            OutlinedTextField(bName, {bName=it}, label={Text("Name")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+            if(nameLocked) {
+                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
+                    Text("Name locked to the registered owner of this number", fontSize = 9.sp, color = Color(0xFF2E7D32))
+                    TextButton(onClick = { ownerUnlock = true }) { Text("BILL ANOTHER NAME", fontSize = 9.sp) }
+                }
+            }
+            OutlinedTextField(bName, {if(!nameLocked) bName=it}, readOnly = nameLocked, label={Text("Name")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
             OutlinedTextField(bAddr1, {bAddr1=it}, label={Text("Address Line 1")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
             OutlinedTextField(bAddr2, {bAddr2=it}, label={Text("Address Line 2")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
             OutlinedTextField(bLandmark, {bLandmark=it}, label={Text("Landmark")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
             OutlinedTextField(bPincode, {bPincode=it}, label={Text("Pincode")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
-            OutlinedTextField(bPhone, { bPhone = it; applyCustomerByPhone(it) }, label={Text("Phone")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Phone, imeAction=ImeAction.Next), modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+            OutlinedTextField(bPhone, {
+                bPhone = it
+                applyCustomerByPhone(it)
+                if(it.trim().length >= 10) {
+                    val known = findCustomerByPhone(ctx, it)
+                    if(known != null) {
+                        bName = known.name; bAddr1 = known.addr1; bAddr2 = known.addr2; bLandmark = known.landmark
+                        bPincode = known.pincode; bGst = known.gst; bState = known.state
+                        nameLocked = true
+                        Toast.makeText(ctx, "Number registered to " + known.name, Toast.LENGTH_SHORT).show()
+                    } else {
+                        nameLocked = false
+                    }
+                }
+            }, label={Text("Phone")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Phone, imeAction=ImeAction.Next), modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
             Row { OutlinedTextField(bGst, {bGst=it}, label={Text("GSTIN")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.width(5.dp)); OutlinedTextField(bState, {bState=it}, label={Text("State Code")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })) }
             if(calc.interState) Text("Other state: IGST will be charged", fontSize=10.sp, color=Color(0xFF2E7D32))
         }}
@@ -2045,6 +2077,20 @@ fun monthlySales(ctx: Context, months: Int): List<Pair<String, Double>> {
         }) { Text("SAVE") } },
         dismissButton = { TextButton(onClick = { editBranch = null }) { Text("CLOSE") } }
     )
+    if(ownerUnlock) AlertDialog(
+        onDismissRequest = { ownerUnlock = false; unlockPin = "" },
+        title = { Text("Bill under a different name?") },
+        text = { Column {
+            Text("The customer record keeps its original name. This changes only this bill, and the owner PIN is required.", fontSize = 11.sp)
+            OutlinedTextField(unlockPin, {unlockPin=it}, label={Text("Owner PIN")}, visualTransformation = PasswordVisualTransformation(),
+                keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.NumberPassword), modifier=Modifier.fillMaxWidth())
+        } },
+        confirmButton = { TextButton(onClick = {
+            if(pinMatches(prefs, unlockPin)) { nameLocked = false; ownerUnlock = false; unlockPin = ""; Toast.makeText(ctx, "Name editable for this bill only", Toast.LENGTH_SHORT).show() }
+            else Toast.makeText(ctx, "Wrong PIN", Toast.LENGTH_SHORT).show()
+        }) { Text("UNLOCK") } },
+        dismissButton = { TextButton(onClick = { ownerUnlock = false; unlockPin = "" }) { Text("CANCEL") } }
+    )
     if(pendingPerson != null) AlertDialog(
         onDismissRequest = { pendingPerson = null },
         title = { Text("Switch to " + (pendingPerson?.name ?: "") + "?") },
@@ -2268,6 +2314,66 @@ fun cancelBill(ctx: Context, ms: Long, reason: String): Boolean {
         if(n > 0) { restoreStockForBill(ctx, lines); true } else false
     } catch(e: Exception) { false }
 }
+// ---------------------------------------------------------------- customers
+// One phone number, one customer. The name registered first is kept forever:
+// overwriting it would rewrite history, and a bill from 2026 must still read the
+// same in 2046.
+fun findCustomerByPhone(ctx: Context, phone: String): BuyerInfo? {
+    val p = phone.trim()
+    if(p.length < 6) return null
+    return try {
+        db(ctx).readableDatabase.rawQuery("SELECT name,addr1,addr2,lmk,pin,gst,state FROM customers WHERE phone=?", arrayOf(p)).use { c ->
+            if(c.moveToFirst()) BuyerInfo(c.getString(0) ?: "", c.getString(1) ?: "", c.getString(2) ?: "", c.getString(3) ?: "",
+                c.getString(4) ?: "", p, c.getString(5) ?: "", c.getString(6) ?: "") else null
+        }
+    } catch(e: Exception) { null }
+}
+// Record a sale against a phone number. Existing names are never replaced.
+fun upsertCustomer(ctx: Context, b: BuyerInfo, ms: Long) {
+    if(b.phone.trim().length < 6) return
+    try {
+        val w = db(ctx).writableDatabase
+        val cv = android.content.ContentValues()
+        cv.put("phone", b.phone.trim()); cv.put("name", b.name.trim())
+        cv.put("addr1", b.addr1); cv.put("addr2", b.addr2); cv.put("lmk", b.landmark)
+        cv.put("pin", b.pincode); cv.put("gst", b.gstin); cv.put("state", b.state)
+        cv.put("firstMs", ms); cv.put("lastMs", ms); cv.put("bills", 1)
+        w.insertWithOnConflict("customers", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_IGNORE)
+        w.execSQL("UPDATE customers SET lastMs=?, bills=bills+1 WHERE phone=?", arrayOf(ms, b.phone.trim()))
+    } catch(e: Exception) { }
+}
+// Indexed search: phone by prefix, name anywhere. Capped, because a picker only
+// ever needs a screenful.
+fun searchCustomers(ctx: Context, query: String, limit: Int = 20): List<BuyerInfo> {
+    val q = query.trim()
+    if(q.isBlank()) return listOf()
+    val out = mutableListOf<BuyerInfo>()
+    try {
+        db(ctx).readableDatabase.rawQuery(
+            "SELECT name,addr1,addr2,lmk,pin,phone,gst,state FROM customers WHERE phone LIKE ? OR name LIKE ? ORDER BY lastMs DESC LIMIT ?",
+            arrayOf(q + "%", "%" + q + "%", limit.toString())).use { c ->
+            while(c.moveToNext()) out.add(BuyerInfo(c.getString(0) ?: "", c.getString(1) ?: "", c.getString(2) ?: "", c.getString(3) ?: "",
+                c.getString(4) ?: "", c.getString(5) ?: "", c.getString(6) ?: "", c.getString(7) ?: ""))
+        }
+    } catch(e: Exception) { }
+    return out
+}
+fun customerCount(ctx: Context): Int = try {
+    db(ctx).readableDatabase.rawQuery("SELECT COUNT(*) FROM customers", null).use { if(it.moveToFirst()) it.getInt(0) else 0 }
+} catch(e: Exception) { 0 }
+// Build the master once from the bills already in the database.
+fun migrateCustomers(ctx: Context) {
+    try {
+        if(customerCount(ctx) > 0) return
+        db(ctx).readableDatabase.rawQuery("SELECT buyer,baddr1,baddr2,blmk,bpin,bphone,bgst,bstate,ms FROM bills WHERE bphone<>'' ORDER BY ms", null).use { c ->
+            while(c.moveToNext()) {
+                upsertCustomer(ctx, BuyerInfo(c.getString(0) ?: "", c.getString(1) ?: "", c.getString(2) ?: "", c.getString(3) ?: "",
+                    c.getString(4) ?: "", c.getString(5) ?: "", c.getString(6) ?: "", c.getString(7) ?: ""), c.getLong(8))
+            }
+        }
+    } catch(e: Exception) { }
+}
+
 fun loadCustomers(ctx: Context): List<BuyerInfo> {
     val out = mutableListOf<BuyerInfo>()
     try {
@@ -2567,6 +2673,9 @@ class PenDb(ctx: Context) : android.database.sqlite.SQLiteOpenHelper(ctx, "penkh
                 taxable REAL DEFAULT 0, gst REAL DEFAULT 0, total REAL DEFAULT 0, creditDays INTEGER DEFAULT 0, note TEXT DEFAULT '')""")
             db.execSQL("""CREATE TABLE IF NOT EXISTS purchase_lines(ms INTEGER, model TEXT, brand TEXT, category TEXT, hsn TEXT,
                 qty INTEGER DEFAULT 0, cost REAL DEFAULT 0, gstRate REAL DEFAULT 18, serials TEXT DEFAULT '')""")
+            db.execSQL("""CREATE TABLE IF NOT EXISTS customers(phone TEXT PRIMARY KEY, name TEXT, addr1 TEXT, addr2 TEXT,
+                lmk TEXT, pin TEXT, gst TEXT, state TEXT, firstMs INTEGER DEFAULT 0, lastMs INTEGER DEFAULT 0, bills INTEGER DEFAULT 0)""")
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_cust_name ON customers(name)")
             db.execSQL("""CREATE TABLE IF NOT EXISTS audits(ms INTEGER PRIMARY KEY, date TEXT, branch TEXT, countedBy TEXT,
                 note TEXT DEFAULT '', bookUnits INTEGER DEFAULT 0, countedUnits INTEGER DEFAULT 0,
                 varianceUnits INTEGER DEFAULT 0, bookValue REAL DEFAULT 0, varianceValue REAL DEFAULT 0)""")
@@ -3222,6 +3331,7 @@ fun saveInvoiceData(ctx: Context, ms: Long, isQuote: Boolean, invNo: String, dat
     val br = loadBranches(ctx).firstOrNull { it.code == activeBranchCode(pref) } ?: loadBranches(ctx).firstOrNull()
     cv.put("branch", br?.code ?: ""); cv.put("series", br?.series ?: "")
     cv.put("salesman", activePerson(pref)); cv.put("deliveryDate", dateStr)
+    upsertCustomer(ctx, b, ms)
     db(ctx).writableDatabase.insertWithOnConflict("bills", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE)
 }
 fun saveLedgerEntry(ctx: Context, e: LedgerEntry) {
