@@ -1546,7 +1546,6 @@ fun StockAuditScreen(onDone: () -> Unit) {
 }
 
 @Composable
-@Composable
 fun StockMasterScreen(onDone: () -> Unit) {
     val ctx = LocalContext.current
     val focusManager = LocalFocusManager.current
