@@ -1,6 +1,7 @@
 package com.example.penkhata
 
 import android.app.Activity
+import kotlin.math.abs
 import android.content.Context
 import android.content.ActivityNotFoundException
 import androidx.biometric.BiometricManager
@@ -79,7 +80,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "6.1.2 · hotfix"
+const val APP_VERSION = "7.0.1 · GRN"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -393,6 +394,214 @@ fun loadAuditLines(ctx: Context, ms: Long): List<AuditLine> {
     return out
 }
 
+// ---------------------------------------------------------------- GRN
+// A delivery challan is the atom: one paper, one brand, one unique number, one clock.
+data class Grn(val id: Long, val no: String, val distributor: String, val brand: String, val date: String,
+               val docType: String, val paperTotal: Double, val taxable: Double, val gst: Double, val total: Double,
+               val creditDays: Int, val status: String)
+data class GrnLine(val sku: String, val model: String, val variant: String, val category: String, val hsn: String,
+                   val gstRate: Double, val units: Int, val price: Double, val identType: String)
+data class SkuInfo(val sku: String, val brand: String, val category: String, val model: String, val variant: String,
+                   val hsn: String, val gstRate: Double, val mrp: Double, val identType: String)
+data class StockUnit(val id: Long, val grnId: Long, val sku: String, val serial1: String, val serial2: String,
+                     val cost: Double, val dateIn: String, val status: String)
+
+// IMEI only for cellular goods; everything else is a serial; counted goods need neither.
+fun identTypeFor(category: String): String = when(category.trim().lowercase()) {
+    "mobile" -> "IMEI"
+    "watch" -> "IMEI"
+    "ac", "air conditioner" -> "SERIAL2"
+    "earbuds", "accessories", "spare part", "service" -> "NONE"
+    else -> "SERIAL"
+}
+fun needsIdent(t: String): Boolean = t != "NONE"
+fun identLabel(t: String): String = when(t) {
+    "IMEI" -> "IMEI (15 digits)"
+    "SERIAL2" -> "Indoor serial, then outdoor (optional)"
+    "SERIAL" -> "Serial number"
+    else -> "No serial needed"
+}
+fun loadSkus(ctx: Context): List<SkuInfo> {
+    val out = mutableListOf<SkuInfo>()
+    try {
+        db(ctx).readableDatabase.rawQuery("SELECT sku,brand,category,model,variant,hsn,gstRate,mrp,identType FROM skus ORDER BY model, variant", null).use { c ->
+            while(c.moveToNext()) out.add(SkuInfo(c.getString(0) ?: "", c.getString(1) ?: "", c.getString(2) ?: "",
+                c.getString(3) ?: "", c.getString(4) ?: "", c.getString(5) ?: "", c.getDouble(6), c.getDouble(7), c.getString(8) ?: "SERIAL"))
+        }
+    } catch(e: Exception) { }
+    return out
+}
+fun findSku(ctx: Context, sku: String): SkuInfo? = try {
+    db(ctx).readableDatabase.rawQuery("SELECT sku,brand,category,model,variant,hsn,gstRate,mrp,identType FROM skus WHERE sku=?", arrayOf(sku.trim())).use { c ->
+        if(c.moveToFirst()) SkuInfo(c.getString(0) ?: "", c.getString(1) ?: "", c.getString(2) ?: "", c.getString(3) ?: "",
+            c.getString(4) ?: "", c.getString(5) ?: "", c.getDouble(6), c.getDouble(7), c.getString(8) ?: "SERIAL") else null
+    }
+} catch(e: Exception) { null }
+fun saveSku(ctx: Context, k: SkuInfo) {
+    val cv = android.content.ContentValues()
+    cv.put("sku", k.sku); cv.put("brand", k.brand); cv.put("category", k.category); cv.put("model", k.model)
+    cv.put("variant", k.variant); cv.put("hsn", k.hsn); cv.put("gstRate", k.gstRate); cv.put("mrp", k.mrp)
+    cv.put("identType", k.identType)
+    try { db(ctx).writableDatabase.insertWithOnConflict("skus", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE) } catch(e: Exception) { }
+}
+fun loadGrns(ctx: Context): List<Grn> {
+    val out = mutableListOf<Grn>()
+    try {
+        db(ctx).readableDatabase.rawQuery("SELECT id,no,distributor,brand,date,docType,paperTotal,taxable,gst,total,creditDays,status FROM grn ORDER BY createdAt DESC", null).use { c ->
+            while(c.moveToNext()) out.add(Grn(c.getLong(0), c.getString(1) ?: "", c.getString(2) ?: "", c.getString(3) ?: "",
+                c.getString(4) ?: "", c.getString(5) ?: "", c.getDouble(6), c.getDouble(7), c.getDouble(8), c.getDouble(9),
+                c.getInt(10), c.getString(11) ?: "PENDING"))
+        }
+    } catch(e: Exception) { }
+    return out
+}
+fun grnExists(ctx: Context, distributor: String, brand: String, no: String): Boolean = try {
+    db(ctx).readableDatabase.rawQuery("SELECT 1 FROM grn WHERE distributor=? AND brand=? AND no=?",
+        arrayOf(distributor, brand, no.trim())).use { it.moveToFirst() }
+} catch(e: Exception) { false }
+fun unitsForGrn(ctx: Context, grnId: Long): List<StockUnit> {
+    val out = mutableListOf<StockUnit>()
+    try {
+        db(ctx).readableDatabase.rawQuery("SELECT id,grnId,sku,serial1,serial2,cost,dateIn,status FROM units WHERE grnId=? ORDER BY id", arrayOf(grnId.toString())).use { c ->
+            while(c.moveToNext()) out.add(StockUnit(c.getLong(0), c.getLong(1), c.getString(2) ?: "", c.getString(3) ?: "",
+                c.getString(4) ?: "", c.getDouble(5), c.getString(6) ?: "", c.getString(7) ?: "PENDING"))
+        }
+    } catch(e: Exception) { }
+    return out
+}
+fun pendingUnitCount(ctx: Context, grnId: Long): Int = try {
+    db(ctx).readableDatabase.rawQuery("SELECT COUNT(*) FROM units WHERE grnId=? AND status='PENDING'", arrayOf(grnId.toString())).use { if(it.moveToFirst()) it.getInt(0) else 0 }
+} catch(e: Exception) { 0 }
+fun grnLines(ctx: Context, grnId: Long): List<Pair<Long, GrnLine>> {
+    val out = mutableListOf<Pair<Long, GrnLine>>()
+    try {
+        db(ctx).readableDatabase.rawQuery("SELECT id,sku,model,variant,category,hsn,gstRate,units,price,identType FROM grn_lines WHERE grnId=? ORDER BY id", arrayOf(grnId.toString())).use { c ->
+            while(c.moveToNext()) out.add(c.getLong(0) to GrnLine(c.getString(1) ?: "", c.getString(2) ?: "", c.getString(3) ?: "",
+                c.getString(4) ?: "", c.getString(5) ?: "", c.getDouble(6), c.getInt(7), c.getDouble(8), c.getString(9) ?: "SERIAL"))
+        }
+    } catch(e: Exception) { }
+    return out
+}
+
+// Pass one: record the challan and its lines. Counted goods become stock at once;
+// serialised goods wait as PENDING units, which is what keeps them unbillable.
+fun saveGrn(ctx: Context, g: Grn, lines: List<GrnLine>): Long {
+    if(lines.isEmpty()) return -1
+    return try {
+        val w = db(ctx).writableDatabase
+        val prefs = ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE)
+        var grnId = -1L
+        w.beginTransaction()
+        try {
+            val cv = android.content.ContentValues()
+            cv.put("no", g.no.trim()); cv.put("distributor", g.distributor); cv.put("brand", g.brand); cv.put("date", g.date)
+            cv.put("docType", g.docType); cv.put("paperTotal", g.paperTotal); cv.put("taxable", g.taxable)
+            cv.put("gst", g.gst); cv.put("total", g.total); cv.put("creditDays", g.creditDays)
+            cv.put("status", if(lines.any { needsIdent(it.identType) }) "PENDING" else "POSTED")
+            cv.put("branch", activeBranchCode(prefs)); cv.put("createdAt", System.currentTimeMillis())
+            grnId = w.insert("grn", null, cv)
+            for(l in lines) {
+                val lv = android.content.ContentValues()
+                lv.put("grnId", grnId); lv.put("sku", l.sku); lv.put("model", l.model); lv.put("variant", l.variant)
+                lv.put("category", l.category); lv.put("hsn", l.hsn); lv.put("gstRate", l.gstRate)
+                lv.put("units", l.units); lv.put("price", l.price); lv.put("taxable", l.units * l.price)
+                lv.put("identType", l.identType)
+                val lineId = w.insert("grn_lines", null, lv)
+                val status = if(needsIdent(l.identType)) "PENDING" else "POSTED"
+                for(i in 1..l.units) {
+                    w.execSQL("INSERT INTO units(grnId,lineId,sku,serial1,serial2,cost,dateIn,status) VALUES(?,?,?,'','',?,?,?)",
+                        arrayOf(grnId, lineId, l.sku, l.price, g.date, status))
+                }
+            }
+            w.setTransactionSuccessful()
+        } finally { w.endTransaction() }
+        postCountedUnits(ctx, grnId)
+        grnId
+    } catch(e: Exception) { -1 }
+}
+// Counted lines have no serials, so their units go into stock immediately.
+fun postCountedUnits(ctx: Context, grnId: Long) {
+    try {
+        val g = loadGrns(ctx).firstOrNull { it.id == grnId } ?: return
+        val counted = grnLines(ctx, grnId).filter { !needsIdent(it.second.identType) }
+        if(counted.isEmpty()) return
+        val stock = loadStock(ctx).toMutableList()
+        for((_, l) in counted) {
+            val existing = stock.indexOfFirst { it.model.equals(l.model, true) && it.brand.equals(g.brand, true) && it.cost == l.price }
+            if(existing >= 0) stock[existing] = stock[existing].copy(qty = stock[existing].qty + l.units)
+            else stock.add(StockEntry(System.currentTimeMillis() + stock.size, l.model, "", l.hsn, l.price, 0.0,
+                l.units, g.distributor, g.date, g.brand, l.category))
+        }
+        saveStock(ctx, stock)
+    } catch(e: Exception) { }
+}
+// Pass two: record serials for one line, then post those units into stock.
+fun saveSerials(ctx: Context, grnId: Long, lineId: Long, serials: List<Pair<String, String>>): Int {
+    return try {
+        val w = db(ctx).writableDatabase
+        val line = grnLines(ctx, grnId).firstOrNull { it.first == lineId }?.second ?: return 0
+        val linePending = unitsForGrn(ctx, grnId).filter { it.status == "PENDING" && it.sku == line.sku }
+        var done = 0
+        for((idx, s) in serials.withIndex()) {
+            if(s.first.isBlank()) continue
+            val target = linePending.getOrNull(idx) ?: break
+            val cv = android.content.ContentValues()
+            cv.put("serial1", s.first.trim()); cv.put("serial2", s.second.trim()); cv.put("status", "POSTED")
+            w.update("units", cv, "id=?", arrayOf(target.id.toString()))
+            done++
+        }
+        val stillPending = pendingUnitCount(ctx, grnId)
+        w.execSQL("UPDATE grn SET status=? WHERE id=?", arrayOf(if(stillPending == 0) "POSTED" else "PENDING", grnId))
+        postUnitsToStock(ctx, grnId)
+        done
+    } catch(e: Exception) { 0 }
+}
+// Every POSTED unit becomes a stock row of quantity one, so billing finds it by serial.
+fun postUnitsToStock(ctx: Context, grnId: Long) {
+    try {
+        val g = loadGrns(ctx).firstOrNull { it.id == grnId } ?: return
+        val lines = grnLines(ctx, grnId).associate { it.second.sku to it.second }
+        val stock = loadStock(ctx).toMutableList()
+        var changed = false
+        db(ctx).readableDatabase.rawQuery(
+            "SELECT id,sku,serial1,serial2,cost,dateIn FROM units WHERE grnId=? AND status='POSTED'",
+            arrayOf(grnId.toString())).use { c ->
+            while(c.moveToNext()) {
+                val sku = c.getString(1) ?: ""; val s1 = c.getString(2) ?: ""
+                val s2 = c.getString(3) ?: ""; val cost = c.getDouble(4); val dateIn = c.getString(5) ?: ""
+                if(s1.isBlank()) continue
+                val already = stock.any { it.imeiList().contains(s1) || (s2.isNotBlank() && it.imeiList().contains(s2)) }
+                if(already) continue
+                val line = lines[sku]
+                stock.add(StockEntry(System.currentTimeMillis() + stock.size, line?.model ?: sku,
+                    if(s2.isBlank()) s1 else s1 + "\n" + s2, line?.hsn ?: "", cost, 0.0, 1,
+                    g.distributor, dateIn, g.brand, line?.category ?: ""))
+                changed = true
+            }
+        }
+        if(changed) saveStock(ctx, stock)
+    } catch(e: Exception) { }
+}
+// Opening GRN: whatever stock existed before challans gets a home of its own.
+fun openingGrn(ctx: Context) {
+    try {
+        if(loadGrns(ctx).isNotEmpty()) return
+        val stock = loadStock(ctx)
+        if(stock.isEmpty()) return
+        val taxable = stock.sumOf { it.cost * it.qty }
+        val g = Grn(0, "OPENING", "Opening stock", "", SimpleDateFormat("dd-MMM-yyyy", Locale.ENGLISH).format(Date()),
+            "Opening", taxable, taxable, 0.0, taxable, 0, "POSTED")
+        val lines = stock.map { e ->
+            GrnLine(e.model, e.model, "", if(e.cls.isBlank()) "Mobile" else e.cls, e.hsn, 18.0, e.qty, e.cost, "NONE")
+        }
+        val id = saveGrn(ctx, g, lines)
+        if(id > 0) db(ctx).writableDatabase.execSQL("UPDATE grn SET status='POSTED' WHERE id=?", arrayOf(id))
+    } catch(e: Exception) { }
+}
+fun pendingIdentCount(ctx: Context): Int = try {
+    db(ctx).readableDatabase.rawQuery("SELECT COUNT(*) FROM units WHERE status='PENDING'", null).use { if(it.moveToFirst()) it.getInt(0) else 0 }
+} catch(e: Exception) { 0 }
+
 fun loadBrands(ctx: Context): List<String> {
     val out = mutableListOf<String>()
     try { db(ctx).readableDatabase.rawQuery("SELECT name FROM brands ORDER BY name", null).use { c -> while(c.moveToNext()) out.add(c.getString(0) ?: "") } } catch(e: Exception) { }
@@ -588,7 +797,7 @@ fun MainAppScreen() {
     // bumped after a restore or a reset: every screen rebuilds and re-reads its data
     var dataVersion by remember { mutableStateOf(0) }
     LaunchedEffect(Unit) {
-        withContext(Dispatchers.IO) { importJsonIfNeeded(ctx); ensureBranch(ctx); seedMasterData(ctx); migrateCustomers(ctx) }
+        withContext(Dispatchers.IO) { importJsonIfNeeded(ctx); ensureBranch(ctx); seedMasterData(ctx); migrateCustomers(ctx); openingGrn(ctx) }
         dataVersion++
     }
 
@@ -1217,6 +1426,251 @@ fun StockAuditScreen(onDone: () -> Unit) {
 }
 
 @Composable
+fun GrnScreen(onDone: () -> Unit) {
+    val ctx = LocalContext.current
+    var reload by remember { mutableStateOf(0) }
+    var showReceive by rememberSaveable { mutableStateOf(false) }
+    var serialTarget by remember { mutableStateOf<Pair<Long, Long>?>(null) }
+    val grns by produceState(initialValue = emptyList<Grn>(), reload) { value = withContext(Dispatchers.IO) { loadGrns(ctx) } }
+
+    if(showReceive) { ReceiveScreen { showReceive = false; reload++ }; return }
+    if(serialTarget != null) {
+        SerialScreen(serialTarget!!.first, serialTarget!!.second) { serialTarget = null; reload++ }
+        return
+    }
+
+    Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
+        Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
+            Text("RECEIVED (GRN)", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            TextButton(onClick = { onDone() }) { Text("BACK") }
+        }
+        Text("One challan, one brand, one number. A GRN is pending until its serials are entered.", fontSize = 10.sp, color = Color.Gray)
+        Spacer(Modifier.height(6.dp))
+        Button(onClick = { showReceive = true }, modifier = Modifier.fillMaxWidth()) { Text("NEW RECEIPT") }
+        Spacer(Modifier.height(8.dp))
+        if(grns.isEmpty()) Text("Nothing received yet.", fontSize = 11.sp)
+        grns.forEach { g ->
+            Card(Modifier.padding(vertical = 4.dp)) { Column(Modifier.padding(12.dp)) {
+                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
+                    Text(g.no, fontWeight = FontWeight.Bold)
+                    Text("\u20b9" + fmt(g.total), fontWeight = FontWeight.Bold)
+                }
+                Text(g.date + "  \u00b7  " + g.distributor + (if(g.brand.isBlank()) "" else "  \u00b7  " + g.brand), fontSize = 10.sp, maxLines = 1)
+                val pending = pendingUnitCount(ctx, g.id)
+                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
+                    Text(if(pending > 0) "PENDING " + pending + " serials" else "POSTED \u00b7 stock in",
+                        fontSize = 10.sp, color = if(pending > 0) Color(0xFFB26A00) else Color(0xFF2E7D32), fontWeight = FontWeight.Bold)
+                    if(pending > 0) TextButton(onClick = {
+                        val line = grnLines(ctx, g.id).firstOrNull { l -> unitsForGrn(ctx, g.id).any { it.status == "PENDING" && it.sku == l.second.sku } }
+                        if(line != null) serialTarget = g.id to line.first
+                    }) { Text("ENTER SERIALS", fontSize = 10.sp) }
+                }
+                grnLines(ctx, g.id).forEach { (_, l) ->
+                    Text(l.sku + "  \u00b7  " + l.model + "  \u00d7 " + l.units + "  \u00b7  \u20b9" + fmt(l.price), fontSize = 9.sp, color = Color.Gray, maxLines = 1)
+                }
+            }}
+        }
+    }
+}
+
+@Composable
+fun ReceiveScreen(onDone: () -> Unit) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
+    var dist by rememberSaveable { mutableStateOf("") }
+    var brand by rememberSaveable { mutableStateOf("") }
+    var no by rememberSaveable { mutableStateOf("") }
+    var docType by rememberSaveable { mutableStateOf("Challan") }
+    var paper by rememberSaveable { mutableStateOf("") }
+    var pickDist by remember { mutableStateOf(false) }
+    var pickBrand by remember { mutableStateOf(false) }
+    var lSku by rememberSaveable { mutableStateOf("") }
+    var lUnits by rememberSaveable { mutableStateOf("1") }
+    var lPrice by rememberSaveable { mutableStateOf("") }
+    var lines by remember { mutableStateOf(listOf<GrnLine>()) }
+    var newSkuFor by remember { mutableStateOf<String?>(null) }
+    var nsModel by remember { mutableStateOf("") }
+    var nsVariant by remember { mutableStateOf("") }
+    var nsCategory by remember { mutableStateOf("Mobile") }
+    var nsHsn by remember { mutableStateOf("") }
+    var nsGst by remember { mutableStateOf("18") }
+    var saving by remember { mutableStateOf(false) }
+    val dists by produceState(initialValue = emptyList<Distributor>(), ctx) { value = withContext(Dispatchers.IO) { loadDistributors(ctx) } }
+    val brands by produceState(initialValue = emptyList<String>(), ctx) { value = withContext(Dispatchers.IO) { loadBrands(ctx) } }
+    val cats by produceState(initialValue = emptyList<String>(), ctx) { value = withContext(Dispatchers.IO) { loadCategories(ctx) } }
+
+    val taxable = lines.sumOf { it.units * it.price }
+    val gstTotal = lines.sumOf { it.units * it.price * it.gstRate / 100.0 }
+    val total = taxable + gstTotal
+    val paperVal = paper.toDoubleOrNull() ?: 0.0
+    val gap = if(paperVal <= 0.0) 0.0 else paperVal - total
+
+    if(pickDist) AlertDialog(onDismissRequest = { pickDist = false }, title = { Text("Distributor") },
+        text = { Column { if(dists.isEmpty()) Text("Add one under Stock \u2192 MASTER DATA.", fontSize = 11.sp)
+            dists.forEach { d -> Text(d.name, fontSize = 12.sp, modifier = Modifier.fillMaxWidth().clickable { dist = d.name; pickDist = false }.padding(vertical = 6.dp)) } } },
+        confirmButton = { TextButton(onClick = { pickDist = false }) { Text("CLOSE") } })
+
+    if(pickBrand) AlertDialog(onDismissRequest = { pickBrand = false }, title = { Text("Brand") },
+        text = { Column(Modifier.verticalScroll(rememberScrollState())) { brands.forEach { b ->
+            Text(b, fontSize = 12.sp, modifier = Modifier.fillMaxWidth().clickable { brand = b; pickBrand = false }.padding(vertical = 5.dp)) } } },
+        confirmButton = { TextButton(onClick = { pickBrand = false }) { Text("CLOSE") } })
+
+    if(newSkuFor != null) AlertDialog(
+        onDismissRequest = { newSkuFor = null },
+        title = { Text("New SKU") },
+        text = { Column {
+            Text(newSkuFor ?: "", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            OutlinedTextField(nsModel, {nsModel=it}, label={Text("Model")}, modifier=Modifier.fillMaxWidth())
+            OutlinedTextField(nsVariant, {nsVariant=it}, label={Text("Variant (e.g. 8/128)")}, modifier=Modifier.fillMaxWidth())
+            OutlinedTextField(nsCategory, {nsCategory=it}, label={Text("Category")}, modifier=Modifier.fillMaxWidth())
+            Row {
+                OutlinedTextField(nsHsn, {nsHsn=it}, label={Text("HSN")}, modifier=Modifier.weight(1f))
+                Spacer(Modifier.width(4.dp))
+                OutlinedTextField(nsGst, {nsGst=it}, label={Text("GST %")}, modifier=Modifier.weight(0.6f))
+            }
+        } },
+        confirmButton = { TextButton(onClick = {
+            val sku = newSkuFor ?: return@TextButton
+            if(nsModel.isBlank()) return@TextButton
+            scope.launch {
+                withContext(Dispatchers.IO) {
+                    saveSku(ctx, SkuInfo(sku, brand, nsCategory, nsModel, nsVariant, nsHsn,
+                        nsGst.toDoubleOrNull() ?: 18.0, 0.0, identTypeFor(nsCategory)))
+                }
+                lSku = sku; newSkuFor = null
+                Toast.makeText(ctx, "SKU saved - now add the line", Toast.LENGTH_SHORT).show()
+            }
+        }) { Text("SAVE SKU") } },
+        dismissButton = { TextButton(onClick = { newSkuFor = null }) { Text("CANCEL") } }
+    )
+
+    Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
+        Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
+            Text("NEW RECEIPT", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            TextButton(onClick = { onDone() }) { Text("BACK") }
+        }
+        Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(10.dp)) {
+            Button(onClick = { pickDist = true }, modifier = Modifier.fillMaxWidth()) { Text(if(dist.isBlank()) "CHOOSE DISTRIBUTOR" else dist) }
+            Button(onClick = { pickBrand = true }, modifier = Modifier.fillMaxWidth()) { Text(if(brand.isBlank()) "CHOOSE BRAND" else brand) }
+            Row {
+                OutlinedTextField(no, {no=it}, label={Text("Challan no")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+                Spacer(Modifier.width(4.dp))
+                OutlinedTextField(docType, {docType=it}, label={Text("Challan / Invoice")}, modifier=Modifier.weight(1f))
+            }
+            OutlinedTextField(paper, {paper=it}, label={Text("Amount on the paper")}, modifier=Modifier.fillMaxWidth(),
+                keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+        }}
+
+        Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(10.dp)) {
+            Text("Add a line", fontWeight = FontWeight.Bold)
+            OutlinedTextField(lSku, {lSku=it}, label={Text("SKU from the challan")}, modifier=Modifier.fillMaxWidth())
+            Row {
+                TextButton(onClick = {
+                    val k = findSku(ctx, lSku)
+                    if(k != null) { lPrice = if(k.mrp > 0) k.mrp.toString() else lPrice; Toast.makeText(ctx, k.model + " " + k.variant, Toast.LENGTH_SHORT).show() }
+                    else newSkuFor = lSku.trim()
+                }) { Text("LOOK UP / NEW", fontSize = 10.sp) }
+            }
+            Row {
+                OutlinedTextField(lUnits, {lUnits=it}, label={Text("Units")}, modifier=Modifier.weight(0.6f), keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number))
+                Spacer(Modifier.width(4.dp))
+                OutlinedTextField(lPrice, {lPrice=it}, label={Text("Price per unit")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number))
+            }
+            Button(onClick = {
+                val sku = lSku.trim(); val k = findSku(ctx, sku)
+                val units = lUnits.toIntOrNull() ?: 0
+                val price = lPrice.toDoubleOrNull() ?: 0.0
+                if(sku.isNotBlank() && units > 0 && price > 0) {
+                    val cat = k?.category ?: "Mobile"
+                    lines = lines + GrnLine(sku, k?.model ?: sku, k?.variant ?: "", cat, k?.hsn ?: "",
+                        k?.gstRate ?: 18.0, units, price, identTypeFor(cat))
+                    lSku = ""; lUnits = "1"; lPrice = ""
+                } else if(k == null) {
+                    newSkuFor = sku
+                }
+            }, modifier = Modifier.fillMaxWidth()) { Text("ADD LINE") }
+        }}
+
+        if(lines.isNotEmpty()) Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(10.dp)) {
+            lines.forEachIndexed { i, l ->
+                Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(l.sku + "  \u00d7 " + l.units, fontSize = 11.sp, maxLines = 1)
+                        Text(l.model + (if(l.variant.isBlank()) "" else " " + l.variant) + "  \u00b7  " + identLabel(l.identType), fontSize = 9.sp, color = Color.Gray, maxLines = 1)
+                    }
+                    Text("\u20b9" + fmt(l.units * l.price), fontSize = 11.sp)
+                    TextButton(onClick = { lines = lines.filterIndexed { j, _ -> j != i } }) { Text("\u00d7", color = Color.Red) }
+                }
+            }
+            Divider(Modifier.padding(vertical = 4.dp))
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Taxable", fontSize = 11.sp); Text("\u20b9" + fmt(taxable), fontSize = 11.sp) }
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("GST", fontSize = 11.sp); Text("\u20b9" + fmt(gstTotal), fontSize = 11.sp) }
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Total", fontWeight = FontWeight.Bold); Text("\u20b9" + fmt(total), fontWeight = FontWeight.Bold) }
+            if(paperVal > 0.0) Text(
+                if(abs(gap) < 1.0) "\u2713 matches the challan" else "paper \u20b9" + fmt(paperVal) + "  \u00b7  gap \u20b9" + fmt(gap),
+                fontSize = 10.sp, color = if(abs(gap) < 1.0) Color(0xFF2E7D32) else Color.Red)
+            Button(onClick = {
+                if(dist.isBlank() || brand.isBlank() || no.isBlank()) {
+                    Toast.makeText(ctx, "Distributor, brand and challan number are required", Toast.LENGTH_SHORT).show()
+                } else if(grnExists(ctx, dist, brand, no)) {
+                    Toast.makeText(ctx, "Challan " + no + " already received from " + dist + " for " + brand, Toast.LENGTH_LONG).show()
+                } else {
+                    saving = true
+                    scope.launch {
+                        val g = Grn(0, no.trim(), dist, brand, SimpleDateFormat("dd-MMM-yyyy", Locale.ENGLISH).format(Date()),
+                            docType.trim(), paperVal, taxable, gstTotal, total,
+                            dists.firstOrNull { it.name == dist }?.creditDays ?: 30, "PENDING")
+                        val id = withContext(Dispatchers.IO) { saveGrn(ctx, g, lines) }
+                        saving = false
+                        if(id > 0) {
+                            Toast.makeText(ctx, "GRN " + no + " saved - " + lines.sumOf { it.units } + " units received", Toast.LENGTH_LONG).show()
+                            onDone()
+                        } else Toast.makeText(ctx, "Could not save the receipt", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }, enabled = !saving, modifier = Modifier.fillMaxWidth()) { Text(if(saving) "SAVING..." else "SAVE RECEIPT") }
+        }}
+    }
+}
+
+@Composable
+fun SerialScreen(grnId: Long, lineId: Long, onDone: () -> Unit) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var text by remember { mutableStateOf("") }
+    val grn = remember { loadGrns(ctx).firstOrNull { it.id == grnId } }
+    val line = remember { grnLines(ctx, grnId).firstOrNull { it.first == lineId }?.second }
+    val pending = remember { unitsForGrn(ctx, grnId).count { it.status == "PENDING" && it.sku == (line?.sku ?: "") } }
+
+    Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
+        Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
+            Text("ENTER SERIALS", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            TextButton(onClick = { onDone() }) { Text("BACK") }
+        }
+        Text((grn?.no ?: "") + "  \u00b7  " + (line?.sku ?: ""), fontSize = 11.sp, color = Color.Gray)
+        Text((line?.model ?: "") + (if((line?.variant ?: "").isBlank()) "" else " " + line!!.variant), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        Text(identLabel(line?.identType ?: "SERIAL") + "  \u00b7  " + pending + " still pending", fontSize = 10.sp, color = Color(0xFFB26A00))
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(text, {text=it}, label={Text("One per line. For an AC: indoor, outdoor")}, minLines = 6,
+            modifier = Modifier.fillMaxWidth())
+        Text("Paste or type the numbers from the boxes, one per line. Duplicates are ignored.", fontSize = 9.sp, color = Color.Gray)
+        Spacer(Modifier.height(8.dp))
+        Button(onClick = {
+            val rows = text.split("\n").map { it.trim() }.filter { it.isNotBlank() }.map {
+                val parts = it.split(",", ";").map { p -> p.trim() }
+                (parts.getOrNull(0) ?: "") to (parts.getOrNull(1) ?: "")
+            }
+            if(rows.isEmpty()) { Toast.makeText(ctx, "Nothing to save", Toast.LENGTH_SHORT).show(); return@Button }
+            scope.launch {
+                val n = withContext(Dispatchers.IO) { saveSerials(ctx, grnId, lineId, rows.distinctBy { it.first }) }
+                Toast.makeText(ctx, if(n > 0) "$n serials recorded" else "Nothing saved", Toast.LENGTH_LONG).show()
+                onDone()
+            }
+        }, modifier = Modifier.fillMaxWidth()) { Text("SAVE SERIALS") }
+    }
+}
+@Composable
 fun PurchaseScreen(onDone: () -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1353,8 +1807,10 @@ fun PurchaseScreen(onDone: () -> Unit) {
 @Composable fun StockScreen() {
     var showPurchase by rememberSaveable { mutableStateOf(false) }
     var showAudit by rememberSaveable { mutableStateOf(false) }
+    var showGrn by rememberSaveable { mutableStateOf(false) }
     if(showPurchase) { PurchaseScreen { showPurchase = false }; return }
     if(showAudit) { StockAuditScreen { showAudit = false }; return }
+    if(showGrn) { GrnScreen { showGrn = false }; return }
     val focusManager = LocalFocusManager.current
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1405,7 +1861,7 @@ fun PurchaseScreen(onDone: () -> Unit) {
         Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
             Text("STOCK", fontSize = 24.sp, fontWeight = FontWeight.Bold)
             Row {
-                Button(onClick = { showPurchase = true }) { Text("PURCHASE IN") }
+                Button(onClick = { showGrn = true }) { Text("RECEIVED") }
                 Spacer(Modifier.width(4.dp))
                 OutlinedButton(onClick = { showAudit = true }) { Text("AUDIT") }
             }
@@ -1504,6 +1960,8 @@ fun PurchaseScreen(onDone: () -> Unit) {
             Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Taxable value (ex-GST)"); Text("\u20b9${fmt(totalValue)}") }
             Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("MRP value (shelf price)"); Text("\u20b9${fmt(stock.sumOf { it.mrp * it.qty })}") }
             if(lowCount > 0) Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Low stock (1 or less)", color = Color.Red); Text("$lowCount", color = Color.Red) }
+            val awaiting = pendingIdentCount(ctx)
+            if(awaiting > 0) Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Awaiting serials", color = Color(0xFFB26A00)); Text("$awaiting units", color = Color(0xFFB26A00)) }
             Divider(Modifier.padding(vertical = 5.dp))
             Text("Brand wise", fontWeight = FontWeight.Bold, fontSize = 12.sp)
             val byBrand = stock.groupBy { if(it.brand.isBlank()) "UNBRANDED" else it.brand }
@@ -2748,6 +3206,23 @@ class PenDb(ctx: Context) : android.database.sqlite.SQLiteOpenHelper(ctx, "penkh
                 taxable REAL DEFAULT 0, gst REAL DEFAULT 0, total REAL DEFAULT 0, creditDays INTEGER DEFAULT 0, note TEXT DEFAULT '')""")
             db.execSQL("""CREATE TABLE IF NOT EXISTS purchase_lines(ms INTEGER, model TEXT, brand TEXT, category TEXT, hsn TEXT,
                 qty INTEGER DEFAULT 0, cost REAL DEFAULT 0, gstRate REAL DEFAULT 18, serials TEXT DEFAULT '')""")
+            db.execSQL("""CREATE TABLE IF NOT EXISTS grn(id INTEGER PRIMARY KEY AUTOINCREMENT, no TEXT, distributor TEXT,
+                brand TEXT, date TEXT, docType TEXT, paperTotal REAL DEFAULT 0, taxable REAL DEFAULT 0, gst REAL DEFAULT 0,
+                total REAL DEFAULT 0, creditDays INTEGER DEFAULT 30, status TEXT DEFAULT 'PENDING', branch TEXT,
+                createdAt INTEGER DEFAULT 0)""")
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS idx_grn_no ON grn(distributor, brand, no)")
+            db.execSQL("""CREATE TABLE IF NOT EXISTS grn_lines(id INTEGER PRIMARY KEY AUTOINCREMENT, grnId INTEGER,
+                sku TEXT, model TEXT, variant TEXT, category TEXT, hsn TEXT, gstRate REAL DEFAULT 18,
+                units INTEGER DEFAULT 0, price REAL DEFAULT 0, taxable REAL DEFAULT 0, identType TEXT DEFAULT 'NONE')""")
+            db.execSQL("""CREATE TABLE IF NOT EXISTS units(id INTEGER PRIMARY KEY AUTOINCREMENT, grnId INTEGER,
+                lineId INTEGER, sku TEXT, serial1 TEXT, serial2 TEXT, cost REAL DEFAULT 0, dateIn TEXT,
+                status TEXT DEFAULT 'PENDING', billMs INTEGER DEFAULT 0)""")
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_units_serial ON units(serial1)")
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_units_grn ON units(grnId)")
+            db.execSQL("""CREATE TABLE IF NOT EXISTS skus(sku TEXT PRIMARY KEY, brand TEXT, category TEXT, model TEXT,
+                variant TEXT, hsn TEXT, gstRate REAL DEFAULT 18, mrp REAL DEFAULT 0, identType TEXT DEFAULT 'SERIAL')""")
+            db.execSQL("""CREATE TABLE IF NOT EXISTS dist_brands(distributor TEXT, brand TEXT, categories TEXT,
+                PRIMARY KEY(distributor, brand))""")
             db.execSQL("""CREATE TABLE IF NOT EXISTS customers(phone TEXT PRIMARY KEY, name TEXT, addr1 TEXT, addr2 TEXT,
                 lmk TEXT, pin TEXT, gst TEXT, state TEXT, firstMs INTEGER DEFAULT 0, lastMs INTEGER DEFAULT 0, bills INTEGER DEFAULT 0)""")
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_cust_name ON customers(name)")
