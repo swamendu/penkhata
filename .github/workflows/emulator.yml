@@ -2,7 +2,7 @@ name: Emulator screenshots
 on:
   workflow_dispatch:
   push:
-    branches: [ emulator-test ]
+    branches: [ main, emulator-test ]
 
 jobs:
   screens:
