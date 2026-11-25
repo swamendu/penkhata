@@ -80,7 +80,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "7.2 · stock polish"
+const val APP_VERSION = "7.3 · distributor coverage"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -603,14 +603,50 @@ fun pendingIdentCount(ctx: Context): Int = try {
     db(ctx).readableDatabase.rawQuery("SELECT COUNT(*) FROM units WHERE status='PENDING'", null).use { if(it.moveToFirst()) it.getInt(0) else 0 }
 } catch(e: Exception) { 0 }
 
+// ---------------------------------------------------------------- distributor coverage
+// A distributor is a brand's channel. He may hold several brands, and within a brand
+// only some categories - Samsung mobiles through one distributor, Samsung appliances
+// through another. This is what decides which brand and category a challan may use.
+fun loadCoverage(ctx: Context, distributor: String): List<Pair<String, String>> {
+    val out = mutableListOf<Pair<String, String>>()
+    try {
+        db(ctx).readableDatabase.rawQuery("SELECT brand,categories FROM dist_brands WHERE distributor=? ORDER BY brand",
+            arrayOf(distributor)).use { c -> while(c.moveToNext()) out.add((c.getString(0) ?: "") to (c.getString(1) ?: "")) }
+    } catch(e: Exception) { }
+    return out
+}
+fun saveCoverage(ctx: Context, distributor: String, brand: String, categories: List<String>) {
+    try {
+        val cv = android.content.ContentValues()
+        cv.put("distributor", distributor); cv.put("brand", brand)
+        cv.put("categories", categories.joinToString(","))
+        db(ctx).writableDatabase.insertWithOnConflict("dist_brands", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE)
+    } catch(e: Exception) { }
+}
+fun deleteCoverage(ctx: Context, distributor: String, brand: String) {
+    try { db(ctx).writableDatabase.delete("dist_brands", "distributor=? AND brand=?", arrayOf(distributor, brand)) } catch(e: Exception) { }
+}
+// Brands this distributor may supply. Empty means nothing has been set up yet.
+fun brandsForDistributor(ctx: Context, distributor: String): List<String> = loadCoverage(ctx, distributor).map { it.first }
+fun categoriesForDistributor(ctx: Context, distributor: String, brand: String): List<String> {
+    val row = loadCoverage(ctx, distributor).firstOrNull { it.first.equals(brand, true) } ?: return emptyList()
+    return row.second.split(",").map { it.trim() }.filter { it.isNotBlank() }
+}
+
 fun loadBrands(ctx: Context): List<String> {
     val out = mutableListOf<String>()
     try { db(ctx).readableDatabase.rawQuery("SELECT name FROM brands ORDER BY name", null).use { c -> while(c.moveToNext()) out.add(c.getString(0) ?: "") } } catch(e: Exception) { }
     return out
 }
-fun addBrand(ctx: Context, name: String) {
-    val n = name.trim().uppercase(); if(n.isBlank()) return
-    try { db(ctx).writableDatabase.execSQL("INSERT OR IGNORE INTO brands(name) VALUES(?)", arrayOf(n)) } catch(e: Exception) { }
+// Returns true when added, false when it was already there (in any case).
+fun addBrand(ctx: Context, name: String): Boolean {
+    val n = name.trim().uppercase(); if(n.isBlank()) return false
+    return try {
+        val exists = loadBrands(ctx).any { it.equals(n, true) }
+        if(exists) false else {
+            db(ctx).writableDatabase.execSQL("INSERT OR IGNORE INTO brands(name) VALUES(?)", arrayOf(n)); true
+        }
+    } catch(e: Exception) { false }
 }
 fun deleteBrand(ctx: Context, name: String) {
     try { db(ctx).writableDatabase.delete("brands", "name=?", arrayOf(name)) } catch(e: Exception) { }
@@ -620,9 +656,14 @@ fun loadCategories(ctx: Context): List<String> {
     try { db(ctx).readableDatabase.rawQuery("SELECT name FROM categories ORDER BY name", null).use { c -> while(c.moveToNext()) out.add(c.getString(0) ?: "") } } catch(e: Exception) { }
     return out
 }
-fun addCategory(ctx: Context, name: String) {
-    val n = name.trim(); if(n.isBlank()) return
-    try { db(ctx).writableDatabase.execSQL("INSERT OR IGNORE INTO categories(name) VALUES(?)", arrayOf(n)) } catch(e: Exception) { }
+fun addCategory(ctx: Context, name: String): Boolean {
+    val n = name.trim(); if(n.isBlank()) return false
+    return try {
+        val exists = loadCategories(ctx).any { it.equals(n, true) }
+        if(exists) false else {
+            db(ctx).writableDatabase.execSQL("INSERT OR IGNORE INTO categories(name) VALUES(?)", arrayOf(n)); true
+        }
+    } catch(e: Exception) { false }
 }
 fun deleteCategory(ctx: Context, name: String) {
     try { db(ctx).writableDatabase.delete("categories", "name=?", arrayOf(name)) } catch(e: Exception) { }
@@ -1436,6 +1477,46 @@ fun StockMasterScreen(onDone: () -> Unit) {
     var newCat by rememberSaveable { mutableStateOf("") }
     var newDist by rememberSaveable { mutableStateOf("") }
     var newDistLimit by rememberSaveable { mutableStateOf("") }
+    var coverFor by remember { mutableStateOf("") }
+    var coverBrand by remember { mutableStateOf("") }
+    var coverCats by remember { mutableStateOf(setOf<String>()) }
+    if(coverFor.isNotBlank()) AlertDialog(
+        onDismissRequest = { coverFor = "" },
+        title = { Text("What does " + coverFor + " supply?") },
+        text = { Column {
+            Text("Pick a brand he is authorised for, then the categories within it.", fontSize = 10.sp, color = Color.Gray)
+            OutlinedTextField(coverBrand, {coverBrand=it.uppercase()}, label={Text("Brand")}, modifier=Modifier.fillMaxWidth())
+            Text("Tap a brand below, or type it", fontSize = 9.sp, color = Color.Gray)
+            Column(Modifier.verticalScroll(rememberScrollState()).heightIn(max = 120.dp)) {
+                loadBrands(ctx).filter { it.contains(coverBrand, true) && coverBrand.isNotBlank() }.take(12).forEach { b ->
+                    Text(b, fontSize = 11.sp, modifier = Modifier.fillMaxWidth().clickable { coverBrand = b }.padding(vertical = 3.dp))
+                }
+            }
+            Divider(Modifier.padding(vertical = 4.dp))
+            Text("Categories", fontWeight = FontWeight.Bold, fontSize = 11.sp)
+            Column(Modifier.verticalScroll(rememberScrollState()).heightIn(max = 200.dp)) {
+                loadCategories(ctx).forEach { cat ->
+                    val on = coverCats.contains(cat)
+                    Row(Modifier.fillMaxWidth().clickable {
+                        coverCats = if(on) coverCats - cat else coverCats + cat
+                    }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = on, onCheckedChange = { coverCats = if(on) coverCats - cat else coverCats + cat })
+                        Text(cat, fontSize = 11.sp)
+                    }
+                }
+            }
+        } },
+        confirmButton = { TextButton(onClick = {
+            if(coverBrand.isNotBlank() && coverCats.isNotEmpty()) {
+                scope.launch {
+                    withContext(Dispatchers.IO) { saveCoverage(ctx, coverFor, coverBrand.trim().uppercase(), coverCats.toList()) }
+                    Toast.makeText(ctx, coverFor + " supplies " + coverBrand + " \u2192 " + coverCats.joinToString(", "), Toast.LENGTH_LONG).show()
+                    coverFor = ""; coverBrand = ""; coverCats = emptySet(); reload++
+                }
+            } else Toast.makeText(ctx, "Choose a brand and at least one category", Toast.LENGTH_SHORT).show()
+        }) { Text("SAVE") } },
+        dismissButton = { TextButton(onClick = { coverFor = "" }) { Text("CANCEL") } }
+    )
     Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
         Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
             Text("STOCK MASTER", fontSize = 22.sp, fontWeight = FontWeight.Bold)
@@ -1595,19 +1676,30 @@ fun ReceiveScreen(onDone: () -> Unit) {
         } },
         confirmButton = { TextButton(onClick = { pickDist = false; distQuery = "" }) { Text("CLOSE") } })
 
-    if(pickBrand) AlertDialog(
-        onDismissRequest = { pickBrand = false },
-        title = { Text("Brand") },
-        text = { Column {
-            OutlinedTextField(brandQuery, {brandQuery=it}, label={Text("Search")}, modifier=Modifier.fillMaxWidth(),
-                keyboardOptions=KeyboardOptions(imeAction=ImeAction.Search))
-            Column(Modifier.verticalScroll(rememberScrollState()).heightIn(max = 360.dp)) {
-                brands.filter { brandQuery.isBlank() || it.contains(brandQuery.trim(), true) }.forEach { b ->
-                    Text(b, fontSize = 12.sp, modifier = Modifier.fillMaxWidth().clickable { brand = b; pickBrand = false; brandQuery = "" }.padding(vertical = 6.dp))
+    if(pickBrand) {
+        val hisBrands = if(dist.isBlank()) emptyList() else brandsForDistributor(ctx, dist)
+        val offered = if(hisBrands.isEmpty()) brands else brands.filter { b -> hisBrands.any { it.equals(b, true) } }
+        AlertDialog(
+            onDismissRequest = { pickBrand = false },
+            title = { Text("Brand") },
+            text = { Column {
+                if(dist.isBlank()) {
+                    Text("Choose the distributor first - his brands are what you may receive.", fontSize = 10.sp, color = Color(0xFFB26A00))
+                } else if(hisBrands.isEmpty()) {
+                    Text("Nothing set for " + dist + " yet, so every brand is offered. Set his coverage under Stock \u2192 MASTER \u2192 SUPPLIES.", fontSize = 10.sp, color = Color(0xFFB26A00))
+                } else {
+                    Text("What " + dist + " supplies", fontSize = 10.sp, color = Color(0xFF2E7D32))
                 }
-            }
-        } },
-        confirmButton = { TextButton(onClick = { pickBrand = false; brandQuery = "" }) { Text("CLOSE") } })
+                OutlinedTextField(brandQuery, {brandQuery=it}, label={Text("Search")}, modifier=Modifier.fillMaxWidth(),
+                    keyboardOptions=KeyboardOptions(imeAction=ImeAction.Search))
+                Column(Modifier.verticalScroll(rememberScrollState()).heightIn(max = 340.dp)) {
+                    offered.filter { brandQuery.isBlank() || it.contains(brandQuery.trim(), true) }.forEach { b ->
+                        Text(b, fontSize = 12.sp, modifier = Modifier.fillMaxWidth().clickable { brand = b; pickBrand = false; brandQuery = "" }.padding(vertical = 6.dp))
+                    }
+                }
+            } },
+            confirmButton = { TextButton(onClick = { pickBrand = false; brandQuery = "" }) { Text("CLOSE") } })
+    }
 
     if(newSkuFor != null) AlertDialog(
         onDismissRequest = { newSkuFor = null },
