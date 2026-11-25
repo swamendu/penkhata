@@ -74,7 +74,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "5.8 · one nav"
+const val APP_VERSION = "5.9 · numbering"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -484,7 +484,8 @@ fun nextInvoiceNo(ctx: Context, prefs: android.content.SharedPreferences): Strin
         val prefix = (prefs.getString("sPrefix", "") ?: "").trim().ifEmpty { "INV" }
         return "$prefix/${fyLabel()}/" + String.format("%03d", prefs.getInt("nextInv", 1))
     }
-    return "${b.code}/${b.series}${fyLabel()}/" + String.format("%05d", b.nextSerial)
+    val n = String.format("%05d", b.nextSerial)
+    return if(b.series.isBlank()) "${b.code}/${fyLabel()}/$n" else "${b.code}/${b.series}/$n"
 }
 fun bumpInvoiceNo(ctx: Context, prefs: android.content.SharedPreferences) {
     try {
@@ -1913,7 +1914,7 @@ fun monthlySales(ctx: Context, months: Int): List<Pair<String, Double>> {
             }
         }
     }
-    var sName by remember{mutableStateOf(prefs.getString("sName","")?:"")}; var sState by remember{mutableStateOf(prefs.getString("sState","21")?:"21")}; var sPrefix by remember{mutableStateOf(prefs.getString("sPrefix","INV")?:"INV")}; var sAddr1 by remember{mutableStateOf(prefs.getString("sAddr1","")?:(prefs.getString("sAddr","")?:"").lineSequence().firstOrNull()?.trim()?:"")}; var sAddr2 by remember{mutableStateOf(prefs.getString("sAddr2","")?:(prefs.getString("sAddr","")?:"").lineSequence().drop(1).joinToString(" ").trim())}; var sPhone by remember{mutableStateOf(prefs.getString("sPhone","")?:"")}; var sEmail by remember{mutableStateOf(prefs.getString("sEmail","")?:"")}; var sLandmark by remember{mutableStateOf(prefs.getString("sLandmark","")?:"")}; var sPincode by remember{mutableStateOf(prefs.getString("sPincode","")?:"")}; var sUpi by remember{mutableStateOf(prefs.getString("sUpi","")?:"")}; var sGst by remember{mutableStateOf(prefs.getString("sGst","")?:"")}; var sBank by remember{mutableStateOf(prefs.getString("sBank","")?:"")}; var sIfsc by remember{mutableStateOf(prefs.getString("sIfsc","")?:"")}; var sJuris by remember{mutableStateOf(prefs.getString("sJuris","")?:"")}; var defTax by remember{mutableStateOf(prefs.getString("defTax","18")?:"18")}; var pendingPerson by remember { mutableStateOf<Person?>(null) }; var editPerson by remember { mutableStateOf<Person?>(null) }; var editName by remember { mutableStateOf("") }; var editRole by remember { mutableStateOf("") }; var editPhone by remember { mutableStateOf("") }; var editBranch by remember { mutableStateOf<Branch?>(null) }; var editCode by remember { mutableStateOf("") }; var editBName by remember { mutableStateOf("") }; var editSeries by remember { mutableStateOf("") }; var editGstin by remember { mutableStateOf("") }; var rolePin by remember { mutableStateOf("") }; var newPerson by remember{mutableStateOf("")}; var newRole by remember{mutableStateOf("MANAGER")}; var newPin by remember{mutableStateOf("")}; Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())){Text("SETTINGS",fontSize=24.sp,fontWeight=FontWeight.Bold);             Card(Modifier.padding(vertical=5.dp)){Column(Modifier.padding(10.dp)){
+    var sName by remember{mutableStateOf(prefs.getString("sName","")?:"")}; var sState by remember{mutableStateOf(prefs.getString("sState","21")?:"21")}; var sPrefix by remember{mutableStateOf(prefs.getString("sPrefix","INV")?:"INV")}; var sAddr1 by remember{mutableStateOf(prefs.getString("sAddr1","")?:(prefs.getString("sAddr","")?:"").lineSequence().firstOrNull()?.trim()?:"")}; var sAddr2 by remember{mutableStateOf(prefs.getString("sAddr2","")?:(prefs.getString("sAddr","")?:"").lineSequence().drop(1).joinToString(" ").trim())}; var sPhone by remember{mutableStateOf(prefs.getString("sPhone","")?:"")}; var sEmail by remember{mutableStateOf(prefs.getString("sEmail","")?:"")}; var sLandmark by remember{mutableStateOf(prefs.getString("sLandmark","")?:"")}; var sPincode by remember{mutableStateOf(prefs.getString("sPincode","")?:"")}; var sUpi by remember{mutableStateOf(prefs.getString("sUpi","")?:"")}; var sGst by remember{mutableStateOf(prefs.getString("sGst","")?:"")}; var sBank by remember{mutableStateOf(prefs.getString("sBank","")?:"")}; var sIfsc by remember{mutableStateOf(prefs.getString("sIfsc","")?:"")}; var sJuris by remember{mutableStateOf(prefs.getString("sJuris","")?:"")}; var defTax by remember{mutableStateOf(prefs.getString("defTax","18")?:"18")}; var pendingPerson by remember { mutableStateOf<Person?>(null) }; var editPerson by remember { mutableStateOf<Person?>(null) }; var editName by remember { mutableStateOf("") }; var editRole by remember { mutableStateOf("") }; var editPhone by remember { mutableStateOf("") }; var editBranch by remember { mutableStateOf<Branch?>(null) }; var editCode by remember { mutableStateOf("") }; var editBName by remember { mutableStateOf("") }; var editSeries by remember { mutableStateOf("") }; var editGstin by remember { mutableStateOf("") }; var editNext by remember { mutableStateOf("1") }; var rolePin by remember { mutableStateOf("") }; var newPerson by remember{mutableStateOf("")}; var newRole by remember{mutableStateOf("MANAGER")}; var newPin by remember{mutableStateOf("")}; Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())){Text("SETTINGS",fontSize=24.sp,fontWeight=FontWeight.Bold);             Card(Modifier.padding(vertical=5.dp)){Column(Modifier.padding(10.dp)){
                 val branches by produceState(initialValue = emptyList<Branch>(), ctx) { value = withContext(Dispatchers.IO) { loadBranches(ctx) } }
                 val people by produceState(initialValue = emptyList<Person>(), ctx) { value = withContext(Dispatchers.IO) { loadPeople(ctx) } }
                 Text("Outlet & Team", fontWeight=FontWeight.Bold)
@@ -1925,7 +1926,7 @@ fun monthlySales(ctx: Context, months: Int): List<Pair<String, Double>> {
                         Text(b.code + " \u00b7 " + b.name, fontSize=11.sp, modifier=Modifier.weight(1f), maxLines=1)
                         Text(b.series + " \u00b7 next " + String.format("%05d", b.nextSerial), fontSize=9.sp, color=Color.Gray)
                         Text("  \u270e", fontSize=13.sp, modifier=Modifier.clickable {
-                            editBranch = b; editCode = b.code; editBName = b.name; editSeries = b.series; editGstin = b.gstin
+                            editBranch = b; editCode = b.code; editBName = b.name; editSeries = b.series; editGstin = b.gstin; editNext = b.nextSerial.toString()
                         })
                     }
                 }
@@ -2024,13 +2025,19 @@ fun monthlySales(ctx: Context, months: Int): List<Pair<String, Double>> {
             }
             OutlinedTextField(editBName, {editBName=it}, label={Text("Outlet name")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
             OutlinedTextField(editGstin, {editGstin=it}, label={Text("GSTIN")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
-            Text("Numbers become CODE/SERIES<FY>/00001.", fontSize=9.sp, color=Color.Gray)
+            OutlinedTextField(editNext, {editNext=it}, label={Text("Next invoice number")}, modifier=Modifier.fillMaxWidth(),
+                keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Done))
+            val previewCode = editCode.trim().ifBlank { "CODE" }
+            val previewSeries = editSeries.trim()
+            val previewNo = String.format("%05d", editNext.toIntOrNull() ?: 1)
+            Text("Next bill: " + (if(previewSeries.isBlank()) previewCode + "/" + fyLabel() + "/" + previewNo else previewCode + "/" + previewSeries + "/" + previewNo),
+                fontSize=9.sp, color=Color(0xFF2E7D32))
         } },
         confirmButton = { TextButton(onClick = {
             val b0 = editBranch
             if(b0 != null && editCode.isNotBlank()) {
                 scope.launch {
-                    withContext(Dispatchers.IO) { saveBranch(ctx, b0.copy(code = editCode.trim(), name = editBName.trim(), series = editSeries.trim(), gstin = editGstin.trim())) }
+                    withContext(Dispatchers.IO) { saveBranch(ctx, b0.copy(code = editCode.trim(), name = editBName.trim(), series = editSeries.trim(), gstin = editGstin.trim(), nextSerial = editNext.toIntOrNull() ?: b0.nextSerial)) }
                     prefs.edit().putString("activeBranch", editCode.trim()).apply()
                     editBranch = null; onDataChanged()
                 }
