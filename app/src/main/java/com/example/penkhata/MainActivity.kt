@@ -82,7 +82,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "7.9 · supplies dialog"
+const val APP_VERSION = "8.0 · searchable pickers"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -1548,6 +1548,41 @@ fun StockAuditScreen(onDone: () -> Unit) {
     }
 }
 
+// A searchable dropdown: tap the field, search, pick. Used wherever a value must come
+// from the master rather than be typed, so a brand cannot be invented by a typo.
+@Composable
+fun PickerField(label: String, value: String, options: List<String>, onPick: (String) -> Unit,
+                modifier: Modifier = Modifier, allowClear: Boolean = false) {
+    var expanded by remember { mutableStateOf(false) }
+    var q by remember { mutableStateOf("") }
+    OutlinedButton(onClick = { expanded = true; q = "" }, modifier = modifier.height(52.dp)) {
+        Text(if(value.isBlank()) label else value, fontSize = 12.sp, maxLines = 1)
+    }
+    if(expanded) Dialog(onDismissRequest = { expanded = false }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Card(Modifier.fillMaxWidth(0.94f).fillMaxHeight(0.8f).background(Color.White)) {
+            Column(Modifier.padding(14.dp).fillMaxSize()) {
+                Text(label, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                OutlinedTextField(q, {q=it}, label={Text("Search")}, modifier = Modifier.fillMaxWidth(), singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search))
+                val hits = options.filter { q.isBlank() || it.contains(q.trim(), true) }
+                Text(if(hits.size > 60) "60 of " + hits.size + " - keep typing" else hits.size.toString() + " shown",
+                    fontSize = 9.sp, color = Color.Gray)
+                LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
+                    items(hits.take(60)) { o ->
+                        Text(o, fontSize = 13.sp, modifier = Modifier.fillMaxWidth()
+                            .clickable { onPick(o); expanded = false }
+                            .padding(vertical = 8.dp))
+                    }
+                }
+                Row(Modifier.fillMaxWidth(), Arrangement.End) {
+                    if(allowClear) TextButton(onClick = { onPick(""); expanded = false }) { Text("CLEAR") }
+                    TextButton(onClick = { expanded = false }) { Text("CANCEL") }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 fun StockMasterScreen(onDone: () -> Unit) {
     val ctx = LocalContext.current
@@ -1635,8 +1670,7 @@ fun StockMasterScreen(onDone: () -> Unit) {
                 Text("What does " + coverFor + " supply?", fontSize = 17.sp, fontWeight = FontWeight.Bold)
                 Text("Step 1: tap the brand. Step 2: tick the categories he supplies.", fontSize = 10.sp, color = Color.Gray)
                 Spacer(Modifier.height(6.dp))
-                OutlinedTextField(coverBrand, {coverBrand=it.uppercase()}, label={Text("Brand")},
-                    modifier = Modifier.fillMaxWidth(), singleLine = true)
+                PickerField("Tap to choose the brand", coverBrand, brands, { coverBrand = it }, Modifier.fillMaxWidth())
                 val brandHits = brands.filter { it.contains(coverBrand, true) && coverBrand.isNotBlank() }
                 if(brandHits.isNotEmpty()) {
                     Text("Tap to select", fontSize = 9.sp, color = Color.Gray)
@@ -1704,9 +1738,9 @@ fun StockMasterScreen(onDone: () -> Unit) {
                 OutlinedTextField(q, {q=it}, label={Text("Search model, SKU or brand")}, modifier=Modifier.fillMaxWidth(),
                     keyboardOptions=KeyboardOptions(imeAction=ImeAction.Search))
                 Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedTextField(fBrand, {fBrand=it.uppercase()}, label={Text("Brand")}, modifier=Modifier.weight(1f), singleLine = true)
+                    PickerField("Brand", fBrand, brands, { fBrand = it }, Modifier.weight(1f), allowClear = true)
                     Spacer(Modifier.width(4.dp))
-                    OutlinedTextField(fCat, {fCat=it}, label={Text("Category")}, modifier=Modifier.weight(1f), singleLine = true)
+                    PickerField("Category", fCat, cats, { fCat = it }, Modifier.weight(1f), allowClear = true)
                 }
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(checked = fOnlyNoSku, onCheckedChange = { fOnlyNoSku = it })
@@ -1743,9 +1777,9 @@ fun StockMasterScreen(onDone: () -> Unit) {
             Card(Modifier.padding(vertical = 4.dp)) { Column(Modifier.padding(12.dp)) {
                 Text("Add a model", fontWeight = FontWeight.Bold, fontSize = 11.sp)
                 Row(Modifier.fillMaxWidth()) {
-                    OutlinedTextField(newModelBrand, {newModelBrand=it.uppercase()}, label={Text("Brand")}, modifier=Modifier.weight(1f), singleLine = true)
+                    PickerField("Brand", newModelBrand, brands, { newModelBrand = it }, Modifier.weight(1f))
                     Spacer(Modifier.width(4.dp))
-                    OutlinedTextField(newModelCat, {newModelCat=it}, label={Text("Category")}, modifier=Modifier.weight(1f), singleLine = true)
+                    PickerField("Category", newModelCat, cats, { newModelCat = it }, Modifier.weight(1f))
                 }
                 OutlinedTextField(newModelName, {newModelName=it}, label={Text("Model, e.g. GALAXY F56 5G 8/128")}, modifier=Modifier.fillMaxWidth(), singleLine = true)
                 Button(onClick = {
@@ -2010,8 +2044,8 @@ fun ReceiveScreen(onDone: () -> Unit) {
                     }
                 }
             }
-            Row {
-                OutlinedTextField(nsCategory, {nsCategory=it}, label={Text("Category")}, modifier=Modifier.weight(1f), singleLine = true)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                PickerField("Category", nsCategory, loadCategories(ctx), { nsCategory = it }, Modifier.weight(1f))
                 Spacer(Modifier.width(4.dp))
                 OutlinedTextField(nsGst, {nsGst=it}, label={Text("GST %")}, modifier=Modifier.weight(0.6f), singleLine = true)
             }
