@@ -80,7 +80,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "7.6 · brand model sku"
+const val APP_VERSION = "7.7 · master search"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -1551,22 +1551,53 @@ fun StockMasterScreen(onDone: () -> Unit) {
     val focusManager = LocalFocusManager.current
     val scope = rememberCoroutineScope()
     var reload by remember { mutableStateOf(0) }
+    var tab by rememberSaveable { mutableStateOf("models") }
+
+    // search-first: nothing is listed until you ask, because there may be thousands
+    var q by rememberSaveable { mutableStateOf("") }
+    var fBrand by rememberSaveable { mutableStateOf("") }
+    var fCat by rememberSaveable { mutableStateOf("") }
+    var fOnlyNoSku by rememberSaveable { mutableStateOf(false) }
+
+    var brandQ by rememberSaveable { mutableStateOf("") }
+    var catQ by rememberSaveable { mutableStateOf("") }
+    var distQ by rememberSaveable { mutableStateOf("") }
+
     var newBrand by rememberSaveable { mutableStateOf("") }
     var newCat by rememberSaveable { mutableStateOf("") }
     var newDist by rememberSaveable { mutableStateOf("") }
     var newDistLimit by rememberSaveable { mutableStateOf("") }
-    var coverFor by remember { mutableStateOf("") }
-    var coverBrand by remember { mutableStateOf("") }
-    var coverCats by remember { mutableStateOf(setOf<String>()) }
+    var newDistDays by rememberSaveable { mutableStateOf("30") }
+
     var newModelBrand by rememberSaveable { mutableStateOf("") }
     var newModelName by rememberSaveable { mutableStateOf("") }
     var newModelCat by rememberSaveable { mutableStateOf("Mobile") }
     var skuForModel by remember { mutableStateOf<Model?>(null) }
     var skuCode by remember { mutableStateOf("") }
-    var skuVariant by remember { mutableStateOf("") }
+    var coverFor by remember { mutableStateOf("") }
+    var coverBrand by remember { mutableStateOf("") }
+    var coverCats by remember { mutableStateOf(setOf<String>()) }
+
+    val brands by produceState(initialValue = emptyList<String>(), reload) { value = withContext(Dispatchers.IO) { loadBrands(ctx) } }
+    val cats by produceState(initialValue = emptyList<String>(), reload) { value = withContext(Dispatchers.IO) { loadCategories(ctx) } }
+    val dists by produceState(initialValue = emptyList<Distributor>(), reload) { value = withContext(Dispatchers.IO) { loadDistributors(ctx) } }
+    val models by produceState(initialValue = emptyList<Model>(), reload) { value = withContext(Dispatchers.IO) { loadModels(ctx) } }
+    val skus by produceState(initialValue = emptyList<SkuInfo>(), reload) { value = withContext(Dispatchers.IO) { loadSkus(ctx) } }
+
+    fun skusOf(m: Model): List<SkuInfo> = skus.filter { it.model.equals(m.name, true) && it.brand.equals(m.brand, true) }
+    fun matches(m: Model): Boolean {
+        val skuText = skusOf(m).joinToString(" ") { it.sku }
+        val hay = (m.brand + " " + m.name + " " + m.category + " " + skuText).lowercase()
+        if(q.isNotBlank() && !q.trim().lowercase().split(" ").all { hay.contains(it) }) return false
+        if(fBrand.isNotBlank() && !m.brand.equals(fBrand, true)) return false
+        if(fCat.isNotBlank() && !m.category.equals(fCat, true)) return false
+        if(fOnlyNoSku && skusOf(m).isNotEmpty()) return false
+        return true
+    }
+
     if(skuForModel != null) AlertDialog(
         onDismissRequest = { skuForModel = null },
-        title = { Text("Add a SKU to " + (skuForModel?.name ?: "")) },
+        title = { Text("Add a SKU") },
         text = { Column {
             Text("Brand: " + (skuForModel?.brand ?: "") + "   Model: " + (skuForModel?.name ?: ""), fontSize = 10.sp, color = Color.Gray)
             OutlinedTextField(skuCode, {skuCode=it}, label={Text("SKU from the box, e.g. E556B 8/128")}, modifier=Modifier.fillMaxWidth())
@@ -1579,33 +1610,30 @@ fun StockMasterScreen(onDone: () -> Unit) {
                     withContext(Dispatchers.IO) {
                         saveSku(ctx, SkuInfo(skuCode.trim(), m.brand, m.category, m.name, "", "", 18.0, 0.0, identTypeFor(m.category)))
                     }
-                    skuForModel = null; skuCode = ""; skuVariant = ""; reload++
+                    skuForModel = null; skuCode = ""; reload++
                     Toast.makeText(ctx, "SKU added under " + m.name, Toast.LENGTH_SHORT).show()
                 }
             }
         }) { Text("SAVE SKU") } },
         dismissButton = { TextButton(onClick = { skuForModel = null }) { Text("CANCEL") } }
     )
+
     if(coverFor.isNotBlank()) AlertDialog(
         onDismissRequest = { coverFor = "" },
         title = { Text("What does " + coverFor + " supply?") },
         text = { Column {
             Text("Pick a brand he is authorised for, then the categories within it.", fontSize = 10.sp, color = Color.Gray)
             OutlinedTextField(coverBrand, {coverBrand=it.uppercase()}, label={Text("Brand")}, modifier=Modifier.fillMaxWidth())
-            Text("Tap a brand below, or type it", fontSize = 9.sp, color = Color.Gray)
-            Column(Modifier.verticalScroll(rememberScrollState()).heightIn(max = 120.dp)) {
-                loadBrands(ctx).filter { it.contains(coverBrand, true) && coverBrand.isNotBlank() }.take(12).forEach { b ->
+            Column(Modifier.verticalScroll(rememberScrollState()).heightIn(max = 110.dp)) {
+                brands.filter { it.contains(coverBrand, true) && coverBrand.isNotBlank() }.take(10).forEach { b ->
                     Text(b, fontSize = 11.sp, modifier = Modifier.fillMaxWidth().clickable { coverBrand = b }.padding(vertical = 3.dp))
                 }
             }
             Divider(Modifier.padding(vertical = 4.dp))
-            Text("Categories", fontWeight = FontWeight.Bold, fontSize = 11.sp)
-            Column(Modifier.verticalScroll(rememberScrollState()).heightIn(max = 200.dp)) {
-                loadCategories(ctx).forEach { cat ->
+            Column(Modifier.verticalScroll(rememberScrollState()).heightIn(max = 190.dp)) {
+                cats.forEach { cat ->
                     val on = coverCats.contains(cat)
-                    Row(Modifier.fillMaxWidth().clickable {
-                        coverCats = if(on) coverCats - cat else coverCats + cat
-                    }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.fillMaxWidth().clickable { coverCats = if(on) coverCats - cat else coverCats + cat }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(checked = on, onCheckedChange = { coverCats = if(on) coverCats - cat else coverCats + cat })
                         Text(cat, fontSize = 11.sp)
                     }
@@ -1616,111 +1644,189 @@ fun StockMasterScreen(onDone: () -> Unit) {
             if(coverBrand.isNotBlank() && coverCats.isNotEmpty()) {
                 scope.launch {
                     withContext(Dispatchers.IO) { saveCoverage(ctx, coverFor, coverBrand.trim().uppercase(), coverCats.toList()) }
-                    Toast.makeText(ctx, coverFor + " supplies " + coverBrand + " \u2192 " + coverCats.joinToString(", "), Toast.LENGTH_LONG).show()
                     coverFor = ""; coverBrand = ""; coverCats = emptySet(); reload++
                 }
             } else Toast.makeText(ctx, "Choose a brand and at least one category", Toast.LENGTH_SHORT).show()
         }) { Text("SAVE") } },
         dismissButton = { TextButton(onClick = { coverFor = "" }) { Text("CANCEL") } }
     )
+
     Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
         Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
             Text("STOCK MASTER", fontSize = 22.sp, fontWeight = FontWeight.Bold)
             TextButton(onClick = { onDone() }) { Text("BACK") }
         }
-        Text("Set these up once. Brands and categories are what a challan line is chosen from.", fontSize = 10.sp, color = Color.Gray)
-        Spacer(Modifier.height(8.dp))
-Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(12.dp)) {
-            var expanded by rememberSaveable { mutableStateOf(true) }
-            Button(onClick = { expanded = !expanded }, modifier = Modifier.fillMaxWidth()) {
-                Text(if(expanded) "HIDE MASTER DATA" else "MASTER DATA  \u00b7  brands, categories, distributors")
+        Row(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+            listOf("models" to "Models", "brands" to "Brands", "distributors" to "Distributors").forEach { (id, label) ->
+                Button(onClick = { tab = id }, modifier = Modifier.weight(1f).padding(horizontal = 2.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = if(tab == id) Color(0xFF2E7D32) else Color.LightGray)) {
+                    Text(label, fontSize = 9.sp, maxLines = 1, color = if(tab == id) Color.White else Color.Black)
+                }
             }
-            if(expanded) {
-                val brands by produceState(initialValue = emptyList<String>(), reload) { value = withContext(Dispatchers.IO) { loadBrands(ctx) } }
-                val cats by produceState(initialValue = emptyList<String>(), reload) { value = withContext(Dispatchers.IO) { loadCategories(ctx) } }
-                val dists by produceState(initialValue = emptyList<Distributor>(), reload) { value = withContext(Dispatchers.IO) { loadDistributors(ctx) } }
-                Divider(Modifier.padding(vertical = 4.dp))
-                Text("Brands (" + brands.size + ")", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                Text(brands.joinToString("  \u00b7  "), fontSize = 9.sp, color = Color.Gray, maxLines = 6)
-                Row {
-                    OutlinedTextField(newBrand, {newBrand=it}, label={Text("Add brand")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+        }
+
+        if(tab == "models") {
+            Card(Modifier.padding(vertical = 4.dp)) { Column(Modifier.padding(12.dp)) {
+                OutlinedTextField(q, {q=it}, label={Text("Search model, SKU or brand")}, modifier=Modifier.fillMaxWidth(),
+                    keyboardOptions=KeyboardOptions(imeAction=ImeAction.Search))
+                Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(fBrand, {fBrand=it.uppercase()}, label={Text("Brand")}, modifier=Modifier.weight(1f), singleLine = true)
                     Spacer(Modifier.width(4.dp))
-                    Button(onClick = { scope.launch { withContext(Dispatchers.IO) { addBrand(ctx, newBrand) }; newBrand=""; reload++ } }) { Text("ADD") }
+                    OutlinedTextField(fCat, {fCat=it}, label={Text("Category")}, modifier=Modifier.weight(1f), singleLine = true)
                 }
-                Divider(Modifier.padding(vertical = 4.dp))
-                Text("Categories (" + cats.size + ")", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                Text(cats.joinToString("  \u00b7  "), fontSize = 9.sp, color = Color.Gray, maxLines = 4)
-                Row {
-                    OutlinedTextField(newCat, {newCat=it}, label={Text("Add category")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
-                    Spacer(Modifier.width(4.dp))
-                    Button(onClick = { scope.launch { withContext(Dispatchers.IO) { addCategory(ctx, newCat) }; newCat=""; reload++ } }) { Text("ADD") }
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = fOnlyNoSku, onCheckedChange = { fOnlyNoSku = it })
+                    Text("Only models with no SKU", fontSize = 10.sp)
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = { q=""; fBrand=""; fCat=""; fOnlyNoSku=false }) { Text("CLEAR", fontSize = 9.sp) }
                 }
-                Divider(Modifier.padding(vertical = 6.dp))
-                Text("Models (" + loadModels(ctx).size + ")", fontWeight = FontWeight.Bold, fontSize = 11.sp)
-                Text("Brand \u2192 Model \u2192 SKU. SAMSUNG / GALAXY F56 5G 8/128 / E556B 8/128. The model name carries the variant.", fontSize = 9.sp, color = Color.Gray)
-                loadModels(ctx).take(40).forEach { m ->
-                    val its = skusForModel(ctx, m.id)
+                val hits = models.filter { matches(it) }
+                val shown = if(q.isBlank() && fBrand.isBlank() && fCat.isBlank() && !fOnlyNoSku) models.take(20) else hits.take(30)
+                Text(if(hits.size > shown.size) shown.size.toString() + " of " + hits.size + " - keep typing to narrow" else hits.size.toString() + " model(s)",
+                    fontSize = 9.sp, color = Color.Gray)
+                Spacer(Modifier.height(4.dp))
+                shown.forEach { m ->
+                    val its = skusOf(m)
                     Column(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
                                 Text(m.brand + "  " + m.name, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-                                Text(m.category + "  \u00b7  " + its.size + " SKU" + (if(its.size == 1) "" else "s"), fontSize = 9.sp, color = Color.Gray)
+                                Text(m.category + "  \u00b7  " + (if(its.isEmpty()) "no SKU yet" else its.size.toString() + " SKU"), fontSize = 9.sp,
+                                    color = if(its.isEmpty()) Color(0xFFB26A00) else Color.Gray)
                             }
-                            TextButton(onClick = { skuForModel = m; skuVariant = ""; skuCode = "" }) { Text("+ SKU", fontSize = 9.sp) }
+                            TextButton(onClick = { skuForModel = m; skuCode = "" }) { Text("+ SKU", fontSize = 9.sp) }
                             Text("\u00d7", fontSize = 11.sp, color = Color.Red, modifier = Modifier.clickable {
                                 scope.launch { withContext(Dispatchers.IO) { deleteModel(ctx, m.id) }; reload++ }
                             }.padding(horizontal = 6.dp))
                         }
-                        its.forEach { k ->
-                            Text("      SKU  " + k.sku, fontSize = 9.sp, color = Color(0xFF2E7D32))
+                        its.forEach { k -> Text("      SKU  " + k.sku, fontSize = 9.sp, color = Color(0xFF2E7D32)) }
+                    }
+                    Divider()
+                }
+            }}
+
+            Card(Modifier.padding(vertical = 4.dp)) { Column(Modifier.padding(12.dp)) {
+                Text("Add a model", fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                Row(Modifier.fillMaxWidth()) {
+                    OutlinedTextField(newModelBrand, {newModelBrand=it.uppercase()}, label={Text("Brand")}, modifier=Modifier.weight(1f), singleLine = true)
+                    Spacer(Modifier.width(4.dp))
+                    OutlinedTextField(newModelCat, {newModelCat=it}, label={Text("Category")}, modifier=Modifier.weight(1f), singleLine = true)
+                }
+                OutlinedTextField(newModelName, {newModelName=it}, label={Text("Model, e.g. GALAXY F56 5G 8/128")}, modifier=Modifier.fillMaxWidth(), singleLine = true)
+                Button(onClick = {
+                    if(newModelBrand.isNotBlank() && newModelName.isNotBlank()) {
+                        scope.launch {
+                            withContext(Dispatchers.IO) { saveModel(ctx, Model(0, newModelBrand, newModelCat, newModelName)) }
+                            Toast.makeText(ctx, "Model saved - now add its SKU", Toast.LENGTH_SHORT).show()
+                            newModelName = ""; reload++
                         }
                     }
+                }, modifier = Modifier.fillMaxWidth()) { Text("ADD MODEL") }
+            }}
+        }
+
+        if(tab == "brands") {
+            Card(Modifier.padding(vertical = 4.dp)) { Column(Modifier.padding(12.dp)) {
+                Text("Brands (" + brands.size + ")", fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                OutlinedTextField(brandQ, {brandQ=it}, label={Text("Search brand")}, modifier=Modifier.fillMaxWidth())
+                val shown = brands.filter { brandQ.isBlank() || it.contains(brandQ.trim(), true) }.take(40)
+                Text(if(shown.size < brands.filter { brandQ.isBlank() || it.contains(brandQ.trim(), true) }.size) "40 of many - keep typing" else shown.size.toString() + " shown",
+                    fontSize = 9.sp, color = Color.Gray)
+                shown.forEach { b ->
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(b, fontSize = 11.sp, modifier = Modifier.weight(1f))
+                        Text("\u00d7", fontSize = 12.sp, color = Color.Red, modifier = Modifier.clickable {
+                            scope.launch { withContext(Dispatchers.IO) { deleteBrand(ctx, b) }; reload++ }
+                        }.padding(horizontal = 8.dp))
+                    }
                 }
-                Row {
-                    OutlinedTextField(newModelBrand, {newModelBrand=it.uppercase()}, label={Text("Brand")}, modifier=Modifier.weight(0.7f))
-                    Spacer(Modifier.width(4.dp))
-                    OutlinedTextField(newModelName, {newModelName=it}, label={Text("Model, e.g. GALAXY F56 5G 8/128")}, modifier=Modifier.weight(1.6f))
-                }
-                Row {
-                    OutlinedTextField(newModelCat, {newModelCat=it}, label={Text("Category")}, modifier=Modifier.weight(1f))
-                    Spacer(Modifier.width(4.dp))
+                Row(Modifier.fillMaxWidth()) {
+                    OutlinedTextField(newBrand, {newBrand=it}, label={Text("Add brand")}, modifier=Modifier.weight(1f))
                     Button(onClick = {
-                        if(newModelBrand.isNotBlank() && newModelName.isNotBlank()) {
-                            scope.launch {
-                                withContext(Dispatchers.IO) { saveModel(ctx, Model(0, newModelBrand, newModelCat, newModelName)) }
-                                Toast.makeText(ctx, "Model saved", Toast.LENGTH_SHORT).show()
-                                newModelName = ""; reload++
+                        val name = newBrand
+                        scope.launch {
+                            val added = withContext(Dispatchers.IO) { addBrand(ctx, name) }
+                            Toast.makeText(ctx, if(added) name.trim().uppercase() + " added" else name.trim().uppercase() + " is already in the list", Toast.LENGTH_SHORT).show()
+                            newBrand = ""; reload++
+                        }
+                    }) { Text("ADD") }
+                }
+            }}
+
+            Card(Modifier.padding(vertical = 4.dp)) { Column(Modifier.padding(12.dp)) {
+                Text("Categories (" + cats.size + ")", fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                OutlinedTextField(catQ, {catQ=it}, label={Text("Search category")}, modifier=Modifier.fillMaxWidth())
+                cats.filter { catQ.isBlank() || it.contains(catQ.trim(), true) }.take(40).forEach { c ->
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(c, fontSize = 11.sp, modifier = Modifier.weight(1f))
+                        Text("\u00d7", fontSize = 12.sp, color = Color.Red, modifier = Modifier.clickable {
+                            scope.launch { withContext(Dispatchers.IO) { deleteCategory(ctx, c) }; reload++ }
+                        }.padding(horizontal = 8.dp))
+                    }
+                }
+                Row(Modifier.fillMaxWidth()) {
+                    OutlinedTextField(newCat, {newCat=it}, label={Text("Add category")}, modifier=Modifier.weight(1f))
+                    Button(onClick = {
+                        val name = newCat
+                        scope.launch {
+                            val added = withContext(Dispatchers.IO) { addCategory(ctx, name) }
+                            Toast.makeText(ctx, if(added) name.trim() + " added" else name.trim() + " is already in the list", Toast.LENGTH_SHORT).show()
+                            newCat = ""; reload++
+                        }
+                    }) { Text("ADD") }
+                }
+            }}
+        }
+
+        if(tab == "distributors") {
+            Card(Modifier.padding(vertical = 4.dp)) { Column(Modifier.padding(12.dp)) {
+                Text("Distributors (" + dists.size + ")", fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                OutlinedTextField(distQ, {distQ=it}, label={Text("Search distributor")}, modifier=Modifier.fillMaxWidth())
+                dists.filter { distQ.isBlank() || it.name.contains(distQ.trim(), true) }.forEach { d ->
+                    val cover = loadCoverage(ctx, d.name)
+                    Column(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(d.name, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                                Text("limit \u20b9" + fmt(d.creditLimit) + "  \u00b7  " + d.creditDays + " days", fontSize = 9.sp, color = Color.Gray)
+                            }
+                            TextButton(onClick = { coverFor = d.name; coverBrand = ""; coverCats = emptySet() }) { Text("SUPPLIES", fontSize = 9.sp) }
+                            Text("\u00d7", fontSize = 12.sp, color = Color.Red, modifier = Modifier.clickable {
+                                scope.launch { withContext(Dispatchers.IO) { deleteDistributor(ctx, d.id) }; reload++ }
+                            }.padding(horizontal = 6.dp))
+                        }
+                        if(cover.isEmpty()) Text("Nothing set yet - tap SUPPLIES", fontSize = 9.sp, color = Color(0xFFB26A00))
+                        else cover.forEach { pair ->
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Text(pair.first + " \u2192 " + pair.second.replace(",", ", "), fontSize = 9.sp, color = Color(0xFF2E7D32), modifier = Modifier.weight(1f))
+                                Text("\u00d7", fontSize = 11.sp, color = Color.Red, modifier = Modifier.clickable {
+                                    scope.launch { withContext(Dispatchers.IO) { deleteCoverage(ctx, d.name, pair.first) }; reload++ }
+                                }.padding(horizontal = 6.dp))
                             }
                         }
-                    }) { Text("ADD MODEL") }
-                }
-                Divider(Modifier.padding(vertical = 4.dp))
-                Text("Distributors (" + dists.size + ")", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                dists.forEach { d ->
-                    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text(d.name, fontSize = 11.sp, maxLines = 1)
-                            Text("limit \u20b9" + fmt(d.creditLimit) + "  \u00b7  " + d.creditDays + " days" + (if(d.brands.isBlank()) "" else "  \u00b7  " + d.brands), fontSize = 9.sp, color = Color.Gray, maxLines = 1)
-                        }
-                        TextButton(onClick = { scope.launch { withContext(Dispatchers.IO) { deleteDistributor(ctx, d.id) }; reload++ } }) { Text("DELETE", fontSize = 9.sp, color = Color.Red) }
                     }
+                    Divider()
                 }
-                Row {
-                    OutlinedTextField(newDist, {newDist=it}, label={Text("Distributor name")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+                Row(Modifier.fillMaxWidth()) {
+                    OutlinedTextField(newDist, {newDist=it}, label={Text("Name")}, modifier=Modifier.weight(1.3f), singleLine = true)
                     Spacer(Modifier.width(4.dp))
-                    OutlinedTextField(newDistLimit, {newDistLimit=it}, label={Text("Credit \u20b9")}, modifier=Modifier.weight(0.7f), keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+                    OutlinedTextField(newDistLimit, {newDistLimit=it}, label={Text("Credit \u20b9")}, modifier=Modifier.weight(1f), singleLine = true)
+                    Spacer(Modifier.width(4.dp))
+                    OutlinedTextField(newDistDays, {newDistDays=it}, label={Text("Days")}, modifier=Modifier.weight(0.7f), singleLine = true)
                 }
                 Button(onClick = {
                     if(newDist.isNotBlank()) {
                         scope.launch {
-                            withContext(Dispatchers.IO) { saveDistributor(ctx, Distributor(0, newDist.trim(), "", "", "", newDistLimit.toDoubleOrNull() ?: 0.0, 0, "", true)) }
-                            newDist=""; newDistLimit=""; reload++
+                            withContext(Dispatchers.IO) {
+                                saveDistributor(ctx, Distributor(0, newDist.trim(), "", "", "", newDistLimit.toDoubleOrNull() ?: 0.0,
+                                    newDistDays.toIntOrNull() ?: 30, "", true))
+                            }
+                            newDist=""; newDistLimit=""; newDistDays="30"; reload++
                         }
                     }
                 }, modifier = Modifier.fillMaxWidth()) { Text("ADD DISTRIBUTOR") }
-            }
-        }}
-        
+            }}
+        }
     }
 }
 
