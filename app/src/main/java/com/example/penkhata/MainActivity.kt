@@ -80,7 +80,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "7.8.1 · sku fix"
+const val APP_VERSION = "7.8.2 · dialog scroll"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -1626,22 +1626,19 @@ fun StockMasterScreen(onDone: () -> Unit) {
     if(coverFor.isNotBlank()) AlertDialog(
         onDismissRequest = { coverFor = "" },
         title = { Text("What does " + coverFor + " supply?") },
-        text = { Column {
+        text = { Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
             Text("Pick a brand he is authorised for, then the categories within it.", fontSize = 10.sp, color = Color.Gray)
-            OutlinedTextField(coverBrand, {coverBrand=it.uppercase()}, label={Text("Brand")}, modifier=Modifier.fillMaxWidth())
-            Column(Modifier.verticalScroll(rememberScrollState()).heightIn(max = 110.dp)) {
-                brands.filter { it.contains(coverBrand, true) && coverBrand.isNotBlank() }.take(10).forEach { b ->
-                    Text(b, fontSize = 11.sp, modifier = Modifier.fillMaxWidth().clickable { coverBrand = b }.padding(vertical = 3.dp))
-                }
+            OutlinedTextField(coverBrand, {coverBrand=it.uppercase()}, label={Text("Brand")}, modifier=Modifier.fillMaxWidth(), singleLine = true)
+            brands.filter { it.contains(coverBrand, true) && coverBrand.isNotBlank() }.take(6).forEach { b ->
+                Text(b, fontSize = 11.sp, modifier = Modifier.fillMaxWidth().clickable { coverBrand = b }.padding(vertical = 3.dp))
             }
             Divider(Modifier.padding(vertical = 4.dp))
-            Column(Modifier.verticalScroll(rememberScrollState()).heightIn(max = 190.dp)) {
-                cats.forEach { cat ->
-                    val on = coverCats.contains(cat)
-                    Row(Modifier.fillMaxWidth().clickable { coverCats = if(on) coverCats - cat else coverCats + cat }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(checked = on, onCheckedChange = { coverCats = if(on) coverCats - cat else coverCats + cat })
-                        Text(cat, fontSize = 11.sp)
-                    }
+            Text("Categories - tick what he supplies", fontWeight = FontWeight.Bold, fontSize = 11.sp)
+            cats.forEach { cat ->
+                val on = coverCats.contains(cat)
+                Row(Modifier.fillMaxWidth().clickable { coverCats = if(on) coverCats - cat else coverCats + cat }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = on, onCheckedChange = { coverCats = if(on) coverCats - cat else coverCats + cat })
+                    Text(cat, fontSize = 11.sp)
                 }
             }
         } },
