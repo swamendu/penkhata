@@ -1,5 +1,6 @@
 package com.example.penkhata
 
+import android.app.Activity
 import android.content.Context
 import android.content.ActivityNotFoundException
 import androidx.biometric.BiometricManager
@@ -74,7 +75,11 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-const val APP_VERSION = "6.1.1 · hotfix"
+// True while a file picker we opened is in flight. The app goes to the background for
+// it, and locking then would replace the screen holding the pending result.
+var pickerInFlight by mutableStateOf(false)
+
+const val APP_VERSION = "6.1.2 · hotfix"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -561,10 +566,20 @@ fun MainAppScreen() {
     var isLocked by remember { mutableStateOf(hasPin(prefs)) }
     var menuOpen by remember { mutableStateOf(false) }
     // lock again when the app goes to the background, not just on a cold start
+    // FLAG_SECURE stops screenshots and screen recording. The owner may capture; a
+    // manager, stock keeper or rep may not, so the shop's data cannot walk out as an image.
+    val windowActivity = ctx as? Activity
+    LaunchedEffect(activeRole(prefs), prefs.getBoolean("blockShots", true)) {
+        try {
+            if(windowActivity != null && prefs.getBoolean("blockShots", true) && activeRole(prefs) != "OWNER")
+                windowActivity.window.setFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE, android.view.WindowManager.LayoutParams.FLAG_SECURE)
+            else windowActivity?.window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        } catch(e: Exception) { }
+    }
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner, hasPinState) {
         val obs = LifecycleEventObserver { _, event ->
-            if(event == Lifecycle.Event.ON_STOP && hasPinState) isLocked = true
+            if(event == Lifecycle.Event.ON_STOP && hasPinState && !pickerInFlight) isLocked = true
         }
         lifecycleOwner.lifecycle.addObserver(obs)
         onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
@@ -1594,6 +1609,7 @@ fun monthlySales(ctx: Context, months: Int): List<Pair<String, Double>> {
     var expAmount by rememberSaveable { mutableStateOf("") }
     val (startMs, endMs) = monthRange(offset)
     val xlsxLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")) { uri ->
+        pickerInFlight = false
         if(uri != null) {
             try {
                 ctx.contentResolver.openOutputStream(uri)?.use { it.write(exportWorkbook(ctx)) }
@@ -1602,6 +1618,7 @@ fun monthlySales(ctx: Context, months: Int): List<Pair<String, Double>> {
         }
     }
     val registerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")) { uri ->
+        pickerInFlight = false
         if(uri != null) {
             try {
                 ctx.contentResolver.openOutputStream(uri)?.use { it.write(buildRegisterXlsx(ctx, startMs, endMs)) }
@@ -1610,6 +1627,7 @@ fun monthlySales(ctx: Context, months: Int): List<Pair<String, Double>> {
         }
     }
     val csvLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri ->
+        pickerInFlight = false
         if(uri != null) {
             try {
                 ctx.contentResolver.openOutputStream(uri)?.use { it.write(exportCsvBills(ctx, startMs, endMs).toByteArray()) }
@@ -1695,14 +1713,17 @@ fun monthlySales(ctx: Context, months: Int): List<Pair<String, Double>> {
             Text("XLSX carries everything: bills, lines, ledger, stock, expenses, settings. CSV carries this month's bills.", fontSize = 10.sp)
             Spacer(Modifier.height(8.dp))
             Button(onClick = {
+                pickerInFlight = true
                 xlsxLauncher.launch("PenKhata-export-" + SimpleDateFormat("yyyyMMdd", Locale.ENGLISH).format(Date()) + ".xlsx")
             }, modifier = Modifier.fillMaxWidth()) { Text("EXPORT XLSX") }
             Spacer(Modifier.height(6.dp))
             Button(onClick = {
+                pickerInFlight = true
                 csvLauncher.launch("PenKhata-bills-" + SimpleDateFormat("MMMyyyy", Locale.ENGLISH).format(Date(startMs)) + ".csv")
             }, modifier = Modifier.fillMaxWidth()) { Text("EXPORT CSV (THIS MONTH)") }
             Spacer(Modifier.height(6.dp))
             Button(onClick = {
+                pickerInFlight = true
                 registerLauncher.launch("Installation-Register-" + SimpleDateFormat("MMMyyyy", Locale.ENGLISH).format(Date(startMs)) + ".xlsx")
             }, modifier = Modifier.fillMaxWidth()) { Text("INSTALLATION REGISTER (XLSX)") }
         }}
@@ -1904,6 +1925,7 @@ fun monthlySales(ctx: Context, months: Int): List<Pair<String, Double>> {
     // encrypted backups are raw AES-GCM bytes: declaring them as zip made the picker
     // append ".zip" and every file manager try (and fail) to extract them
     val backupEncLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
+        pickerInFlight = false
         if(uri != null) {
             try {
                 val payload = backupPayload(ctx)
@@ -1915,6 +1937,7 @@ fun monthlySales(ctx: Context, months: Int): List<Pair<String, Double>> {
         }
     }
     val backupLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+        pickerInFlight = false
         if(uri != null) {
             try {
                 val payload = backupPayload(ctx)
@@ -1931,6 +1954,7 @@ fun monthlySales(ctx: Context, months: Int): List<Pair<String, Double>> {
     var confirmMaster by remember { mutableStateOf(false) }
     var confirmAll by remember { mutableStateOf(false) }
     val restoreLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        pickerInFlight = false
         if(uri != null) {
             try {
                 val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: ByteArray(0)
@@ -2063,8 +2087,9 @@ if(settingsTab == "backup") {
             } else {
 Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Backup & Restore", fontWeight=FontWeight.Bold); Text("One file with your data, a readable XLSX copy and any stored PDFs. Add a password to encrypt it - there is no recovery if you forget it. The app PIN is never included.", fontSize=10.sp); OutlinedTextField(backupPw, {backupPw=it}, label={Text("Password (optional)")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.height(8.dp)); Button(onClick={
                 val name = "penkhata-backup-" + SimpleDateFormat("yyyyMMdd-HHmm", Locale.ENGLISH).format(Date())
+                pickerInFlight = true
                 if(backupPw.isBlank()) backupLauncher.launch("$name.zip") else backupEncLauncher.launch("$name.pkh")
-            }, modifier=Modifier.fillMaxWidth()){ Text("BACKUP DATA") }; Spacer(Modifier.height(6.dp)); Button(onClick={ restoreLauncher.launch(arrayOf("application/json","text/plain","*/*")) }, modifier=Modifier.fillMaxWidth()){ Text("RESTORE DATA") } }}; Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Reset", fontWeight=FontWeight.Bold); Text("Master reset clears bills, PDFs, customers, stock, ledger and expenses but keeps every setting on this screen. Total reset clears those as well and starts the app empty.", fontSize=10.sp); Spacer(Modifier.height(8.dp)); Button(onClick={ confirmMaster = true }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFEF6C00))){ Text("MASTER RESET (KEEP SETTINGS)") }; Spacer(Modifier.height(6.dp)); Button(onClick={ confirmAll = true }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFC62828))){ Text("TOTAL RESET (EVERYTHING)") } }};
+            }, modifier=Modifier.fillMaxWidth()){ Text("BACKUP DATA") }; Spacer(Modifier.height(6.dp)); Button(onClick={ pickerInFlight = true; restoreLauncher.launch(arrayOf("application/json","text/plain","*/*")) }, modifier=Modifier.fillMaxWidth()){ Text("RESTORE DATA") } }}; Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Reset", fontWeight=FontWeight.Bold); Text("Master reset clears bills, PDFs, customers, stock, ledger and expenses but keeps every setting on this screen. Total reset clears those as well and starts the app empty.", fontSize=10.sp); Spacer(Modifier.height(8.dp)); Button(onClick={ confirmMaster = true }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFEF6C00))){ Text("MASTER RESET (KEEP SETTINGS)") }; Spacer(Modifier.height(6.dp)); Button(onClick={ confirmAll = true }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFC62828))){ Text("TOTAL RESET (EVERYTHING)") } }};
             }
 }
      if(editPerson != null) AlertDialog(
