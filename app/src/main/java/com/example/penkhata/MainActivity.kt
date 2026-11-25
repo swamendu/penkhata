@@ -80,7 +80,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "7.7 · master search"
+const val APP_VERSION = "7.8.1 · sku fix"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -511,16 +511,17 @@ fun findSku(ctx: Context, sku: String): SkuInfo? = try {
             c.getString(4) ?: "", c.getString(5) ?: "", c.getDouble(6), c.getDouble(7), c.getString(8) ?: "SERIAL") else null
     }
 } catch(e: Exception) { null }
-fun saveSku(ctx: Context, k: SkuInfo) {
+fun saveSku(ctx: Context, k: SkuInfo): String? {
     val cv = android.content.ContentValues()
     cv.put("sku", k.sku); cv.put("brand", k.brand); cv.put("category", k.category); cv.put("model", k.model)
     cv.put("variant", k.variant); cv.put("hsn", k.hsn); cv.put("gstRate", k.gstRate); cv.put("mrp", k.mrp)
     cv.put("identType", k.identType)
-    try {
+    return try {
         // every SKU hangs under a model, created the first time that model is seen
         cv.put("modelId", saveModel(ctx, Model(0, k.brand, k.category, k.model)))
         db(ctx).writableDatabase.insertWithOnConflict("skus", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE)
-    } catch(e: Exception) { }
+        null
+    } catch(e: Exception) { e.message ?: e.javaClass.simpleName }
 }
 fun loadGrns(ctx: Context): List<Grn> {
     val out = mutableListOf<Grn>()
@@ -1607,11 +1608,15 @@ fun StockMasterScreen(onDone: () -> Unit) {
             val m = skuForModel
             if(m != null && skuCode.isNotBlank()) {
                 scope.launch {
-                    withContext(Dispatchers.IO) {
+                    val err = withContext(Dispatchers.IO) {
                         saveSku(ctx, SkuInfo(skuCode.trim(), m.brand, m.category, m.name, "", "", 18.0, 0.0, identTypeFor(m.category)))
                     }
-                    skuForModel = null; skuCode = ""; reload++
-                    Toast.makeText(ctx, "SKU added under " + m.name, Toast.LENGTH_SHORT).show()
+                    if(err == null) {
+                        skuForModel = null; skuCode = ""; reload++
+                        Toast.makeText(ctx, "SKU " + skuCode.trim() + " saved under " + m.name, Toast.LENGTH_LONG).show()
+                    } else {
+                        Toast.makeText(ctx, "Could not save the SKU: " + err, Toast.LENGTH_LONG).show()
+                    }
                 }
             }
         }) { Text("SAVE SKU") } },
@@ -1684,6 +1689,7 @@ fun StockMasterScreen(onDone: () -> Unit) {
                 val shown = if(q.isBlank() && fBrand.isBlank() && fCat.isBlank() && !fOnlyNoSku) models.take(20) else hits.take(30)
                 Text(if(hits.size > shown.size) shown.size.toString() + " of " + hits.size + " - keep typing to narrow" else hits.size.toString() + " model(s)",
                     fontSize = 9.sp, color = Color.Gray)
+                Text("SKUs in the database: " + countRows(ctx, "skus"), fontSize = 9.sp, color = Color(0xFF1565C0))
                 Spacer(Modifier.height(4.dp))
                 shown.forEach { m ->
                     val its = skusOf(m)
@@ -1958,30 +1964,54 @@ fun ReceiveScreen(onDone: () -> Unit) {
 
     if(newSkuFor != null) AlertDialog(
         onDismissRequest = { newSkuFor = null },
-        title = { Text("New SKU") },
+        title = { Text("New SKU - create it here") },
         text = { Column {
-            Text(newSkuFor ?: "", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-            OutlinedTextField(nsModel, {nsModel=it}, label={Text("Model, e.g. GALAXY F56 5G 8/128")}, modifier=Modifier.fillMaxWidth())
-            OutlinedTextField(nsCategory, {nsCategory=it}, label={Text("Category")}, modifier=Modifier.fillMaxWidth())
-            Row {
-                OutlinedTextField(nsHsn, {nsHsn=it}, label={Text("HSN")}, modifier=Modifier.weight(1f))
-                Spacer(Modifier.width(4.dp))
-                OutlinedTextField(nsGst, {nsGst=it}, label={Text("GST %")}, modifier=Modifier.weight(0.6f))
+            Text("SKU  " + (newSkuFor ?: ""), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            Text("Brand: " + brand, fontSize = 10.sp, color = Color.Gray)
+            OutlinedTextField(nsModel, {nsModel=it}, label={Text("Model, e.g. GALAXY F56 5G 8/128")}, modifier=Modifier.fillMaxWidth(), singleLine = true)
+            // pick one that already exists instead of retyping it
+            val existing = loadModels(ctx).filter {
+                it.brand.equals(brand, true) && (nsModel.isBlank() || it.name.contains(nsModel.trim(), true))
+            }.take(6)
+            if(existing.isNotEmpty()) {
+                Text("Or pick an existing model", fontSize = 9.sp, color = Color.Gray)
+                Column(Modifier.verticalScroll(rememberScrollState()).heightIn(max = 110.dp)) {
+                    existing.forEach { m ->
+                        Text(m.name, fontSize = 11.sp, modifier = Modifier.fillMaxWidth().clickable { nsModel = m.name; nsCategory = m.category }.padding(vertical = 3.dp))
+                    }
+                }
             }
+            Row {
+                OutlinedTextField(nsCategory, {nsCategory=it}, label={Text("Category")}, modifier=Modifier.weight(1f), singleLine = true)
+                Spacer(Modifier.width(4.dp))
+                OutlinedTextField(nsGst, {nsGst=it}, label={Text("GST %")}, modifier=Modifier.weight(0.6f), singleLine = true)
+            }
+            OutlinedTextField(nsHsn, {nsHsn=it}, label={Text("HSN")}, modifier=Modifier.fillMaxWidth(), singleLine = true)
+            Text("Saving creates the model if it is new, and adds the line to this challan.", fontSize = 9.sp, color = Color(0xFF2E7D32))
         } },
         confirmButton = { TextButton(onClick = {
             val sku = newSkuFor ?: return@TextButton
-            if(nsModel.isBlank()) return@TextButton
+            if(nsModel.isBlank()) { Toast.makeText(ctx, "The model name is needed", Toast.LENGTH_SHORT).show(); return@TextButton }
+            val units = lUnits.toIntOrNull() ?: 1
+            val price = lPrice.toDoubleOrNull() ?: 0.0
             scope.launch {
-                withContext(Dispatchers.IO) {
-                    saveSku(ctx, SkuInfo(sku, brand, nsCategory, nsModel, nsVariant, nsHsn,
+                val err = withContext(Dispatchers.IO) {
+                    saveSku(ctx, SkuInfo(sku.trim(), brand, nsCategory, nsModel, "", nsHsn,
                         nsGst.toDoubleOrNull() ?: 18.0, 0.0, identTypeFor(nsCategory)))
                 }
-                lSku = sku; lModel = nsModel; lVariant = nsVariant; lHsn = nsHsn; lGst = nsGst
+                if(err != null) { Toast.makeText(ctx, "Could not save: " + err, Toast.LENGTH_LONG).show(); return@launch }
+                // straight onto the challan, no second trip
+                if(price > 0.0) {
+                    lines = lines + GrnLine(sku.trim(), nsModel, "", nsCategory, nsHsn,
+                        nsGst.toDoubleOrNull() ?: 18.0, units, price, identTypeFor(nsCategory))
+                    lSku = ""; lModel = ""; lUnits = "1"; lPrice = ""
+                } else {
+                    lSku = sku.trim(); lModel = nsModel; lHsn = nsHsn; lGst = nsGst
+                }
                 newSkuFor = null
-                Toast.makeText(ctx, "SKU saved - now add the line", Toast.LENGTH_SHORT).show()
+                Toast.makeText(ctx, "Model and SKU saved" + (if(price > 0.0) ", line added" else ""), Toast.LENGTH_SHORT).show()
             }
-        }) { Text("SAVE SKU") } },
+        }) { Text("SAVE AND ADD") } },
         dismissButton = { TextButton(onClick = { newSkuFor = null }) { Text("CANCEL") } }
     )
 
@@ -2011,7 +2041,10 @@ fun ReceiveScreen(onDone: () -> Unit) {
             }, label={Text("SKU from the challan, e.g. SM-E556B 8/128")}, modifier=Modifier.fillMaxWidth())
             val known = findSku(ctx, lSku)
             if(known != null) Text("= " + known.model + (if(known.variant.isBlank()) "" else "  \u00b7  " + known.variant), fontSize = 10.sp, color = Color(0xFF2E7D32))
-            else if(lSku.isNotBlank()) Text("New SKU - fill the model and variant below", fontSize = 10.sp, color = Color(0xFFB26A00))
+            else if(lSku.isNotBlank()) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("New SKU", fontSize = 10.sp, color = Color(0xFFB26A00), modifier = Modifier.weight(1f))
+                TextButton(onClick = { newSkuFor = lSku.trim(); nsModel = lModel; nsCategory = "Mobile" }) { Text("CREATE IT", fontSize = 10.sp) }
+            }
             OutlinedTextField(lModel, {lModel=it}, label={Text("Model, e.g. GALAXY F56 5G 8/128")}, modifier=Modifier.fillMaxWidth(),
                 keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
             Row {
@@ -3590,7 +3623,8 @@ class PenDb(ctx: Context) : android.database.sqlite.SQLiteOpenHelper(ctx, "penkh
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_units_serial ON units(serial1)")
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_units_grn ON units(grnId)")
             db.execSQL("""CREATE TABLE IF NOT EXISTS skus(sku TEXT PRIMARY KEY, brand TEXT, category TEXT, model TEXT,
-                variant TEXT, hsn TEXT, gstRate REAL DEFAULT 18, mrp REAL DEFAULT 0, identType TEXT DEFAULT 'SERIAL')""")
+                variant TEXT, hsn TEXT, gstRate REAL DEFAULT 18, mrp REAL DEFAULT 0, identType TEXT DEFAULT 'SERIAL',
+                modelId INTEGER DEFAULT 0)""")
             db.execSQL("""CREATE TABLE IF NOT EXISTS dist_brands(distributor TEXT, brand TEXT, categories TEXT,
                 PRIMARY KEY(distributor, brand))""")
             db.execSQL("""CREATE TABLE IF NOT EXISTS customers(phone TEXT PRIMARY KEY, name TEXT, addr1 TEXT, addr2 TEXT,
