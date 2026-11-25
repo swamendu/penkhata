@@ -403,8 +403,8 @@ data class GrnLine(val sku: String, val model: String, val variant: String, val 
                    val gstRate: Double, val units: Int, val price: Double, val identType: String)
 data class SkuInfo(val sku: String, val brand: String, val category: String, val model: String, val variant: String,
                    val hsn: String, val gstRate: Double, val mrp: Double, val identType: String)
-data class Unit(val id: Long, val grnId: Long, val sku: String, val serial1: String, val serial2: String,
-                val cost: Double, val dateIn: String, val status: String)
+data class StockUnit(val id: Long, val grnId: Long, val sku: String, val serial1: String, val serial2: String,
+                     val cost: Double, val dateIn: String, val status: String)
 
 // IMEI only for cellular goods; everything else is a serial; counted goods need neither.
 fun identTypeFor(category: String): String = when(category.trim().lowercase()) {
@@ -458,11 +458,11 @@ fun loadGrns(ctx: Context): List<Grn> {
 fun grnExists(ctx: Context, distributor: String, no: String): Boolean = try {
     db(ctx).readableDatabase.rawQuery("SELECT 1 FROM grn WHERE distributor=? AND no=?", arrayOf(distributor, no.trim())).use { it.moveToFirst() }
 } catch(e: Exception) { false }
-fun unitsForGrn(ctx: Context, grnId: Long): List<Unit> {
-    val out = mutableListOf<Unit>()
+fun unitsForGrn(ctx: Context, grnId: Long): List<StockUnit> {
+    val out = mutableListOf<StockUnit>()
     try {
         db(ctx).readableDatabase.rawQuery("SELECT id,grnId,sku,serial1,serial2,cost,dateIn,status FROM units WHERE grnId=? ORDER BY id", arrayOf(grnId.toString())).use { c ->
-            while(c.moveToNext()) out.add(Unit(c.getLong(0), c.getLong(1), c.getString(2) ?: "", c.getString(3) ?: "",
+            while(c.moveToNext()) out.add(StockUnit(c.getLong(0), c.getLong(1), c.getString(2) ?: "", c.getString(3) ?: "",
                 c.getString(4) ?: "", c.getDouble(5), c.getString(6) ?: "", c.getString(7) ?: "PENDING"))
         }
     } catch(e: Exception) { }
@@ -559,7 +559,7 @@ fun saveSerials(ctx: Context, grnId: Long, lineId: Long, serials: List<Pair<Stri
 fun postUnitsToStock(ctx: Context, grnId: Long) {
     try {
         val g = loadGrns(ctx).firstOrNull { it.id == grnId } ?: return
-        val lines = grnLines(ctx, grnId).associateBy { it.second.sku }
+        val lines = grnLines(ctx, grnId).associate { it.second.sku to it.second }
         val stock = loadStock(ctx).toMutableList()
         var changed = false
         db(ctx).readableDatabase.rawQuery(
