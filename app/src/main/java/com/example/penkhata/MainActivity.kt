@@ -44,6 +44,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
@@ -61,6 +62,7 @@ import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -82,7 +84,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "8.0.1 · prefix"
+const val APP_VERSION = "8.1 · outlets, lock, invoice"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -200,6 +202,11 @@ data class Branch(val code: String, val name: String, val address: String, val p
                   val gstin: String, val phone: String, val state: String, val series: String, val nextSerial: Int)
 data class Person(val id: Long, val name: String, val role: String, val branch: String, val phone: String, val active: Boolean)
 
+// Single outlet is the common case and should look like it: one shop, one counter, no
+// branch codes in the invoice number. Multi outlet switches the whole concept on.
+fun isMultiOutlet(prefs: android.content.SharedPreferences): Boolean = prefs.getBoolean("multiOutlet", false)
+fun askOutletMode(prefs: android.content.SharedPreferences): Boolean = !prefs.contains("multiOutlet")
+
 fun loadBranches(ctx: Context): List<Branch> {
     val out = mutableListOf<Branch>()
     try {
@@ -218,16 +225,38 @@ fun saveBranch(ctx: Context, b: Branch) {
     db(ctx).writableDatabase.insertWithOnConflict("branches", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE)
 }
 // First run on an existing install: make a branch out of whatever Settings already holds.
+fun renameBranch(ctx: Context, oldCode: String, newCode: String) {
+    try {
+        val w = db(ctx).writableDatabase
+        w.beginTransaction()
+        try {
+            val old = loadBranches(ctx).firstOrNull { it.code.equals(oldCode, true) } ?: return
+            w.delete("branches", "code=?", arrayOf(old.code))
+            saveBranch(ctx, old.copy(code = newCode))
+            // anything billed under the old code keeps its printed number; only the outlet moves
+            w.setTransactionSuccessful()
+        } finally { w.endTransaction() }
+    } catch(e: Exception) { }
+}
 fun ensureBranch(ctx: Context) {
     try {
         val p = ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE)
+        val prefix = (p.getString("sPrefix", "") ?: "").trim()
         val known = loadBranches(ctx)
         if(known.isNotEmpty()) {
-            // repair the MAIN placeholder from the firm prefix, once the settings exist
-            val only = known.firstOrNull()
-            val prefix = (p.getString("sPrefix", "") ?: "").trim()
-            if(known.size == 1 && only != null && only.code.equals("MAIN", true) && prefix.isNotEmpty()) {
-                saveBranch(ctx, only.copy(code = prefix, name = only.name.ifBlank { p.getString("sName", "") ?: "" }))
+            // MAIN is a placeholder, never a real outlet: rename it in place when the firm
+            // prefix is known, and remove any ghost left behind by an earlier repair
+            val placeholder = known.filter { it.code.equals("MAIN", true) }
+            if(prefix.isNotEmpty() && placeholder.isNotEmpty()) {
+                val real = known.firstOrNull { !it.code.equals("MAIN", true) }
+                if(real != null) placeholder.forEach { ghost ->
+                    try { db(ctx).writableDatabase.delete("branches", "code=?", arrayOf(ghost.code)) } catch(e: Exception) { }
+                }
+                else renameBranch(ctx, "MAIN", prefix)
+            } else if(placeholder.size > 1) {
+                placeholder.drop(1).forEach { ghost ->
+                    try { db(ctx).writableDatabase.delete("branches", "code=?", arrayOf(ghost.code)) } catch(e: Exception) { }
+                }
             }
             return
         }
@@ -902,6 +931,7 @@ fun askBiometric(activity: FragmentActivity, onUnlocked: () -> Unit, onUsePin: (
 fun MainAppScreen() {
     val ctx = LocalContext.current
     val prefs = remember { ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE) }
+    val scope = rememberCoroutineScope()
     remember { migratePlainPin(prefs) }
     var hasPinState by remember { mutableStateOf(hasPin(prefs)) }
     var isLocked by remember { mutableStateOf(hasPin(prefs)) }
@@ -918,12 +948,32 @@ fun MainAppScreen() {
         } catch(e: Exception) { }
     }
     val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner, hasPinState) {
+    // -1 never, 0 immediately on leaving, otherwise minutes of grace
+    val lockMinutes = remember { prefs.getInt("lockMinutes", 5) }
+    var leftAt by remember { mutableStateOf(0L) }
+    var lastTouch by remember { mutableStateOf(System.currentTimeMillis()) }
+    DisposableEffect(lifecycleOwner, hasPinState, lockMinutes) {
         val obs = LifecycleEventObserver { _, event ->
-            if(event == Lifecycle.Event.ON_STOP && hasPinState && !pickerInFlight) isLocked = true
+            if(event == Lifecycle.Event.ON_STOP && hasPinState && !pickerInFlight) {
+                leftAt = System.currentTimeMillis()
+                if(lockMinutes == 0) isLocked = true
+            }
+            if(event == Lifecycle.Event.ON_START) {
+                lastTouch = System.currentTimeMillis()
+                if(hasPinState && lockMinutes > 0 && leftAt > 0 &&
+                   System.currentTimeMillis() - leftAt >= lockMinutes * 60_000L) isLocked = true
+            }
         }
         lifecycleOwner.lifecycle.addObserver(obs)
         onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+    }
+    // the phone lying open on the counter locks itself after the same period
+    LaunchedEffect(hasPinState, lockMinutes, isLocked) {
+        while(true) {
+            delay(20_000)
+            if(hasPinState && !isLocked && lockMinutes > 0 && !pickerInFlight &&
+               System.currentTimeMillis() - lastTouch >= lockMinutes * 60_000L) isLocked = true
+        }
     }
     var currentScreen by remember { mutableStateOf("dashboard") }
     // bumped after a restore or a reset: every screen rebuilds and re-reads its data
@@ -956,10 +1006,40 @@ fun MainAppScreen() {
         }) { Text(if(exiting) "SAVING..." else "SAVE & EXIT") } },
         dismissButton = { TextButton(onClick = { showExit = false }) { Text("CANCEL") } }
     )
+    if(askOutletMode(prefs)) AlertDialog(
+        onDismissRequest = { },
+        title = { Text("Is this one shop or several?") },
+        text = { Column {
+            Text("This decides how invoice numbers are built, and whether the app shows outlets at all.", fontSize = 11.sp, color = Color.Gray)
+            Spacer(Modifier.height(8.dp))
+            Text("One shop", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            Text("MOBMAN/26-27/00001 - your firm prefix, one counter, no branch codes.", fontSize = 10.sp)
+            Spacer(Modifier.height(8.dp))
+            Text("More than one shop", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            Text("S11/SA2627/00001 - each outlet has its own code, series and counter.", fontSize = 10.sp)
+            Spacer(Modifier.height(8.dp))
+            Text("You can change this later under Settings \u2192 Team.", fontSize = 9.sp, color = Color(0xFF2E7D32))
+        } },
+        confirmButton = { TextButton(onClick = {
+            prefs.edit().putBoolean("multiOutlet", false).apply()
+            scope.launch { withContext(Dispatchers.IO) { ensureBranch(ctx) }; dataVersion++ }
+        }) { Text("ONE SHOP") } },
+        dismissButton = { TextButton(onClick = {
+            prefs.edit().putBoolean("multiOutlet", true).apply()
+            scope.launch { withContext(Dispatchers.IO) { ensureBranch(ctx) }; dataVersion++ }
+        }) { Text("SEVERAL") } }
+    )
     if (isLocked) LoginScreen(prefs) { isLocked = false }
     else Scaffold(
     ) { p -> Box(Modifier.padding(p)) {
-        Column(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize().pointerInput(Unit) {
+            awaitPointerEventScope {
+                while(true) {
+                    val ev = awaitPointerEvent()
+                    if(ev.changes.any { it.pressed }) lastTouch = System.currentTimeMillis()
+                }
+            }
+        }) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("\u2630", fontSize = 22.sp, modifier = Modifier.clickable { menuOpen = true }.padding(8.dp))
             Text(activeBranchCode(prefs).ifBlank { "PenKhata" }, fontSize = 11.sp, color = Color.Gray, modifier = Modifier.weight(1f))
@@ -1328,11 +1408,12 @@ fun InvoiceScreen(isQuote: Boolean) {
                             bumpInvoiceNo(ctx, prefs); clearBill()
                             scope.launch { withContext(Dispatchers.IO) { deductStock(ctx, snapItems) } }
                         }
-                        openPdf(ctx, file)
+                        // the invoice is saved; sharing is done later from Files -> Bills
+                        Toast.makeText(ctx, "Invoice saved - find it under Files \u2192 Bills", Toast.LENGTH_LONG).show()
                     }
                 }
             }
-        }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor = Color(0xFF2E7D32))) { Text(if(busy) "GENERATING..." else if(isQuote) "GENERATE QUOTE" else "GENERATE PDF") }
+        }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor = Color(0xFF2E7D32))) { Text(if(busy) "SAVING..." else if(isQuote) "SAVE QUOTATION" else "GENERATE INVOICE") }
         Spacer(Modifier.height(60.dp))
     }
 }
@@ -2937,7 +3018,16 @@ Card(Modifier.padding(vertical=5.dp)){Column(Modifier.padding(10.dp)){
                 Text("Outlet & Team", fontWeight=FontWeight.Bold)
                 Divider(Modifier.padding(vertical=5.dp))
                 Text("Acting as: " + activePerson(prefs) + " (" + activeRole(prefs) + ")", fontSize=11.sp, fontWeight=FontWeight.Bold)
-                branches.forEach { b ->
+                if(!isMultiOutlet(prefs)) {
+                    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Single outlet", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            Text("Invoices are numbered " + (prefs.getString("sPrefix", "INV") ?: "INV") + "/" + fyLabel() + "/00001, with no branch code.", fontSize = 9.sp, color = Color.Gray)
+                        }
+                        TextButton(onClick = { prefs.edit().putBoolean("multiOutlet", true).apply(); onDataChanged() }) { Text("MORE THAN ONE", fontSize = 9.sp) }
+                    }
+                }
+                if(isMultiOutlet(prefs)) branches.forEach { b ->
                     Row(Modifier.fillMaxWidth().clickable { prefs.edit().putString("activeBranch", b.code).apply(); onDataChanged() }.padding(vertical=3.dp), verticalAlignment=Alignment.CenterVertically){
                         Text(if(b.code == activeBranchCode(prefs)) "\u2714 " else "   ", fontSize=11.sp)
                         Text(b.code + " \u00b7 " + b.name, fontSize=11.sp, modifier=Modifier.weight(1f), maxLines=1)
