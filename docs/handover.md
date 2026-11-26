@@ -1,9 +1,9 @@
 # PenKhata — handover brief
 
-Everything a fresh session needs to continue this work without the chat history.
-Written 26 Nov 2026. Read this first, then `docs/system-design.md` and `docs/system-design.pdf`.
+PenKhata is the **single-shop Android till** in this repository. It keeps shipping.
 
----
+A separate product, **cc_cred** (multi-outlet console + capture app + server), is designed but lives
+outside this repo — its handover and design documents travel separately. Do not build the console here.
 
 ## 1. What exists today
 
@@ -36,59 +36,6 @@ Written 26 Nov 2026. Read this first, then `docs/system-design.md` and `docs/sys
 
 ---
 
-## 2. The agreed design (see `docs/system-design.md` for the full text)
-
-**The rule**: a brand sales rep *captures* a sale on the Android app; the outlet manager *bills* it on
-the console. Only the counter issues invoice numbers, so numbering can never collide.
-
-- **Console** — responsive web app (PWA), used by owner, manager, outlet manager, duty manager and
-  stock auditor. Bills, takes payment, closes the day, runs audits.
-- **Android app** — brand sales reps only. Capture, IMEI reservation, delivery challan, cash custody,
-  sync. No invoicing, no numbers.
-- **Server** — identity, roles, outlets, events, numbering, sync, audit trail.
-
-Key sub-designs already settled: three dates (challan / delivery / invoice), request lifecycle with no
-expiry but ageing, cash custody chain, six stock states, scheme splits with a claim ledger, approval
-hierarchy, duty manager expiry.
-
----
-
-## 3. The build plan — brick by brick
-
-| # | Brick | Gate |
-|---|---|---|
-| 0.1 | Entity schema (document) | User reads and corrects it |
-| 0.2 | Event catalogue | — |
-| 0.3 | Metric definitions | Numbers agreed before code |
-| 0.4 | Permission matrix | — |
-| 0.5 | Sync contract | — |
-| 0.6 | Screen inventory | — |
-| 1 | Server skeleton + seed data | Numbers verified |
-| 2 | Console shell, login, role landing pages | Roles differ correctly |
-| 3 | Owner dashboard (read-only) | Matches a spreadsheet to the rupee |
-| 4 | **Queue + billing — the heart** | A captured sale billed in under a minute |
-| 5 | Cash custody + day-close | Handover and deposit move the numbers |
-| 6 | Stock workspace + audit | A shelf counted, variance approved |
-| 7 | Schemes + claim ledger | ₹2,200 becomes a receivable |
-| 8 | Android app rebuilt thin | Capture on phone, bill on console |
-| 9 | Offline and sync hardening | Internet pulled mid-bill |
-| 10 | Reports and exports | — |
-| 11 | Rollout outlet by outlet | — |
-
-**Next action on a fresh session**: write brick 0.1, the entity schema, as a document — not code.
-
----
-
-## 4. Open questions blocking the spec
-
-1. The discount limit value (only the owner sets it).
-2. Defective stock: reduce value the day it fails, or when the brand credits?
-3. May a Samsung rep bill a vivo phone at all?
-4. Is the claim deadline separate from the scheme validity window?
-5. May an outlet manager approve a scheme, or only a manager above / the owner?
-
----
-
 ## 5. How to work on this repo (learned the hard way)
 
 - **One iteration at a time.** Branch, PR, CI, one APK, wait for the user to test on a real phone.
@@ -111,7 +58,7 @@ hierarchy, duty manager expiry.
   unreliable, so treat it as a visual check, not a test suite.
 - **Logic harness**: mirror rules in Python (see `grn_logic_test.py` pattern) before trusting a build.
 
-## 6. Constraints
+## 5. Constraints
 
 - The user has **one test phone**, no laptop, and no budget for paid services. Anything requiring
   hardware, a PC build, or a subscription must be avoided or produced free via GitHub Actions.
@@ -119,8 +66,5 @@ hierarchy, duty manager expiry.
 - The user tests every build on a real device and reports with screenshots. Keep replies short and
   always say what was verified and what was not.
 
-## 7. Documents in this folder
+## 6. Documents in this folder
 
-- `system-design.md` — the agreed design in text
-- `system-design.pdf` — the same with three flowcharts, plus schemes
-- `PenKhata-System-Design.html` — a 14-slide deck (delivered separately, not in the repo)
