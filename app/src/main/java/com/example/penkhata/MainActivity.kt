@@ -84,7 +84,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "8.1.1 · unstuck"
+const val APP_VERSION = "8.2 · lock period"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -3087,6 +3087,39 @@ val crashText by produceState(initialValue = "", ctx) { value = withContext(Disp
                     TextButton(onClick = { scope.launch { withContext(Dispatchers.IO) { clearCrashLog(ctx) }; onDataChanged() } }) { Text("CLEAR", fontSize=10.sp) }
                 }
             }}
+            Text("Lock after", fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+            Text("How long the app stays open before it asks for the PIN again.", fontSize = 9.sp, color = Color.Gray)
+            val lockNow = prefs.getInt("lockMinutes", 5)
+            Row(Modifier.fillMaxWidth().padding(top = 4.dp)) {
+                listOf(-1 to "Never", 0 to "Now").forEach { pair ->
+                    OutlinedButton(onClick = { prefs.edit().putInt("lockMinutes", pair.first).apply(); onDataChanged() },
+                        modifier = Modifier.weight(1f).padding(horizontal = 2.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(containerColor = if(lockNow == pair.first) Color(0xFF2E7D32) else Color.Transparent)) {
+                        Text(pair.second, fontSize = 9.sp, maxLines = 1, color = if(lockNow == pair.first) Color.White else Color.Black)
+                    }
+                }
+                listOf(5, 10).forEach { v ->
+                    OutlinedButton(onClick = { prefs.edit().putInt("lockMinutes", v).apply(); onDataChanged() },
+                        modifier = Modifier.weight(1f).padding(horizontal = 2.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(containerColor = if(lockNow == v) Color(0xFF2E7D32) else Color.Transparent)) {
+                        Text(v.toString() + "m", fontSize = 9.sp, maxLines = 1, color = if(lockNow == v) Color.White else Color.Black)
+                    }
+                }
+            }
+            Row(Modifier.fillMaxWidth()) {
+                listOf(15, 20, 30).forEach { v ->
+                    OutlinedButton(onClick = { prefs.edit().putInt("lockMinutes", v).apply(); onDataChanged() },
+                        modifier = Modifier.weight(1f).padding(horizontal = 2.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(containerColor = if(lockNow == v) Color(0xFF2E7D32) else Color.Transparent)) {
+                        Text(v.toString() + " min", fontSize = 9.sp, maxLines = 1, color = if(lockNow == v) Color.White else Color.Black)
+                    }
+                }
+            }
+            Text(if(lockNow < 0) "The app will not lock itself. The PIN then protects only a cold start."
+                 else if(lockNow == 0) "Locks as soon as you leave the app."
+                 else "Locks after " + lockNow + " minutes away, or idle on the counter.",
+                fontSize = 9.sp, color = if(lockNow < 0) Color(0xFFB26A00) else Color(0xFF2E7D32))
+            Spacer(Modifier.height(10.dp))
             OutlinedTextField(newPin,{newPin=it},label={Text(if(hasPinSet) "New PIN - blank then SAVE PIN removes the lock" else "Set Login PIN (optional)")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.NumberPassword, imeAction=ImeAction.Next),modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); 
             Row(Modifier.fillMaxWidth().padding(top = 8.dp)) {
                 Button(onClick = {
