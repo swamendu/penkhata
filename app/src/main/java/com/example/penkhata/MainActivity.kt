@@ -84,7 +84,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "8.1 · outlets, lock, invoice"
+const val APP_VERSION = "8.1.1 · unstuck"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -860,7 +860,11 @@ fun nextInvoiceNo(ctx: Context, prefs: android.content.SharedPreferences): Strin
         return "$prefix/${fyLabel()}/" + String.format("%03d", prefs.getInt("nextInv", 1))
     }
     val n = String.format("%05d", b.nextSerial)
-    return if(b.series.isBlank()) "${b.code}/${fyLabel()}/$n" else "${b.code}/${b.series}/$n"
+    // MAIN is the placeholder the app invents when it has no outlet yet; a single-outlet
+    // shop should see its own firm prefix, never that
+    val firmPrefix = (prefs.getString("sPrefix", "") ?: "").trim()
+    val code = if(b.code.isBlank() || b.code.equals("MAIN", true)) firmPrefix.ifEmpty { "INV" } else b.code
+    return if(b.series.isBlank()) "$code/${fyLabel()}/$n" else "$code/${b.series}/$n"
 }
 fun bumpInvoiceNo(ctx: Context, prefs: android.content.SharedPreferences) {
     try {
@@ -1006,8 +1010,11 @@ fun MainAppScreen() {
         }) { Text(if(exiting) "SAVING..." else "SAVE & EXIT") } },
         dismissButton = { TextButton(onClick = { showExit = false }) { Text("CANCEL") } }
     )
-    if(askOutletMode(prefs)) AlertDialog(
-        onDismissRequest = { },
+    // a SharedPreferences change does not recompose anything, so the answer is held in
+    // state; without this the modal stayed on screen and nothing could be tapped
+    var outletAsked by remember { mutableStateOf(!askOutletMode(prefs)) }
+    if(!outletAsked) AlertDialog(
+        onDismissRequest = { outletAsked = true; prefs.edit().putBoolean("multiOutlet", false).apply() },
         title = { Text("Is this one shop or several?") },
         text = { Column {
             Text("This decides how invoice numbers are built, and whether the app shows outlets at all.", fontSize = 11.sp, color = Color.Gray)
@@ -1022,10 +1029,12 @@ fun MainAppScreen() {
         } },
         confirmButton = { TextButton(onClick = {
             prefs.edit().putBoolean("multiOutlet", false).apply()
+            outletAsked = true
             scope.launch { withContext(Dispatchers.IO) { ensureBranch(ctx) }; dataVersion++ }
         }) { Text("ONE SHOP") } },
         dismissButton = { TextButton(onClick = {
             prefs.edit().putBoolean("multiOutlet", true).apply()
+            outletAsked = true
             scope.launch { withContext(Dispatchers.IO) { ensureBranch(ctx) }; dataVersion++ }
         }) { Text("SEVERAL") } }
     )
