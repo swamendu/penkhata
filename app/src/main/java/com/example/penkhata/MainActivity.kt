@@ -82,7 +82,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "8.0 · searchable pickers"
+const val APP_VERSION = "8.0.1 · prefix"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -220,8 +220,17 @@ fun saveBranch(ctx: Context, b: Branch) {
 // First run on an existing install: make a branch out of whatever Settings already holds.
 fun ensureBranch(ctx: Context) {
     try {
-        if(loadBranches(ctx).isNotEmpty()) return
         val p = ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE)
+        val known = loadBranches(ctx)
+        if(known.isNotEmpty()) {
+            // repair the MAIN placeholder from the firm prefix, once the settings exist
+            val only = known.firstOrNull()
+            val prefix = (p.getString("sPrefix", "") ?: "").trim()
+            if(known.size == 1 && only != null && only.code.equals("MAIN", true) && prefix.isNotEmpty()) {
+                saveBranch(ctx, only.copy(code = prefix, name = only.name.ifBlank { p.getString("sName", "") ?: "" }))
+            }
+            return
+        }
         val code = (p.getString("sPrefix", "") ?: "").trim().ifEmpty { "MAIN" }
         saveBranch(ctx, Branch(code, p.getString("sName", "") ?: "",
             listOf(p.getString("sAddr1", "") ?: "", p.getString("sAddr2", "") ?: "").filter { it.isNotBlank() }.joinToString(", "),
