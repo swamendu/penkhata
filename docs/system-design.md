@@ -41,6 +41,46 @@ HOLDING and it becomes a visible liability.
 in stock · reserved · sold · defective/DOA · with brand (RTV) · out for service · written off.
 The IMEI keeps its identity through every state.
 
+
+## Schemes (brand offers)
+
+A scheme is **three amounts wearing one label**:
+
+| Amount | Nature |
+|---|---|
+| Full discount on the invoice | Reduces taxable value; the customer sees it |
+| Company share (e.g. ₹2,200 of ₹3,000) | **Receivable** — claim it or lose it |
+| Dealer share (e.g. ₹800) | **Margin forgone**, not cash paid out |
+
+Example: Galaxy F56 at ₹22,499, cash upgrade offer ₹3,000 = ₹2,200 company + ₹800 dealer.
+Finance slab differs: ₹1,500 = ₹1,000 + ₹500. **The slab carries the amounts, not the scheme.**
+
+### A scheme record holds
+1. Brand, code, type (upgrade, exchange, cashback, subvention, gift, buyback, volume)
+2. Validity window and **claim deadline** (often later than the sale window)
+3. Scope — category, model, SKU, and attributes (43-inch+, 1.5T, 260L)
+4. Slabs — company and dealer amounts per payment mode
+5. Stacking rule — which other schemes may run alongside
+
+### Claim ledger
+`PENDING → SUBMITTED → APPROVED → CREDITED` (or `REJECTED` with reason).
+Brand pays by **credit note**, so the company share reduces payables or lands in the bank.
+
+Console must show three different numbers, because they differ:
+applied · claimed · credited — plus **claimed-but-not-received** (chase it) and
+**not-claimed-past-deadline** (act now). That gap is where dealers lose money to paperwork.
+
+### Who does what
+| Action | Data entry | Outlet manager | Manager above | Owner |
+|---|---|---|---|---|
+| Enter scheme from circular | draft | draft | yes | yes |
+| Approve for use | no | no | yes | yes |
+| Apply at billing | no | yes | yes | yes |
+| File the claim | yes | yes | yes | yes |
+
+### Margin, told honestly
+Gross margin − dealer scheme share = **net margin**. Company share is a separate receivable.
+
 ## Authority
 | Action | Outlet manager | Manager above | Owner |
 |---|---|---|---|
