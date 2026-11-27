@@ -93,7 +93,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "9.8 · bills browser"
+const val APP_VERSION = "9.9 · CRM segments"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -1693,28 +1693,40 @@ fun CrmScreen() {
         value = withContext(Dispatchers.IO) { loadCustomerRows(ctx) }
     }
     var q by rememberSaveable { mutableStateOf("") }
-    var filter by rememberSaveable { mutableStateOf("all") }
+    var seg by rememberSaveable { mutableStateOf("due") }
+    var summary by rememberSaveable { mutableStateOf(prefBool(prefs, "crmSummary", false)) }
     var openPhone by remember { mutableStateOf<String?>(null) }
     var showAdd by remember { mutableStateOf(false) }
     var addName by remember { mutableStateOf("") }
     var addPhone by remember { mutableStateOf("") }
     var addAddr by remember { mutableStateOf("") }
     var addGst by remember { mutableStateOf("") }
-    val colBills = 46.dp; val colSpend = 92.dp; val colDue = 84.dp
 
+    val now = System.currentTimeMillis()
+    val fyStart = remember { fyStartMs() }
     val monthStart = remember {
         Calendar.getInstance().apply { set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0) }.timeInMillis
     }
-    val shown = rows.filter { r ->
-        val text = (r.name + " " + r.phone + " " + r.gst).lowercase()
-        val matchQ = q.isBlank() || text.contains(q.trim().lowercase())
-        val matchF = when(filter) {
-            "gst" -> r.gst.isNotBlank()
-            "due" -> r.due > 0.5
-            "month" -> r.lastMs >= monthStart
-            else -> true
-        }
-        matchQ && matchF
+    val dueCount = rows.count { it.due > 0.5 }
+    val repeatCount = rows.count { it.bills > 1 }
+    val dormantCount = rows.count { it.lastMs > 0 && now - it.lastMs > 90L * 86400000L }
+    val newCount = rows.count { it.firstMs >= monthStart }
+    val toCollect = rows.sumOf { it.due }
+
+    // what each segment means, in one place
+    val segmentRows: List<CustomerRow> = when(seg) {
+        "due" -> rows.filter { it.due > 0.5 }.sortedByDescending { it.due }
+        "top" -> rows.filter { it.spendFy > 0.5 }.sortedByDescending { it.spendFy }
+        "repeat" -> rows.filter { it.bills > 1 }.sortedByDescending { it.bills }
+        "new" -> rows.filter { it.firstMs >= monthStart }.sortedByDescending { it.firstMs }
+        "dormant" -> rows.filter { it.lastMs > 0 && now - it.lastMs > 90L * 86400000L }.sortedBy { it.lastMs }
+        "finance" -> rows.filter { it.financed }.sortedByDescending { it.spend }
+        "gst" -> rows.filter { it.gst.isNotBlank() }.sortedByDescending { it.spend }
+        "lost" -> rows.filter { it.lastMs > 0 && now - it.lastMs > 365L * 86400000L }.sortedBy { it.lastMs }
+        else -> rows.sortedBy { it.name.lowercase() }
+    }
+    val shown = segmentRows.filter { r ->
+        q.isBlank() || (r.name + " " + r.phone + " " + r.gst).lowercase().contains(q.trim().lowercase())
     }
 
     if(showAdd) AlertDialog(
@@ -1749,30 +1761,53 @@ fun CrmScreen() {
     }
 
     Column(Modifier.padding(14.dp).verticalScroll(rememberScrollState())) {
-        Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
-            Text("CUSTOMERS", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-            Button(onClick = { showAdd = true }) { Text("+ ADD", fontSize = 11.sp) }
-        }
-        OutlinedTextField(q, { q = it }, label = { Text("Search name, phone or GSTIN") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-
-        val withGst = rows.count { it.gst.isNotBlank() }
-        val repeat = rows.count { it.bills > 1 }
-        val due = rows.sumOf { it.due }
-        Row(Modifier.fillMaxWidth().padding(top = 8.dp)) {
-            CrmTile("Customers", rows.size.toString(), Color(0xFF1A1A1A), Modifier.weight(1f))
-            Spacer(Modifier.width(6.dp))
-            CrmTile("With GSTIN", withGst.toString(), Color(0xFF1A1A1A), Modifier.weight(1f))
-        }
-        Row(Modifier.fillMaxWidth().padding(top = 6.dp)) {
-            CrmTile("Repeat buyers", repeat.toString(), Color(0xFF2E7D32), Modifier.weight(1f))
-            Spacer(Modifier.width(6.dp))
-            CrmTile("Outstanding", "\u20b9" + inr(due), if(due > 0) Color.Red else Color.Gray, Modifier.weight(1f))
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("CUSTOMERS", fontSize = 24.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            OutlinedButton(onClick = {
+                summary = !summary
+                prefs.edit().putBoolean("crmSummary", summary).apply()
+            }, modifier = Modifier.padding(end = 6.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 2.dp)) {
+                Text(if(summary) "\u25a6" else "\u2630", fontSize = 14.sp)
+            }
+            Button(onClick = { showAdd = true }) { Text("+ ADD", fontSize = 10.sp) }
         }
 
-        Row(Modifier.fillMaxWidth().padding(top = 10.dp).horizontalScroll(rememberScrollState())) {
-            listOf("all" to "All", "gst" to "GSTIN", "due" to "Due", "month" to "This month").forEach { (id, label) ->
-                val on = filter == id
-                OutlinedButton(onClick = { filter = id }, modifier = Modifier.padding(end = 6.dp),
+        if(summary) {
+            Card(Modifier.fillMaxWidth().padding(top = 8.dp)) { Row(Modifier.padding(12.dp)) {
+                Text(rows.size.toString() + " customers  \u00b7  " + rows.count { it.gst.isNotBlank() } + " with GSTIN  \u00b7  \u20b9" +
+                     inr(toCollect) + " to collect", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            }}
+        } else {
+            Row(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                CrmTile("Customers", rows.size.toString(), Color(0xFF1A1A1A), Modifier.weight(1f))
+                Spacer(Modifier.width(6.dp))
+                CrmTile("To collect", "\u20b9" + inr(toCollect), if(toCollect > 0.5) Color.Red else Color.Gray, Modifier.weight(1f))
+            }
+            Row(Modifier.fillMaxWidth().padding(top = 6.dp)) {
+                CrmTile("Repeat buyers", repeatCount.toString(), Color(0xFF2E7D32), Modifier.weight(1f))
+                Spacer(Modifier.width(6.dp))
+                CrmTile("Dormant 90d", dormantCount.toString(), Color(0xFFB26A00), Modifier.weight(1f))
+            }
+        }
+
+        OutlinedTextField(q, { q = it }, label = { Text("Search name, phone or GSTIN") },
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp), singleLine = true)
+
+        Row(Modifier.fillMaxWidth().padding(top = 8.dp).horizontalScroll(rememberScrollState())) {
+            listOf(
+                "due" to "Due " + dueCount,
+                "top" to "Top",
+                "repeat" to "Repeat",
+                "new" to "New",
+                "dormant" to "Dormant",
+                "finance" to "Finance",
+                "gst" to "GSTIN",
+                "lost" to "Lost",
+                "all" to "All"
+            ).forEach { (id, label) ->
+                val on = seg == id
+                OutlinedButton(onClick = { seg = id }, modifier = Modifier.padding(end = 6.dp),
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 2.dp),
                     colors = ButtonDefaults.outlinedButtonColors(containerColor = if(on) Color(0xFF2E7D32) else Color.Transparent)) {
                     Text(label, fontSize = 9.sp, maxLines = 1, color = if(on) Color.White else Color.Black)
@@ -1783,35 +1818,57 @@ fun CrmScreen() {
         if(rows.isEmpty()) {
             Text("No customers yet.", fontSize = 11.sp, color = Color.Gray, modifier = Modifier.padding(top = 12.dp))
             Text("They appear here as soon as a bill is made with a phone number.", fontSize = 10.sp, color = Color.Gray)
-        } else {
-            Row(Modifier.fillMaxWidth().background(Color(0xFFE8EDE8)).padding(vertical = 6.dp)) {
-                Text("CUSTOMER", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color(0xFF465046), modifier = Modifier.weight(1f))
-                Text("BILLS", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color(0xFF465046), modifier = Modifier.width(colBills))
-                Text("SPEND", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color(0xFF465046), modifier = Modifier.width(colSpend))
-                Text("DUE", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color(0xFF465046), modifier = Modifier.width(colDue))
-            }
-            shown.take(200).forEach { r ->
-                Row(Modifier.fillMaxWidth().clickable { openPhone = r.phone }.padding(vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text(r.name.ifBlank { "\u2014" }, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-                        Text(r.phone + (if(r.lastMs > 0) "  \u00b7  " + SimpleDateFormat("dd-MMM", Locale.ENGLISH).format(Date(r.lastMs)) else ""),
-                            fontSize = 8.sp, color = Color.Gray, maxLines = 1)
-                    }
-                    Text(r.bills.toString(), fontSize = 9.sp, modifier = Modifier.width(colBills))
-                    Text("\u20b9" + inr(r.spend), fontSize = 9.sp, modifier = Modifier.width(colSpend), maxLines = 1)
-                    Text(if(r.due > 0.5) "\u20b9" + inr(r.due) else "-", fontSize = 9.sp,
-                        color = if(r.due > 0.5) Color.Red else Color.Gray,
-                        fontWeight = if(r.due > 0.5) FontWeight.Bold else FontWeight.Normal,
-                        modifier = Modifier.width(colDue), maxLines = 1)
+        } else if(shown.isEmpty()) {
+            Text(if(q.isNotBlank()) "Nothing matches \"" + q.trim() + "\"" else "Nobody in this segment.", fontSize = 11.sp,
+                color = Color.Gray, modifier = Modifier.padding(top = 12.dp))
+        } else if(seg == "all" && q.isBlank()) {
+            // A to Z, with the biggest spenders first inside each letter
+            shown.groupBy { if(it.name.isBlank()) "#" else it.name.trim().first().uppercase() }
+                .toList().sortedBy { it.first }
+                .forEach { (letter, people) ->
+                    Text(letter, fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFF465046),
+                        modifier = Modifier.fillMaxWidth().background(Color(0xFFE8EDE8)).padding(vertical = 5.dp, horizontal = 8.dp))
+                    people.sortedByDescending { it.spend }.take(120).forEach { r -> CustomerRowView(r) { openPhone = r.phone } }
                 }
-                Divider(color = Color(0x18000000))
+        } else {
+            val heading = when(seg) {
+                "due" -> "NEEDS ATTENTION  \u00b7  " + shown.size + " customer(s)  \u00b7  \u20b9" + inr(shown.sumOf { it.due })
+                "top" -> "TOP CUSTOMERS  \u00b7  this financial year"
+                "repeat" -> "REPEAT BUYERS  \u00b7  more than one bill"
+                "new" -> "NEW THIS MONTH"
+                "dormant" -> "DORMANT  \u00b7  nothing in 90 days"
+                "finance" -> "BOUGHT ON FINANCE"
+                "gst" -> "WITH GSTIN  \u00b7  the B2B list"
+                "lost" -> "LOST  \u00b7  nothing in a year"
+                else -> ""
             }
-            Text(shown.size.toString() + " of " + rows.size + " customer(s) \u00b7 tap a row for the full history",
-                fontSize = 9.sp, color = Color.Gray, modifier = Modifier.padding(top = 6.dp))
+            if(heading.isNotBlank())
+                Text(heading, fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color(0xFF465046),
+                    modifier = Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 4.dp))
+            shown.take(300).forEach { r -> CustomerRowView(r) { openPhone = r.phone } }
         }
+        Text(shown.size.toString() + " of " + rows.size + " customer(s) \u00b7 tap a row for the full history",
+            fontSize = 9.sp, color = Color.Gray, modifier = Modifier.padding(top = 8.dp))
         Spacer(Modifier.height(40.dp))
     }
+}
+
+@Composable
+fun CustomerRowView(r: CustomerRow, onClick: () -> Unit) {
+    Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(r.name.ifBlank { "\u2014" }, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+            Text(r.phone + (if(r.lastMs > 0) "  \u00b7  " + SimpleDateFormat("dd-MMM", Locale.ENGLISH).format(Date(r.lastMs)) else ""),
+                fontSize = 9.sp, color = Color.Gray, maxLines = 1)
+        }
+        Column(horizontalAlignment = Alignment.End) {
+            Text("\u20b9" + inr(r.spend), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            if(r.due > 0.5) Text("DUE \u20b9" + inr(r.due), fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color.Red)
+            else if(r.bills > 1) Text(r.bills.toString() + " bills", fontSize = 8.sp, color = Color.Gray)
+        }
+        Text("\u203a", fontSize = 16.sp, color = Color.Gray, modifier = Modifier.padding(start = 6.dp))
+    }
+    Divider(color = Color(0x14000000))
 }
 
 @Composable
@@ -5078,25 +5135,40 @@ fun billDetail(ctx: Context, ms: Long): BillDetail? {
 // spend, due and the last bill all come from the bills themselves.
 data class CustomerRow(val phone: String, val name: String, val addr1: String, val addr2: String,
                        val lmk: String, val pin: String, val gst: String, val state: String,
-                       val bills: Int, val spend: Double, val due: Double, val lastMs: Long, val firstMs: Long)
+                       val bills: Int, val spend: Double, val due: Double, val lastMs: Long, val firstMs: Long,
+                       val financed: Boolean = false, val spendFy: Double = 0.0)
+
+// The financial year starts in April, so "this year" means Apr-Mar, not January.
+fun fyStartMs(): Long {
+    val c = Calendar.getInstance()
+    val year = if(c.get(Calendar.MONTH) + 1 >= 4) c.get(Calendar.YEAR) else c.get(Calendar.YEAR) - 1
+    return Calendar.getInstance().apply {
+        set(Calendar.YEAR, year); set(Calendar.MONTH, Calendar.APRIL); set(Calendar.DAY_OF_MONTH, 1)
+        set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+    }.timeInMillis
+}
 
 fun loadCustomerRows(ctx: Context): List<CustomerRow> {
     val out = mutableListOf<CustomerRow>()
+    val fyStart = fyStartMs()
     try {
         db(ctx).readableDatabase.rawQuery("""
             SELECT c.phone, c.name, IFNULL(c.addr1,''), IFNULL(c.addr2,''), IFNULL(c.lmk,''), IFNULL(c.pin,''),
                    IFNULL(c.gst,''), IFNULL(c.state,''),
                    COUNT(b.ms), IFNULL(SUM(b.total),0), IFNULL(SUM(b.balance),0),
-                   IFNULL(MAX(b.ms), c.lastMs), c.firstMs
+                   IFNULL(MAX(b.ms), c.lastMs), c.firstMs,
+                   MAX(CASE WHEN IFNULL(b.finance,'') <> '' THEN 1 ELSE 0 END),
+                   IFNULL(SUM(CASE WHEN b.ms >= ? THEN b.total ELSE 0 END), 0)
             FROM customers c
             LEFT JOIN bills b ON TRIM(b.bphone) = c.phone AND IFNULL(b.cancelled,0) = 0 AND IFNULL(b.quote,0) = 0
             GROUP BY c.phone
             ORDER BY IFNULL(MAX(b.ms), c.lastMs) DESC
-        """.trimIndent(), null).use { c ->
+        """.trimIndent(), arrayOf(fyStart.toString())).use { c ->
             while(c.moveToNext()) out.add(CustomerRow(
                 c.getString(0) ?: "", c.getString(1) ?: "", c.getString(2) ?: "", c.getString(3) ?: "",
                 c.getString(4) ?: "", c.getString(5) ?: "", c.getString(6) ?: "", c.getString(7) ?: "",
-                c.getInt(8), c.getDouble(9), c.getDouble(10), c.getLong(11), c.getLong(12)))
+                c.getInt(8), c.getDouble(9), c.getDouble(10), c.getLong(11), c.getLong(12),
+                c.getInt(13) != 0, c.getDouble(14)))
         }
     } catch(e: Exception) { }
     return out
