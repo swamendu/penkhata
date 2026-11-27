@@ -93,7 +93,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "9.7.1 · CRM fit"
+const val APP_VERSION = "9.8 · bills browser"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -1363,7 +1363,7 @@ fun MainAppScreen() {
         "ledger" -> LedgerScreen()
         "stock" -> StockScreen()
         "reports" -> GSTReportScreen()
-        "history" -> FileHistoryScreen()
+        "history" -> BillsScreen()
         "customers" -> CrmScreen()
         else -> SettingsScreen(hasPin(prefs), onDataChanged = { dataVersion++ }) { new -> storePin(prefs, new); hasPinState = hasPin(prefs) }
             }}}
@@ -1380,7 +1380,7 @@ fun MainAppScreen() {
                     "ledger" to "Ledger",
                     "stock" to "Stock",
                     "reports" to "Reports",
-                    "history" to "Files",
+                    "history" to "Bills",
                     "customers" to "Customers",
                     "settings" to "Settings"
                 ).forEach { (id, label) ->
@@ -1393,6 +1393,293 @@ fun MainAppScreen() {
             }}
         }
     }}
+}
+
+// ---------------------------------------------------------------- BILLS
+// Year -> month -> day, with the current month already open. Nothing is loaded until it is
+// needed: the folders are counts and totals from one lean query, and a day's bills load when
+// that day is opened.
+@Composable
+fun BillsScreen() {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var reload by remember { mutableStateOf(0) }
+    var q by rememberSaveable { mutableStateOf("") }
+    var includeCancelled by rememberSaveable { mutableStateOf(false) }
+    var openMonth by remember { mutableStateOf<BillBucket?>(null) }
+    var openDay by remember { mutableStateOf<BillBucket?>(null) }
+    var sheetFor by remember { mutableStateOf<Long?>(null) }
+    val scroll = rememberScrollState()
+    val collapsed by remember { derivedStateOf { scroll.value > 60 } }
+
+    val thisMonth = remember {
+        val c = Calendar.getInstance().apply {
+            set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+        }
+        val start = c.timeInMillis; c.add(Calendar.MONTH, 1)
+        start to c.timeInMillis
+    }
+    // everything, so the folder list can show every month the shop has
+    val all by produceState(initialValue = emptyList<BillLite>(), reload, includeCancelled) {
+        value = withContext(Dispatchers.IO) { billsLite(ctx, 0L, System.currentTimeMillis() + 86400000L, includeCancelled) }
+    }
+    val hits by produceState(initialValue = emptyList<BillLite>(), q, reload) {
+        value = if(q.trim().length < 2) emptyList() else withContext(Dispatchers.IO) {
+            billsLite(ctx, 0L, System.currentTimeMillis() + 86400000L, includeCancelled)
+                .filter { r -> r.inv.contains(q.trim(), true) || r.buyer.contains(q.trim(), true) || r.date.contains(q.trim(), true) }
+        }
+    }
+    val months = remember(all) { monthBuckets(all) }
+    val monthRows = remember(all, openMonth) {
+        openMonth?.let { m -> all.filter { it.ms >= m.startMs && it.ms < m.endMs } } ?: emptyList()
+    }
+    val days = remember(monthRows) { dayBuckets(monthRows) }
+    val thisMonthRows = remember(all) { all.filter { it.ms >= thisMonth.first && it.ms < thisMonth.second } }
+    val dueAll = remember(all) { all.sumOf { it.balance } }
+    val cancelledCount = remember(all) { all.count { it.cancelled } }
+
+    if(sheetFor != null) {
+        BillSheet(sheetFor!!, onClose = { sheetFor = null }, onChanged = { reload++ })
+    }
+
+    if(openDay != null) {
+        val day = openDay!!
+        val rows = all.filter { it.ms >= day.startMs && it.ms < day.endMs }
+        Column(Modifier.padding(14.dp).verticalScroll(rememberScrollState())) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("\u2039", fontSize = 22.sp, modifier = Modifier.clickable { openDay = null }.padding(end = 8.dp))
+                Column {
+                    Text(day.label, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Text(rows.size.toString() + " bill(s)  \u00b7  \u20b9" + inr(day.total), fontSize = 10.sp, color = Color.Gray)
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            rows.forEach { r -> BillRowView(r) { sheetFor = r.ms } }
+            Spacer(Modifier.height(40.dp))
+        }
+        return
+    }
+
+    if(openMonth != null) {
+        val m = openMonth!!
+        Column(Modifier.padding(14.dp).verticalScroll(rememberScrollState())) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("\u2039", fontSize = 22.sp, modifier = Modifier.clickable { openMonth = null }.padding(end = 8.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(m.label, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Text(m.bills.toString() + " bills  \u00b7  \u20b9" + inr(m.total) +
+                         (if(m.due > 0.5) "  \u00b7  due \u20b9" + inr(m.due) else ""), fontSize = 10.sp, color = Color.Gray)
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Card(Modifier.fillMaxWidth().clickable { openDay = BillBucket(m.key, m.label + " (all)", m.bills, m.total, m.due, m.startMs, m.endMs) }) {
+                Row(Modifier.padding(12.dp), Arrangement.SpaceBetween) {
+                    Text("All bills this month", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Text(m.bills.toString() + "  \u00b7  \u20b9" + inr(m.total), fontSize = 11.sp)
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            days.forEach { d ->
+                Row(Modifier.fillMaxWidth().clickable { openDay = d }.padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("\u25b8", fontSize = 12.sp, color = Color(0xFF2E7D32), modifier = Modifier.padding(end = 8.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(d.label, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Text(d.bills.toString() + (if(d.bills == 1) " bill" else " bills"), fontSize = 9.sp, color = Color.Gray)
+                    }
+                    Text("\u20b9" + inr(d.total), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                }
+                Divider(color = Color(0x18000000))
+            }
+            Spacer(Modifier.height(40.dp))
+        }
+        return
+    }
+
+    Column(Modifier.padding(14.dp).verticalScroll(scroll)) {
+        Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
+            Text("BILLS", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            Text(if(all.isEmpty()) "" else all.size.toString() + " bills", fontSize = 10.sp, color = Color.Gray)
+        }
+        if(!collapsed) {
+            Row(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                CrmTile("This month", thisMonthRows.size.toString() + " \u00b7 \u20b9" + inr(thisMonthRows.sumOf { it.total }), Color(0xFF1A1A1A), Modifier.weight(1f))
+                Spacer(Modifier.width(6.dp))
+                CrmTile("Outstanding", "\u20b9" + inr(dueAll), if(dueAll > 0.5) Color.Red else Color.Gray, Modifier.weight(1f))
+            }
+            Row(Modifier.fillMaxWidth().padding(top = 6.dp)) {
+                CrmTile("Cancelled", cancelledCount.toString(), Color(0xFFB26A00), Modifier.weight(1f))
+                Spacer(Modifier.width(6.dp))
+                CrmTile("Stored PDFs", storedPdfSize(ctx), Color(0xFF1A1A1A), Modifier.weight(1f))
+            }
+        }
+        OutlinedTextField(q, { q = it }, label = { Text("Search invoice, buyer, date") },
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp), singleLine = true)
+        Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(checked = includeCancelled, onCheckedChange = { includeCancelled = it })
+            Text("Show cancelled", fontSize = 10.sp)
+        }
+
+        if(q.trim().length >= 2) {
+            Text(hits.size.toString() + " result(s)", fontSize = 9.sp, color = Color.Gray, modifier = Modifier.padding(top = 6.dp))
+            hits.take(200).forEach { r -> BillRowView(r) { sheetFor = r.ms } }
+        } else if(months.isEmpty()) {
+            Text("No bills yet.", fontSize = 11.sp, color = Color.Gray, modifier = Modifier.padding(top = 12.dp))
+        } else {
+            var lastYear = ""
+            months.forEach { m ->
+                val year = m.key.substring(0, 4)
+                if(year != lastYear) {
+                    lastYear = year
+                    Text(year, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF465046),
+                        modifier = Modifier.padding(top = 12.dp, bottom = 4.dp))
+                }
+                val open = openMonth?.key == m.key
+                Row(Modifier.fillMaxWidth().clickable { openMonth = m }.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(if(open) "\u25be" else "\u25b8", fontSize = 12.sp, color = Color(0xFF2E7D32), modifier = Modifier.padding(end = 8.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(m.label, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Text(m.bills.toString() + (if(m.bills == 1) " bill" else " bills"), fontSize = 9.sp, color = Color.Gray)
+                    }
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text("\u20b9" + inr(m.total), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        if(m.due > 0.5) Text("due \u20b9" + inr(m.due), fontSize = 9.sp, color = Color.Red)
+                    }
+                }
+                Divider(color = Color(0x18000000))
+            }
+        }
+        Spacer(Modifier.height(40.dp))
+    }
+}
+
+@Composable
+fun BillRowView(r: BillLite, onClick: () -> Unit) {
+    Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(r.inv.ifBlank { r.date }, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+            Text(r.buyer.ifBlank { "\u2014" } + "  \u00b7  " + r.date, fontSize = 9.sp, color = Color.Gray, maxLines = 1)
+        }
+        Column(horizontalAlignment = Alignment.End) {
+            Text("\u20b9" + inr(r.total), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            Text(if(r.cancelled) "CANCELLED" else if(r.balance > 0.5) "DUE \u20b9" + inr(r.balance) else "PAID",
+                fontSize = 8.sp, fontWeight = FontWeight.Bold,
+                color = if(r.cancelled) Color.Red else if(r.balance > 0.5) Color.Red else Color(0xFF2E7D32))
+        }
+        Text("\u203a", fontSize = 16.sp, color = Color.Gray, modifier = Modifier.padding(start = 6.dp))
+    }
+    Divider(color = Color(0x14000000))
+}
+
+fun storedPdfSize(ctx: Context): String {
+    return try {
+        val dir = ctx.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)
+        val total = dir?.listFiles()?.filter { it.isFile && it.name.endsWith(".pdf") }?.sumOf { it.length() } ?: 0L
+        if(total == 0L) "none" else fileSizeLabel(total)
+    } catch(e: Exception) { "none" }
+}
+
+// The bill, opened: what was sold, how it was paid, and the two things you do with it.
+@Composable
+fun BillSheet(ms: Long, onClose: () -> Unit, onChanged: () -> Unit) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var busy by remember { mutableStateOf(false) }
+    var confirmCancel by remember { mutableStateOf(false) }
+    var reason by remember { mutableStateOf("") }
+    val detail by produceState(initialValue = null as BillDetail?, ms) {
+        value = withContext(Dispatchers.IO) { billDetail(ctx, ms) }
+    }
+
+    if(confirmCancel) AlertDialog(
+        onDismissRequest = { confirmCancel = false },
+        title = { Text("Cancel this bill?") },
+        text = { Column {
+            Text((detail?.inv ?: "") + "  \u00b7  \u20b9" + inr(detail?.total ?: 0.0), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            Text("The stock comes back, the number is voided, and the reason is kept.", fontSize = 10.sp, color = Color.Gray)
+            Spacer(Modifier.height(6.dp))
+            listOf("Wrong entry", "Customer returned", "Duplicate bill", "Other").forEach { r ->
+                OutlinedButton(onClick = { reason = r }, modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(containerColor = if(reason == r) Color(0xFF2E7D32) else Color.Transparent)) {
+                    Text(r, fontSize = 10.sp, color = if(reason == r) Color.White else Color.Black)
+                }
+            }
+        } },
+        confirmButton = { TextButton(onClick = {
+            if(reason.isBlank()) { Toast.makeText(ctx, "Pick a reason", Toast.LENGTH_SHORT).show(); return@TextButton }
+            scope.launch {
+                val ok = withContext(Dispatchers.IO) { cancelBill(ctx, ms, reason) }
+                confirmCancel = false
+                Toast.makeText(ctx, if(ok) "Bill cancelled and stock returned" else "Could not cancel this bill", Toast.LENGTH_LONG).show()
+                onChanged(); onClose()
+            }
+        }) { Text("CANCEL BILL", color = Color.Red, fontWeight = FontWeight.Bold) } },
+        dismissButton = { TextButton(onClick = { confirmCancel = false }) { Text("KEEP IT") } })
+
+    Dialog(onDismissRequest = { onClose() }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Card(Modifier.fillMaxWidth(0.96f).fillMaxHeight(0.9f).background(Color.White)) {
+            Column(Modifier.padding(14.dp).fillMaxSize().verticalScroll(rememberScrollState())) {
+                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(detail?.inv ?: "Bill", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                        Text((detail?.date ?: "") + "  \u00b7  " + (detail?.phone ?: ""), fontSize = 10.sp, color = Color.Gray)
+                    }
+                    TextButton(onClick = { onClose() }) { Text("CLOSE") }
+                }
+                Text(detail?.buyer ?: "", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(6.dp))
+                Divider()
+                Text("ITEMS", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color(0xFF465046), modifier = Modifier.padding(top = 6.dp))
+                detail?.items?.forEach { (desc, amt) ->
+                    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), Arrangement.SpaceBetween) {
+                        Text(desc, fontSize = 10.sp, modifier = Modifier.weight(1f), maxLines = 2)
+                        Text("\u20b9" + inr(amt), fontSize = 10.sp)
+                    }
+                }
+                Divider(Modifier.padding(vertical = 6.dp))
+                Text("PAYMENT", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color(0xFF465046))
+                val d = detail
+                if(d != null) {
+                    listOf("Cash" to d.cash, "UPI" to d.upi, "Card" to d.card).forEach { (lab, v) ->
+                        if(v > 0.5) Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
+                            Text(lab, fontSize = 10.sp, color = Color.Gray); Text("\u20b9" + inr(v), fontSize = 10.sp)
+                        }
+                    }
+                    if(d.finance.isNotBlank()) Text("Finance: " + d.finance, fontSize = 10.sp, color = Color.Gray)
+                    Row(Modifier.fillMaxWidth().padding(top = 4.dp), Arrangement.SpaceBetween) {
+                        Text("Total", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        Text("\u20b9" + inr(d.total), fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    }
+                    if(d.balance > 0.5) Text("Due \u20b9" + inr(d.balance), fontSize = 11.sp, color = Color.Red, fontWeight = FontWeight.Bold)
+                }
+                Spacer(Modifier.height(10.dp))
+                Row {
+                    Button(onClick = {
+                        scope.launch {
+                            busy = true
+                            val f = withContext(Dispatchers.IO) { renderBill(ctx, ms) }
+                            busy = false
+                            if(f != null) openPdf(ctx, f) else Toast.makeText(ctx, "This bill has no stored item details, so it cannot be rebuilt", Toast.LENGTH_LONG).show()
+                        }
+                    }, modifier = Modifier.weight(1f), enabled = !busy) { Text("VIEW", fontSize = 10.sp) }
+                    Spacer(Modifier.width(6.dp))
+                    OutlinedButton(onClick = {
+                        scope.launch {
+                            busy = true
+                            val f = withContext(Dispatchers.IO) { renderBill(ctx, ms) }
+                            busy = false
+                            if(f != null) sharePdf(ctx, f) else Toast.makeText(ctx, "Nothing to share for this bill", Toast.LENGTH_LONG).show()
+                        }
+                    }, modifier = Modifier.weight(1f), enabled = !busy) { Text("SHARE", fontSize = 10.sp) }
+                }
+                Spacer(Modifier.height(10.dp))
+                Divider()
+                TextButton(onClick = { confirmCancel = true }) { Text("CANCEL THIS BILL", color = Color.Red, fontSize = 10.sp) }
+                Text("Stock returns, the number is voided, and the reason is recorded.", fontSize = 8.sp, color = Color.Gray)
+                Spacer(Modifier.height(30.dp))
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------- CRM screen
@@ -4693,6 +4980,98 @@ fun rebuildCustomersFromBills(ctx: Context): Int {
         seen
     } catch(e: Exception) { 0 }
 }
+
+// ---------------------------------------------------------------- bills browser
+// A lean row: no JSON parsing, so ten thousand of them cost almost nothing to scan.
+data class BillLite(val ms: Long, val inv: String, val date: String, val buyer: String,
+                    val total: Double, val balance: Double, val cancelled: Boolean, val quote: Boolean)
+
+fun billsLite(ctx: Context, fromMs: Long, toMs: Long, includeCancelled: Boolean = false): List<BillLite> {
+    val out = mutableListOf<BillLite>()
+    try {
+        val where = StringBuilder("WHERE ms >= ? AND ms < ? AND IFNULL(quote,0) = 0")
+        if(!includeCancelled) where.append(" AND IFNULL(cancelled,0) = 0")
+        db(ctx).readableDatabase.rawQuery(
+            "SELECT ms, IFNULL(inv,''), IFNULL(date,''), IFNULL(buyer,''), IFNULL(total,0), IFNULL(balance,0), " +
+            "IFNULL(cancelled,0), IFNULL(quote,0) FROM bills $where ORDER BY ms DESC",
+            arrayOf(fromMs.toString(), toMs.toString())).use { c ->
+            while(c.moveToNext()) out.add(BillLite(c.getLong(0), c.getString(1) ?: "", c.getString(2) ?: "",
+                c.getString(3) ?: "", c.getDouble(4), c.getDouble(5), c.getInt(6) != 0, c.getInt(7) != 0))
+        }
+    } catch(e: Exception) { }
+    return out
+}
+
+data class BillBucket(val key: String, val label: String, val bills: Int, val total: Double, val due: Double,
+                      val startMs: Long, val endMs: Long)
+
+fun monthBuckets(rows: List<BillLite>): List<BillBucket> {
+    val cal = Calendar.getInstance()
+    return rows.groupBy { r ->
+        cal.timeInMillis = r.ms
+        String.format("%04d-%02d", cal.get(Calendar.YEAR), cal.get(Calendar.MONTH) + 1)
+    }.map { entry ->
+        val parts = entry.key.split("-")
+        val c = Calendar.getInstance().apply {
+            set(Calendar.YEAR, parts[0].toInt()); set(Calendar.MONTH, parts[1].toInt() - 1)
+            set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+        }
+        val start = c.timeInMillis
+        c.add(Calendar.MONTH, 1)
+        BillBucket(entry.key, SimpleDateFormat("MMMM yyyy", Locale.ENGLISH).format(Date(start)),
+            entry.value.size, entry.value.sumOf { it.total }, entry.value.sumOf { it.balance }, start, c.timeInMillis)
+    }.sortedByDescending { it.startMs }
+}
+
+fun dayBuckets(rows: List<BillLite>): List<BillBucket> {
+    val cal = Calendar.getInstance()
+    return rows.groupBy { r ->
+        cal.timeInMillis = r.ms
+        String.format("%04d-%02d-%02d", cal.get(Calendar.YEAR), cal.get(Calendar.MONTH) + 1, cal.get(Calendar.DAY_OF_MONTH))
+    }.map { entry ->
+        val parts = entry.key.split("-")
+        val c = Calendar.getInstance().apply {
+            set(Calendar.YEAR, parts[0].toInt()); set(Calendar.MONTH, parts[1].toInt() - 1)
+            set(Calendar.DAY_OF_MONTH, parts[2].toInt()); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+        }
+        val start = c.timeInMillis
+        c.add(Calendar.DAY_OF_MONTH, 1)
+        BillBucket(entry.key, SimpleDateFormat("dd-MMM  EEE", Locale.ENGLISH).format(Date(start)),
+            entry.value.size, entry.value.sumOf { it.total }, entry.value.sumOf { it.balance }, start, c.timeInMillis)
+    }.sortedByDescending { it.startMs }
+}
+
+data class BillDetail(val ms: Long, val inv: String, val date: String, val buyer: String, val phone: String,
+                      val total: Double, val paid: Double, val balance: Double, val cash: Double, val upi: Double,
+                      val card: Double, val finance: String, val items: List<Pair<String, Double>>, val cancelled: Boolean)
+
+fun billDetail(ctx: Context, ms: Long): BillDetail? {
+    return try {
+        var out: BillDetail? = null
+        db(ctx).readableDatabase.rawQuery(
+            "SELECT inv,date,buyer,IFNULL(bphone,''),total,paid,balance,cash,upi,card,IFNULL(finance,''),IFNULL(lines,'[]'),IFNULL(cancelled,0) " +
+            "FROM bills WHERE ms=?", arrayOf(ms.toString())).use { c ->
+            if(c.moveToFirst()) {
+                val items = mutableListOf<Pair<String, Double>>()
+                try {
+                    val arr = JSONArray(c.getString(11) ?: "[]")
+                    for(i in 0 until arr.length()) {
+                        val o = arr.optJSONObject(i) ?: continue
+                        val desc = o.optString("desc") + (if(o.optString("serial").isNotBlank()) "  \u00b7  " + o.optString("serial") else "")
+                        items.add(desc to (o.optDouble("rate", 0.0) * o.optDouble("qty", 1.0)))
+                    }
+                } catch(e: Exception) { }
+                out = BillDetail(ms, c.getString(0) ?: "", c.getString(1) ?: "", c.getString(2) ?: "", c.getString(3) ?: "",
+                    c.getDouble(4), c.getDouble(5), c.getDouble(6), c.getDouble(7), c.getDouble(8), c.getDouble(9),
+                    c.getString(10) ?: "", items, c.getInt(12) != 0)
+            }
+        }
+        out
+    } catch(e: Exception) { null }
+}
+
 
 // ---------------------------------------------------------------- CRM
 // One row per customer, with what the bills say about them. Nothing here is typed by hand:
