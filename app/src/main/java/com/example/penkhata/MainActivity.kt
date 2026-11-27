@@ -94,7 +94,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "9.3.1 · restore"
+const val APP_VERSION = "9.3.2 · launcher"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -227,6 +227,19 @@ fun healPrefTypes(prefs: android.content.SharedPreferences) {
         }
         ed.apply()
     } catch(e: Exception) { }
+}
+
+// Firing a launcher before the screen is STARTED makes ActivityResultRegistry fall back to
+// startActivityForResult, whose request code does not fit in 16 bits - and FragmentActivity throws
+// "Can only use lower 16 bits for requestCode". So a launch waits until the screen is live.
+fun launchWhenReady(owner: androidx.lifecycle.LifecycleOwner, action: () -> Unit) {
+    if(owner.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) {
+        try { action() } catch(e: Exception) { }
+    } else {
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            try { action() } catch(e: Exception) { }
+        }, 300)
+    }
 }
 
 // A preference can be the wrong type after a bad restore. Reading it must never crash.
@@ -1941,7 +1954,8 @@ fun BarcodeScannerDialog(onValue: (String) -> Unit, onClose: () -> Unit) {
     }
     LaunchedEffect(Unit) {
         if(androidx.core.content.ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.CAMERA)
-            != android.content.pm.PackageManager.PERMISSION_GRANTED) permission.launch(android.Manifest.permission.CAMERA)
+            != android.content.pm.PackageManager.PERMISSION_GRANTED)
+            launchWhenReady(lifecycleOwner) { permission.launch(android.Manifest.permission.CAMERA) }
     }
     Dialog(onDismissRequest = { onClose() }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Box(Modifier.fillMaxSize().background(Color.Black)) {
@@ -3548,17 +3562,17 @@ fun monthlySales(ctx: Context, months: Int): List<Pair<String, Double>> {
             Spacer(Modifier.height(8.dp))
             Button(onClick = {
                 pickerInFlight = true
-                xlsxLauncher.launch("PenKhata-export-" + SimpleDateFormat("yyyyMMdd", Locale.ENGLISH).format(Date()) + ".xlsx")
+                launchWhenReady(LocalLifecycleOwner.current) { xlsxLauncher.launch("PenKhata-export-" + SimpleDateFormat("yyyyMMdd", Locale.ENGLISH).format(Date()) + ".xlsx") }
             }, modifier = Modifier.fillMaxWidth()) { Text("EXPORT XLSX") }
             Spacer(Modifier.height(6.dp))
             Button(onClick = {
                 pickerInFlight = true
-                csvLauncher.launch("PenKhata-bills-" + SimpleDateFormat("MMMyyyy", Locale.ENGLISH).format(Date(startMs)) + ".csv")
+                launchWhenReady(LocalLifecycleOwner.current) { csvLauncher.launch("PenKhata-bills-" + SimpleDateFormat("MMMyyyy", Locale.ENGLISH).format(Date(startMs)) + ".csv") }
             }, modifier = Modifier.fillMaxWidth()) { Text("EXPORT CSV (THIS MONTH)") }
             Spacer(Modifier.height(6.dp))
             Button(onClick = {
                 pickerInFlight = true
-                registerLauncher.launch("Installation-Register-" + SimpleDateFormat("MMMyyyy", Locale.ENGLISH).format(Date(startMs)) + ".xlsx")
+                launchWhenReady(LocalLifecycleOwner.current) { registerLauncher.launch("Installation-Register-" + SimpleDateFormat("MMMyyyy", Locale.ENGLISH).format(Date(startMs)) + ".xlsx") }
             }, modifier = Modifier.fillMaxWidth()) { Text("INSTALLATION REGISTER (XLSX)") }
         }}
         val trend by produceState(initialValue = emptyList<Pair<String, Double>>(), offset) {
@@ -3750,6 +3764,7 @@ fun monthlySales(ctx: Context, months: Int): List<Pair<String, Double>> {
 
 @Composable fun SettingsScreen(hasPinSet: Boolean, onDataChanged: () -> Unit, onPinSave: (String)->Unit) {
     val focusManager = LocalFocusManager.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val ctx=LocalContext.current
     val prefs=remember{ctx.getSharedPreferences("penkhata_data",Context.MODE_PRIVATE)}
     var backupPw by rememberSaveable { mutableStateOf("") }
@@ -3964,8 +3979,10 @@ if(settingsTab == "backup") {
 Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Backup & Restore", fontWeight=FontWeight.Bold); Text("One file with your data, a readable XLSX copy and any stored PDFs. Add a password to encrypt it - there is no recovery if you forget it. The app PIN is never included.", fontSize=10.sp); OutlinedTextField(backupPw, {backupPw=it}, label={Text("Password (optional)")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.height(8.dp)); Button(onClick={
                 val name = "penkhata-backup-" + SimpleDateFormat("yyyyMMdd-HHmm", Locale.ENGLISH).format(Date())
                 pickerInFlight = true
-                if(backupPw.isBlank()) backupLauncher.launch("$name.zip") else backupEncLauncher.launch("$name.pkh")
-            }, modifier=Modifier.fillMaxWidth()){ Text("BACKUP DATA") }; Spacer(Modifier.height(6.dp)); Button(onClick={ pickerInFlight = true; restoreLauncher.launch(arrayOf("application/json","text/plain","*/*")) }, modifier=Modifier.fillMaxWidth()){ Text("RESTORE DATA") } }}; Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Reset", fontWeight=FontWeight.Bold); Text("Master reset clears bills, PDFs, customers, stock, ledger and expenses but keeps every setting on this screen. Total reset clears those as well and starts the app empty.", fontSize=10.sp); Spacer(Modifier.height(8.dp)); Button(onClick={ confirmMaster = true }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFEF6C00))){ Text("MASTER RESET (KEEP SETTINGS)") }; Spacer(Modifier.height(6.dp)); Button(onClick={ confirmAll = true }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFC62828))){ Text("TOTAL RESET (EVERYTHING)") } }};
+                launchWhenReady(lifecycleOwner) {
+                    if(backupPw.isBlank()) backupLauncher.launch("$name.zip") else backupEncLauncher.launch("$name.pkh")
+                }
+            }, modifier=Modifier.fillMaxWidth()){ Text("BACKUP DATA") }; Spacer(Modifier.height(6.dp)); Button(onClick={ pickerInFlight = true; launchWhenReady(lifecycleOwner) { restoreLauncher.launch(arrayOf("application/json","text/plain","*/*")) } }, modifier=Modifier.fillMaxWidth()){ Text("RESTORE DATA") } }}; Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Reset", fontWeight=FontWeight.Bold); Text("Master reset clears bills, PDFs, customers, stock, ledger and expenses but keeps every setting on this screen. Total reset clears those as well and starts the app empty.", fontSize=10.sp); Spacer(Modifier.height(8.dp)); Button(onClick={ confirmMaster = true }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFEF6C00))){ Text("MASTER RESET (KEEP SETTINGS)") }; Spacer(Modifier.height(6.dp)); Button(onClick={ confirmAll = true }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFC62828))){ Text("TOTAL RESET (EVERYTHING)") } }};
             }
 }
      if(editPerson != null) AlertDialog(
