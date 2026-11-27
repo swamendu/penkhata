@@ -87,7 +87,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "8.9.1 · table"
+const val APP_VERSION = "9.0 · serial matrix"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -2789,38 +2789,162 @@ fun ReceiveScreen(onDone: () -> Unit) {
 fun SerialScreen(grnId: Long, lineId: Long, onDone: () -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
-    var text by remember { mutableStateOf("") }
     val grn = remember { loadGrns(ctx).firstOrNull { it.id == grnId } }
     val line = remember { grnLines(ctx, grnId).firstOrNull { it.first == lineId }?.second }
-    val pending = remember { unitsForGrn(ctx, grnId).count { it.status == "PENDING" && it.sku == (line?.sku ?: "") } }
+    val ident = line?.identType ?: "SERIAL"
+    val pendingUnits = remember { unitsForGrn(ctx, grnId).filter { it.status == "PENDING" && it.sku == (line?.sku ?: "") } }
+    val needsTwo = ident == "SERIAL2"
+    // one row per unit: the serial is entered where it belongs, not into a blob
+    var rows by remember { mutableStateOf(List(pendingUnits.size) { "" to "" }) }
+    var scanning by remember { mutableStateOf(-1) }
+    val known = remember {
+        val fromUnits = unitsForGrn(ctx, grnId).map { it.serial1 }.filter { it.isNotBlank() } +
+                        unitsForGrn(ctx, grnId).map { it.serial2 }.filter { it.isNotBlank() }
+        val fromStock = loadStock(ctx).flatMap { it.imeiList() }
+        (fromUnits + fromStock).toSet()
+    }
+    fun valid(v: String): Boolean {
+        val t = v.trim()
+        if(t.isEmpty()) return false
+        if(ident == "IMEI") return t.length == 15 && t.all { it.isDigit() }
+        return t.length >= 5
+    }
+    fun statusOf(idx: Int): String {
+        val v = rows[idx].first.trim()
+        if(v.isEmpty()) return ""
+        if(!valid(v)) return if(ident == "IMEI") v.length.toString() + " digits" else "too short"
+        if(known.contains(v)) return "already in stock"
+        if(rows.count { it.first.trim() == v } > 1) return "duplicate"
+        return "ok"
+    }
+    val filled = rows.indices.count { i -> valid(rows[i].first.trim()) && statusOf(i) == "ok" }
 
-    Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
+    if(scanning >= 0) {
+        SerialScanDialog(
+            onDone = { value ->
+                if(scanning in rows.indices && value.isNotBlank())
+                    rows = rows.toMutableList().also { it[scanning] = value.trim() to rows[scanning].second }
+                scanning = -1
+            },
+            onCancel = { scanning = -1 })
+    }
+
+    Column(Modifier.padding(12.dp).verticalScroll(rememberScrollState())) {
         Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
             Text("ENTER SERIALS", fontSize = 20.sp, fontWeight = FontWeight.Bold)
             TextButton(onClick = { onDone() }) { Text("BACK") }
         }
-        Text((grn?.no ?: "") + "  \u00b7  " + (line?.sku ?: ""), fontSize = 11.sp, color = Color.Gray)
-        Text((line?.model ?: "") + (if((line?.variant ?: "").isBlank()) "" else " " + line!!.variant), fontSize = 12.sp, fontWeight = FontWeight.Bold)
-        Text(identLabel(line?.identType ?: "SERIAL") + "  \u00b7  " + pending + " still pending", fontSize = 10.sp, color = Color(0xFFB26A00))
-        Spacer(Modifier.height(8.dp))
-        OutlinedTextField(text, {text=it}, label={Text("One per line. For an AC: indoor, outdoor")}, minLines = 6,
-            modifier = Modifier.fillMaxWidth())
-        Text("Paste or type the numbers from the boxes, one per line. Duplicates are ignored.", fontSize = 9.sp, color = Color.Gray)
-        Spacer(Modifier.height(8.dp))
-        Button(onClick = {
-            val rows = text.split("\n").map { it.trim() }.filter { it.isNotBlank() }.map {
-                val parts = it.split(",", ";").map { p -> p.trim() }
-                (parts.getOrNull(0) ?: "") to (parts.getOrNull(1) ?: "")
+        Text((grn?.no ?: "") + "  \u00b7  " + (grn?.distributor ?: "") + (if((grn?.brand ?: "").isBlank()) "" else "  \u00b7  " + grn!!.brand),
+            fontSize = 10.sp, color = Color.Gray)
+        Text((line?.model ?: "") + (if((line?.variant ?: "").isBlank()) "" else "  \u00b7  " + line!!.variant), fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        Text((line?.sku ?: "") + "  \u00b7  " + identLabel(ident) + "  \u00b7  " + pendingUnits.size + " unit(s)",
+            fontSize = 10.sp, color = Color(0xFFB26A00))
+        Spacer(Modifier.height(6.dp))
+
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Button(onClick = { scanning = rows.indexOfFirst { it.first.isBlank() }.let { if(it < 0) 0 else it } },
+                modifier = Modifier.weight(1f)) { Text("SCAN NEXT", fontSize = 11.sp) }
+            Spacer(Modifier.width(6.dp))
+            Text(filled.toString() + " of " + rows.size, fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                color = if(filled == rows.size) Color(0xFF2E7D32) else Color(0xFFB26A00))
+        }
+        Spacer(Modifier.height(6.dp))
+
+        Card(Modifier.padding(vertical = 4.dp)) { Column(Modifier.padding(6.dp)) {
+            Row(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+                Text("#", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color.Gray, modifier = Modifier.width(18.dp))
+                Text(if(ident == "IMEI") "IMEI (15 digits)" else "SERIAL", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color.Gray,
+                    modifier = Modifier.weight(1f))
+                if(needsTwo) Text("OUTDOOR", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color.Gray, modifier = Modifier.width(90.dp))
+                Text("", modifier = Modifier.width(26.dp))
             }
-            if(rows.isEmpty()) { Toast.makeText(ctx, "Nothing to save", Toast.LENGTH_SHORT).show(); return@Button }
+            Divider()
+            rows.indices.forEach { i ->
+                val st = statusOf(i)
+                Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text((i + 1).toString(), fontSize = 9.sp, color = Color.Gray, modifier = Modifier.width(18.dp))
+                    OutlinedTextField(
+                        rows[i].first,
+                        { v ->
+                            // pasting a list of serials fills the rows below instead of one box
+                            val parts = v.split("\n").map { it.trim() }.filter { it.isNotBlank() }
+                            if(parts.size > 1) {
+                                val next = rows.toMutableList()
+                                parts.forEachIndexed { k, p -> if(i + k < next.size) next[i + k] = p to next[i + k].second }
+                                rows = next
+                            } else rows = rows.toMutableList().also { it[i] = v to rows[i].second }
+                        },
+                        modifier = Modifier.weight(1f).height(52.dp),
+                        singleLine = true,
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp),
+                        keyboardOptions = KeyboardOptions(keyboardType = if(ident == "IMEI") KeyboardType.Number else KeyboardType.Text,
+                            imeAction = ImeAction.Next, autoCorrect = false),
+                        trailingIcon = { if(rows[i].first.isNotBlank())
+                            TextButton(onClick = { scanning = i }, contentPadding = androidx.compose.foundation.layout.PaddingValues(2.dp)) { Text("\u25a3", fontSize = 12.sp) } })
+                    if(needsTwo) {
+                        Spacer(Modifier.width(4.dp))
+                        OutlinedTextField(rows[i].second, { v -> rows = rows.toMutableList().also { it[i] = rows[i].first to v } },
+                            modifier = Modifier.width(90.dp).height(52.dp), singleLine = true,
+                            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, autoCorrect = false))
+                    }
+                    Text(if(st == "ok") "\u2713" else if(st.isEmpty()) "" else "!",
+                        fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                        color = if(st == "ok") Color(0xFF2E7D32) else if(st.isEmpty()) Color.Gray else Color.Red,
+                        modifier = Modifier.width(26.dp))
+                }
+                if(st.isNotEmpty() && st != "ok")
+                    Text("row " + (i + 1) + ": " + st, fontSize = 8.sp, color = Color.Red, modifier = Modifier.padding(start = 18.dp))
+                Divider(color = Color(0x18000000))
+            }
+        }}
+
+        val ready = rows.mapIndexed { i, r -> i to r }.filter { (i, r) -> valid(r.first.trim()) && statusOf(i) == "ok" }
+        Text("Duplicates, short numbers and serials already in stock are not saved.", fontSize = 9.sp, color = Color.Gray)
+        Spacer(Modifier.height(4.dp))
+        Button(onClick = {
+            if(ready.isEmpty()) { Toast.makeText(ctx, "No valid serials to save", Toast.LENGTH_SHORT).show(); return@Button }
             scope.launch {
-                val n = withContext(Dispatchers.IO) { saveSerials(ctx, grnId, lineId, rows.distinctBy { it.first }) }
-                Toast.makeText(ctx, if(n > 0) "$n serials recorded" else "Nothing saved", Toast.LENGTH_LONG).show()
+                val n = withContext(Dispatchers.IO) {
+                    saveSerials(ctx, grnId, lineId, ready.map { (i, r) -> r.first.trim() to r.second.trim() })
+                }
+                Toast.makeText(ctx, if(n > 0) "$n serial(s) recorded" + (if(n < rows.size) ", " + (rows.size - n) + " left pending" else "")
+                    else "Nothing saved", Toast.LENGTH_LONG).show()
                 onDone()
             }
-        }, modifier = Modifier.fillMaxWidth()) { Text("SAVE SERIALS") }
+        }, modifier = Modifier.fillMaxWidth(), enabled = ready.isNotEmpty()) {
+            Text(if(ready.size == rows.size) "SAVE ALL " + rows.size else "SAVE " + ready.size + " OF " + rows.size)
+        }
+        Spacer(Modifier.height(40.dp))
     }
 }
+
+// A small scan sheet, so a serial can be read into the row it belongs to.
+@Composable
+fun SerialScanDialog(onDone: (String) -> Unit, onCancel: () -> Unit) {
+    val ctx = LocalContext.current
+    var manual by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = { onCancel() },
+        title = { Text("Scan or type") },
+        text = { Column {
+            Text("Point the camera at the box, or type the number.", fontSize = 10.sp, color = Color.Gray)
+            Spacer(Modifier.height(6.dp))
+            OutlinedTextField(manual, { manual = it }, label = { Text("Number") }, modifier = Modifier.fillMaxWidth(),
+                singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, autoCorrect = false))
+            Spacer(Modifier.height(6.dp))
+            Button(onClick = {
+                val g = GmsBarcodeScanning.getClient(ctx, GmsBarcodeScannerOptions.Builder().build())
+                try {
+                    g.startScan().addOnSuccessListener { b -> val v = b.rawValue; if(v != null) onDone(v) }
+                        .addOnFailureListener { onCancel() }
+                } catch(e: Exception) { onCancel() }
+            }, modifier = Modifier.fillMaxWidth()) { Text("SCAN") }
+        } },
+        confirmButton = { TextButton(onClick = { onDone(manual) }) { Text("USE THIS") } },
+        dismissButton = { TextButton(onClick = { onCancel() }) { Text("CANCEL") } })
+}
+
 @Composable
 fun PurchaseScreen(onDone: () -> Unit) {
     val ctx = LocalContext.current
