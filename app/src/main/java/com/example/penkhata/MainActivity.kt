@@ -86,7 +86,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "8.8.1 · keyboard"
+const val APP_VERSION = "8.9 · matrices"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -1558,10 +1558,29 @@ fun InvoiceScreen(isQuote: Boolean) {
         }}
         Card(Modifier.padding(vertical=5.dp)) { Column(Modifier.padding(10.dp)) {
             Text("Add Item", fontWeight=FontWeight.Bold)
-            OutlinedTextField(iDesc, {iDesc=it}, label={Text("Item Name")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(iSerial, { iSerial = it; applyStockByImei(it) }, label={Text("Serial / IMEI")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+                AutoSuggestField("Model, variant or IMEI", iDesc, { v ->
+                    iDesc = v
+                    // a serial typed or pasted brings the whole line with it
+                    if(v.trim().length >= 10 && v.trim().all { it.isDigit() }) applyStockByImei(v)
+                }, (stockUnits.map { it.first.model + (if(it.first.variant.isBlank()) "" else "  \u00b7  " + it.first.variant) }.distinct() +
+                    stockUnits.map { it.second }.filter { it.isNotBlank() }).take(300),
+                    { picked ->
+                        val hit = stockUnits.firstOrNull { it.second == picked }
+                        if(hit != null) {
+                            val e = hit.first
+                            iBrand = e.brand; iCls = e.cls
+                            iDesc = e.model + (if(e.variant.isBlank()) "" else " " + e.variant)
+                            iSerial = hit.second; iHsn = e.hsn
+                            if(e.mrp > 0.0) iRate = if(e.mrp == e.mrp.toLong().toDouble()) e.mrp.toLong().toString() else e.mrp.toString()
+                            iQty = "1"
+                        } else iDesc = picked
+                    }, Modifier.weight(1f), allowNew = true)
                 IconButton(onClick = { startImeiScan() }) { Icon(Icons.Default.QrCodeScanner, "Scan IMEI") }
+            }
+            if(iSerial.isNotBlank()) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("Serial: " + iSerial, fontSize = 10.sp, color = Color(0xFF2E7D32), modifier = Modifier.weight(1f), maxLines = 2)
+                TextButton(onClick = { iSerial = "" }) { Text("CLEAR", fontSize = 9.sp) }
             }
             Row { OutlinedTextField(iHsn, {iHsn=it}, label={Text("HSN")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.width(5.dp)); OutlinedTextField(iUnit, {iUnit=it}, label={Text("Unit")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })) }
             Row { OutlinedTextField(iQty, {iQty=it}, label={Text("Qty")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.width(5.dp)); OutlinedTextField(iRate, {iRate=it}, label={Text("Rate (Inc. Tax)")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })) }
@@ -1805,26 +1824,40 @@ fun StockAuditScreen(onDone: () -> Unit) {
         Spacer(Modifier.height(6.dp))
 
         if(stock.isEmpty()) Text("No stock to count.", fontSize = 11.sp)
-        stock.sortedBy { it.model.lowercase() }.forEach { e ->
-            Card(Modifier.padding(vertical = 3.dp)) { Column(Modifier.padding(10.dp)) {
-                Text(e.model, fontWeight = FontWeight.Bold, maxLines = 1, fontSize = 12.sp)
-                Text((if(e.brand.isBlank()) "" else e.brand + " \u00b7 ") + "book " + e.qty + "  \u00b7  cost \u20b9" + fmt(e.cost), fontSize = 10.sp, color = Color.Gray)
-                if(e.imeiList().isNotEmpty()) Text(e.imeiList().joinToString(", "), fontSize = 9.sp, maxLines = 2)
-                Row(verticalAlignment = Alignment.CenterVertically) {
+        // a count sheet, not a gallery: one tight row per unit
+        Card(Modifier.padding(vertical = 4.dp)) { Column(Modifier.padding(6.dp)) {
+            Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("MODEL", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color.Gray, modifier = Modifier.weight(1.1f))
+                Text("SERIAL / IMEI", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color.Gray, modifier = Modifier.weight(1.2f))
+                Text("BOOK", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color.Gray, modifier = Modifier.width(34.dp))
+                Text("COUNT", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color.Gray, modifier = Modifier.width(58.dp))
+                Text("", modifier = Modifier.width(30.dp))
+            }
+            Divider()
+            stock.sortedBy { (it.model + it.variant).lowercase() }.forEach { e ->
+                val diff = countedFor(e) - e.qty
+                Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1.1f)) {
+                        Text(e.model, fontSize = 9.sp, maxLines = 1)
+                        Text((if(e.variant.isBlank()) "" else e.variant + "  ") + "\u20b9" + inr(e.cost), fontSize = 7.sp, color = Color.Gray, maxLines = 1)
+                    }
+                    Text(if(e.imeiList().isEmpty()) "-" else e.imeiList().joinToString(" "), fontSize = 8.sp,
+                        modifier = Modifier.weight(1.2f), maxLines = 1)
+                    Text(e.qty.toString(), fontSize = 10.sp, modifier = Modifier.width(34.dp))
                     OutlinedTextField(
                         counted[e.id] ?: e.qty.toString(),
                         { v -> counted = counted + (e.id to v) },
-                        label = { Text("Counted") },
-                        modifier = Modifier.width(120.dp),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Next)
-                    )
-                    Spacer(Modifier.width(10.dp))
-                    val diff = countedFor(e) - e.qty
-                    Text(if(diff == 0) "matches" else (if(diff > 0) "+" else "") + diff + " units", fontSize = 11.sp,
-                        color = if(diff == 0) Color(0xFF2E7D32) else Color.Red)
+                        modifier = Modifier.width(58.dp).height(46.dp),
+                        singleLine = true,
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Next))
+                    Text(if(diff == 0) "\u2713" else (if(diff > 0) "+" else "") + diff,
+                        fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                        color = if(diff == 0) Color(0xFF2E7D32) else Color.Red, modifier = Modifier.width(30.dp))
                 }
-            }}
-        }
+                Divider(color = Color(0x22000000))
+            }
+        }}
 
         Spacer(Modifier.height(10.dp))
         val bookUnits = stock.sumOf { it.qty }
@@ -1981,7 +2014,9 @@ fun StockMasterScreen(onDone: () -> Unit) {
     var newModelName by rememberSaveable { mutableStateOf("") }
     var newModelCat by rememberSaveable { mutableStateOf("Mobile") }
     var showAddProduct by remember { mutableStateOf(false) }
+    var showMatrix by remember { mutableStateOf(false) }
     var modelOpen by remember { mutableStateOf(setOf<Long>()) }
+    var matrixQ by remember { mutableStateOf("") }
     var newModelVariant by rememberSaveable { mutableStateOf("") }
     var newModelSku by rememberSaveable { mutableStateOf("") }
     var newModelMrp by rememberSaveable { mutableStateOf("") }
@@ -2106,6 +2141,51 @@ fun StockMasterScreen(onDone: () -> Unit) {
                 Button(onClick = { tab = id }, modifier = Modifier.weight(1f).padding(horizontal = 2.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = if(tab == id) Color(0xFF2E7D32) else Color.LightGray)) {
                     Text(label, fontSize = 9.sp, maxLines = 1, color = if(tab == id) Color.White else Color.Black)
+                }
+            }
+        }
+
+        if(showMatrix) Dialog(onDismissRequest = { showMatrix = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false)) {
+            val allSkus = loadSkus(ctx)
+            Card(Modifier.fillMaxWidth(0.98f).fillMaxHeight(0.92f).background(Color.White)) {
+                Column(Modifier.padding(10.dp).fillMaxSize()) {
+                    Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
+                        Text("Product matrix", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                        TextButton(onClick = { showMatrix = false }) { Text("CLOSE") }
+                    }
+                    OutlinedTextField(matrixQ, { matrixQ = it }, label = { Text("Search brand, model, variant or SKU") },
+                        modifier = Modifier.fillMaxWidth(), singleLine = true)
+                    val rows = allSkus.filter { k -> matrixQ.isBlank() ||
+                        k.brand.contains(matrixQ.trim(), true) || k.model.contains(matrixQ.trim(), true) ||
+                        k.variant.contains(matrixQ.trim(), true) || k.sku.contains(matrixQ.trim(), true) }
+                    Text(rows.size.toString() + " of " + allSkus.size + " product(s)", fontSize = 9.sp, color = Color.Gray)
+                    Spacer(Modifier.height(3.dp))
+                    Row(Modifier.fillMaxWidth().background(Color(0xFFE8EDE8)).padding(vertical = 4.dp)) {
+                        Text("BRAND", fontSize = 8.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(78.dp))
+                        Text("MODEL", fontSize = 8.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(130.dp))
+                        Text("VARIANT", fontSize = 8.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(76.dp))
+                        Text("SKU", fontSize = 8.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(118.dp))
+                        Text("MRP", fontSize = 8.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(64.dp))
+                        Text("GST", fontSize = 8.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(34.dp))
+                        Text("HSN", fontSize = 8.sp, fontWeight = FontWeight.Bold)
+                    }
+                    androidx.compose.foundation.lazy.LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
+                        items(rows.take(400)) { k ->
+                            Row(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+                                Text(k.brand, fontSize = 9.sp, modifier = Modifier.width(78.dp), maxLines = 1)
+                                Text(k.model, fontSize = 9.sp, modifier = Modifier.width(130.dp), maxLines = 1)
+                                Text(if(k.variant.isBlank()) "-" else k.variant, fontSize = 9.sp, modifier = Modifier.width(76.dp), maxLines = 1)
+                                Text(k.sku, fontSize = 9.sp, modifier = Modifier.width(118.dp), maxLines = 1)
+                                Text(if(k.mrp > 0.0) inr(k.mrp) else "-", fontSize = 9.sp, modifier = Modifier.width(64.dp), maxLines = 1)
+                                Text(if(k.gstRate == k.gstRate.toLong().toDouble()) k.gstRate.toLong().toString() else k.gstRate.toString(),
+                                    fontSize = 9.sp, modifier = Modifier.width(34.dp), maxLines = 1)
+                                Text(k.hsn, fontSize = 9.sp, maxLines = 1)
+                            }
+                            Divider(color = Color(0x22000000))
+                        }
+                    }
+                    Text("Swipe sideways to read the full row.", fontSize = 8.sp, color = Color.Gray)
                 }
             }
         }
@@ -2238,7 +2318,11 @@ fun StockMasterScreen(onDone: () -> Unit) {
                 }
             }}
 
-            Button(onClick = { showAddProduct = true }, modifier = Modifier.fillMaxWidth()) { Text("+ ADD A PRODUCT") }
+            Row(Modifier.fillMaxWidth()) {
+                Button(onClick = { showAddProduct = true }, modifier = Modifier.weight(1f)) { Text("+ ADD A PRODUCT", fontSize = 11.sp) }
+                Spacer(Modifier.width(5.dp))
+                OutlinedButton(onClick = { showMatrix = true }, modifier = Modifier.weight(1f)) { Text("PRODUCT MATRIX", fontSize = 11.sp) }
+            }
         }
 
         if(tab == "brands") {
@@ -2996,14 +3080,16 @@ fun PurchaseScreen(onDone: () -> Unit) {
                 }
             }
             Divider(Modifier.padding(vertical = 5.dp))
-            Text("Ageing (days in stock)", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            Text("Stock ageing \u2014 days since received", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            Text("How long each unit has sat on your shelf. This is not the distributor's credit period.",
+                fontSize = 8.sp, color = Color.Gray)
             val today = System.currentTimeMillis()
             val ageOf = { e: StockEntry -> try { (today - SimpleDateFormat("dd-MMM-yyyy", Locale.ENGLISH).parse(e.addedOn)!!.time) / 86400000L } catch(ex: Exception) { 0L } }
             val buckets = listOf("0-30" to (0L..30L), "31-60" to (31L..60L), "61-90" to (61L..90L), "90+" to (91L..100000L))
             buckets.forEach { (label, range) ->
                 val inBucket = stock.filter { ageOf(it) in range }
                 if(inBucket.isNotEmpty()) Row(Modifier.fillMaxWidth().padding(vertical = 1.dp), Arrangement.SpaceBetween) {
-                    Text(label + " days  (" + inBucket.sumOf { it.qty } + " units)", fontSize = 10.sp)
+                    Text(label + " days in shop  (" + inBucket.sumOf { it.qty } + " units)", fontSize = 10.sp)
                     Text("\u20b9" + fmt(inBucket.sumOf { it.cost * it.qty }), fontSize = 10.sp, color = if(label == "90+") Color.Red else Color.Unspecified)
                 }
             }
