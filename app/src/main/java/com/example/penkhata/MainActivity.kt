@@ -24,6 +24,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.PopupProperties
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -85,7 +86,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "8.8 · search first"
+const val APP_VERSION = "8.8.1 · keyboard"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -1891,10 +1892,12 @@ fun AutoSuggestField(label: String, value: String, onValueChange: (String) -> Un
             modifier = Modifier.fillMaxWidth().onFocusChanged { focused = it.isFocused },
             singleLine = true, enabled = enabled,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-            keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus() }))
+            keyboardActions = KeyboardActions(onSearch = { focused = false }))
         DropdownMenu(
             expanded = focused && q.isNotEmpty() && (hits.isNotEmpty() || (allowNew && !exact)),
-            onDismissRequest = { focused = false }) {
+            onDismissRequest = { focused = false },
+            // focusable = true (the default) takes focus from the field and the keyboard shuts
+            properties = PopupProperties(focusable = false)) {
             hits.forEach { o ->
                 DropdownMenuItem(
                     text = { Column {
