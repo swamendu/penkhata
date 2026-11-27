@@ -86,7 +86,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "8.9 · matrices"
+const val APP_VERSION = "8.9.1 · table"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -2161,26 +2161,39 @@ fun StockMasterScreen(onDone: () -> Unit) {
                         k.variant.contains(matrixQ.trim(), true) || k.sku.contains(matrixQ.trim(), true) }
                     Text(rows.size.toString() + " of " + allSkus.size + " product(s)", fontSize = 9.sp, color = Color.Gray)
                     Spacer(Modifier.height(3.dp))
-                    Row(Modifier.fillMaxWidth().background(Color(0xFFE8EDE8)).padding(vertical = 4.dp)) {
-                        Text("BRAND", fontSize = 8.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(78.dp))
-                        Text("MODEL", fontSize = 8.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(130.dp))
-                        Text("VARIANT", fontSize = 8.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(76.dp))
-                        Text("SKU", fontSize = 8.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(118.dp))
-                        Text("MRP", fontSize = 8.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(64.dp))
-                        Text("GST", fontSize = 8.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(34.dp))
-                        Text("HSN", fontSize = 8.sp, fontWeight = FontWeight.Bold)
+                    // a real table: one shared scroll, so the header moves with the rows
+                    val hScroll = rememberScrollState()
+                    val colBrand = 84.dp; val colModel = 150.dp; val colVar = 84.dp
+                    val colSku = 140.dp; val colMrp = 74.dp; val colGst = 40.dp; val colHsn = 92.dp
+                    val tableWidth = colBrand + colModel + colVar + colSku + colMrp + colGst + colHsn
+                    Row(Modifier.fillMaxWidth().background(Color(0xFFE8EDE8)).horizontalScroll(hScroll)) {
+                        Column(Modifier.width(tableWidth)) {
+                            Row(Modifier.padding(vertical = 5.dp)) {
+                                Text("BRAND", fontSize = 8.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(colBrand))
+                                Text("MODEL", fontSize = 8.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(colModel))
+                                Text("VARIANT", fontSize = 8.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(colVar))
+                                Text("SKU", fontSize = 8.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(colSku))
+                                Text("MRP", fontSize = 8.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(colMrp))
+                                Text("GST", fontSize = 8.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(colGst))
+                                Text("HSN", fontSize = 8.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(colHsn))
+                            }
+                        }
                     }
                     androidx.compose.foundation.lazy.LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
-                        items(rows.take(400)) { k ->
-                            Row(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
-                                Text(k.brand, fontSize = 9.sp, modifier = Modifier.width(78.dp), maxLines = 1)
-                                Text(k.model, fontSize = 9.sp, modifier = Modifier.width(130.dp), maxLines = 1)
-                                Text(if(k.variant.isBlank()) "-" else k.variant, fontSize = 9.sp, modifier = Modifier.width(76.dp), maxLines = 1)
-                                Text(k.sku, fontSize = 9.sp, modifier = Modifier.width(118.dp), maxLines = 1)
-                                Text(if(k.mrp > 0.0) inr(k.mrp) else "-", fontSize = 9.sp, modifier = Modifier.width(64.dp), maxLines = 1)
-                                Text(if(k.gstRate == k.gstRate.toLong().toDouble()) k.gstRate.toLong().toString() else k.gstRate.toString(),
-                                    fontSize = 9.sp, modifier = Modifier.width(34.dp), maxLines = 1)
-                                Text(k.hsn, fontSize = 9.sp, maxLines = 1)
+                        items(rows.take(500)) { k ->
+                            Row(Modifier.horizontalScroll(hScroll).padding(vertical = 3.dp)) {
+                                Column(Modifier.width(tableWidth)) {
+                                    Row {
+                                        Text(k.brand, fontSize = 9.sp, modifier = Modifier.width(colBrand), maxLines = 1)
+                                        Text(k.model, fontSize = 9.sp, modifier = Modifier.width(colModel), maxLines = 1)
+                                        Text(if(k.variant.isBlank()) "-" else k.variant, fontSize = 9.sp, modifier = Modifier.width(colVar), maxLines = 1)
+                                        Text(k.sku, fontSize = 9.sp, modifier = Modifier.width(colSku), maxLines = 1)
+                                        Text(if(k.mrp > 0.0) inr(k.mrp) else "-", fontSize = 9.sp, modifier = Modifier.width(colMrp), maxLines = 1)
+                                        Text(if(k.gstRate == k.gstRate.toLong().toDouble()) k.gstRate.toLong().toString() else k.gstRate.toString(),
+                                            fontSize = 9.sp, modifier = Modifier.width(colGst), maxLines = 1)
+                                        Text(k.hsn, fontSize = 9.sp, modifier = Modifier.width(colHsn), maxLines = 1)
+                                    }
+                                }
                             }
                             Divider(color = Color(0x22000000))
                         }
