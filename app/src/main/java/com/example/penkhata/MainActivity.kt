@@ -1427,7 +1427,8 @@ fun MainAppScreen() {
         "reports" -> GSTReportScreen()
         "history" -> BillsScreen()
         "customers" -> CrmScreen()
-        else -> SettingsScreen(hasPin(prefs), onDataChanged = { dataVersion++ }, startTab = settingsStart) { new -> storePin(prefs, new); hasPinState = hasPin(prefs) }
+        else -> SettingsScreen(hasPin(prefs), onDataChanged = { dataVersion++ },
+            onPinSave = { new -> storePin(prefs, new); hasPinState = hasPin(prefs) }, startTab = settingsStart)
             }}}
         }
         if(menuOpen) Box(Modifier.fillMaxSize().background(Color(0x99000000)).clickable { menuOpen = false }) {
