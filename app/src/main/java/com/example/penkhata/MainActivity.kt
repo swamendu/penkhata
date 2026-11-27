@@ -19,6 +19,7 @@ import android.os.Environment
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -45,6 +46,15 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
+import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.common.InputImage
+import java.util.concurrent.Executors
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
@@ -59,12 +69,9 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import com.google.android.gms.common.ConnectionResult
 import com.google.android.gms.common.GoogleApiAvailability
-import com.google.mlkit.vision.barcode.BarcodeScanning
-import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
-import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -87,7 +94,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "9.2 · serial session"
+const val APP_VERSION = "9.3 · in-app scanner"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -1360,7 +1367,6 @@ fun InvoiceScreen(isQuote: Boolean) {
         val ims = e.imeiList()
         if(ims.isEmpty()) listOf(e to "") else ims.map { e to it }
     }
-    val scanClient = remember { GmsBarcodeScanning.getClient(ctx, GmsBarcodeScannerOptions.Builder().build()) }
     val (customers, _) = loadState(emptyList<BuyerInfo>(), ctx) { withContext(Dispatchers.IO) { loadCustomers(ctx) } }
     var iBrand by rememberSaveable { mutableStateOf("") }
     var iCls by rememberSaveable { mutableStateOf("") }
@@ -1388,27 +1394,11 @@ fun InvoiceScreen(isQuote: Boolean) {
         }
         pendingScan = null
     }
-    fun startImeiScan() {
-        if(playScannerAvailable(ctx)) {
-            try {
-                scanClient.startScan()
-                    .addOnSuccessListener { b -> val v = b.rawValue; if(v != null) { iSerial = v; applyStockByImei(v) } }
-                    .addOnFailureListener { e ->
-                        // Play Services scanner refused: fall back to a photo
-                        val f = makeScanPhotoFile(ctx); pendingScan = f
-                        cameraScanIntent(ctx, f)?.let { scanCamera.launch(it) }
-                            ?: Toast.makeText(ctx, "Scanner failed: " + (e.message ?: "unknown"), Toast.LENGTH_LONG).show()
-                    }
-            } catch(e: Exception) {
-                val f = makeScanPhotoFile(ctx); pendingScan = f
-                cameraScanIntent(ctx, f)?.let { scanCamera.launch(it) }
-            }
-        } else {
-            val f = makeScanPhotoFile(ctx); pendingScan = f
-            val i = cameraScanIntent(ctx, f)
-            if(i != null) scanCamera.launch(i)
-        }
-    }
+    var scanOpen by remember { mutableStateOf(false) }
+    fun startImeiScan() { scanOpen = true }
+    if(scanOpen) BarcodeScannerDialog(
+        onValue = { v -> iSerial = v; iDesc = v; applyStockByImei(v); scanOpen = false },
+        onClose = { scanOpen = false })
     var showCustomers by rememberSaveable { mutableStateOf(false) }
 
     val scope = rememberCoroutineScope()
@@ -1908,6 +1898,71 @@ fun StockAuditScreen(onDone: () -> Unit) {
                 Divider()
             }
         }}
+    }
+}
+
+// A scanner that belongs to the app: camera preview, live detection, first code wins.
+// It needs no Play Services and no download, so it opens instantly and works offline.
+@androidx.camera.core.ExperimentalGetImage
+@Composable
+fun BarcodeScannerDialog(onValue: (String) -> Unit, onClose: () -> Unit) {
+    val ctx = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val found = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
+    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if(!granted) { Toast.makeText(ctx, "Camera permission is needed to scan", Toast.LENGTH_LONG).show(); onClose() }
+    }
+    LaunchedEffect(Unit) {
+        if(androidx.core.content.ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.CAMERA)
+            != android.content.pm.PackageManager.PERMISSION_GRANTED) permission.launch(android.Manifest.permission.CAMERA)
+    }
+    Dialog(onDismissRequest = { onClose() }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Box(Modifier.fillMaxSize().background(Color.Black)) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { c ->
+                    val view = PreviewView(c).apply { scaleType = PreviewView.ScaleType.FILL_CENTER }
+                    val executor = Executors.newSingleThreadExecutor()
+                    val scanner = BarcodeScanning.getClient()
+                    val analysis = ImageAnalysis.Builder()
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build()
+                    analysis.setAnalyzer(executor) { proxy ->
+                        val media = proxy.image
+                        if(media == null || found.get()) { proxy.close() } else {
+                            val input = InputImage.fromMediaImage(media, proxy.imageInfo.rotationDegrees)
+                            scanner.process(input)
+                                .addOnSuccessListener { codes ->
+                                    val v = codes.firstOrNull { !it.rawValue.isNullOrBlank() }?.rawValue
+                                    if(v != null && found.compareAndSet(false, true)) onValue(v)
+                                }
+                                .addOnCompleteListener { proxy.close() }
+                        }
+                    }
+                    val future = ProcessCameraProvider.getInstance(c)
+                    future.addListener({
+                        try {
+                            val provider = future.get()
+                            val preview = Preview.Builder().build().also { it.setSurfaceProvider(view.surfaceProvider) }
+                            provider.unbindAll()
+                            provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+                        } catch(e: Exception) {
+                            Toast.makeText(c, "Camera unavailable: " + (e.message ?: ""), Toast.LENGTH_LONG).show()
+                        }
+                    }, androidx.core.content.ContextCompat.getMainExecutor(c))
+                    view
+                })
+            Column(Modifier.fillMaxSize().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text("SCAN", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    TextButton(onClick = { onClose() }) { Text("CLOSE", color = Color.White) }
+                }
+                Spacer(Modifier.weight(1f))
+                Box(Modifier.fillMaxWidth().height(150.dp).border(2.dp, Color(0xFF2E7D32)))
+                Spacer(Modifier.height(10.dp))
+                Text("Hold the barcode inside the box", color = Color.White, fontSize = 12.sp)
+                Spacer(Modifier.weight(1f))
+            }
+        }
     }
 }
 
@@ -2865,38 +2920,15 @@ fun SerialScreen(grnId: Long, lineId: Long, onDone: () -> Unit) {
             rows = rows.toMutableList().also { it[target] = value.trim() to rows[target].second }
         scanning = -1
     }
-    var pendingScan by remember { mutableStateOf<File?>(null) }
+    var scanOpen by remember { mutableStateOf(false) }
     var scanTarget by remember { mutableStateOf(0) }
-    val scanCamera = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
-        val f = pendingScan
-        val target = scanTarget
-        if(res.resultCode == android.app.Activity.RESULT_OK && f != null && f.exists()) {
-            decodeBarcodeFromImage(ctx, f) { v -> fillRow(target, v) }
-        } else scanning = -1
-        pendingScan = null
-    }
-    fun scanInto(target: Int) {
-        scanTarget = target
-        if(playScannerAvailable(ctx)) {
-            try {
-                GmsBarcodeScanning.getClient(ctx, GmsBarcodeScannerOptions.Builder().build()).startScan()
-                    .addOnSuccessListener { b -> val v = b.rawValue; if(v != null) fillRow(target, v) else scanning = -1 }
-                    .addOnFailureListener {
-                        val f = makeScanPhotoFile(ctx); pendingScan = f
-                        cameraScanIntent(ctx, f)?.let { scanCamera.launch(it) } ?: run { scanning = -1 }
-                    }
-            } catch(e: Exception) {
-                val f = makeScanPhotoFile(ctx); pendingScan = f
-                cameraScanIntent(ctx, f)?.let { scanCamera.launch(it) } ?: run { scanning = -1 }
-            }
-        } else {
-            val f = makeScanPhotoFile(ctx); pendingScan = f
-            cameraScanIntent(ctx, f)?.let { scanCamera.launch(it) } ?: run { scanning = -1 }
-        }
-    }
     LaunchedEffect(scanning) {
-        if(scanning >= 0) scanInto(scanning)
+        if(scanning >= 0) { scanTarget = scanning; scanOpen = true }
     }
+    if(scanOpen) BarcodeScannerDialog(
+        onValue = { v -> fillRow(scanTarget, v); scanOpen = false },
+        onClose = { scanOpen = false; scanning = -1 })
+
 
     Column(Modifier.padding(12.dp).verticalScroll(rememberScrollState())) {
         Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
@@ -3163,34 +3195,11 @@ fun PurchaseScreen(onDone: () -> Unit) {
     var expanded by remember { mutableStateOf(setOf<String>()) }
     var adjustFor by remember { mutableStateOf<StockEntry?>(null) }
     var adjustNote by remember { mutableStateOf("") }
-    val stockScan = remember { GmsBarcodeScanning.getClient(ctx, GmsBarcodeScannerOptions.Builder().build()) }
-    var pendingStockScan by remember { mutableStateOf<File?>(null) }
-    val stockCamera = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
-        val f = pendingStockScan
-        if(res.resultCode == android.app.Activity.RESULT_OK && f != null && f.exists()) {
-            decodeBarcodeFromImage(ctx, f) { v -> imei = if(imei.isBlank()) v else imei.trimEnd() + "\n" + v }
-        }
-        pendingStockScan = null
-    }
-    fun startStockScan() {
-        if(playScannerAvailable(ctx)) {
-            try {
-                stockScan.startScan()
-                    .addOnSuccessListener { b -> val v = b.rawValue; if(v != null) imei = if(imei.isBlank()) v else imei.trimEnd() + "\n" + v }
-                    .addOnFailureListener {
-                        val f = makeScanPhotoFile(ctx); pendingStockScan = f
-                        cameraScanIntent(ctx, f)?.let { stockCamera.launch(it) }
-                    }
-            } catch(e: Exception) {
-                val f = makeScanPhotoFile(ctx); pendingStockScan = f
-                cameraScanIntent(ctx, f)?.let { stockCamera.launch(it) }
-            }
-        } else {
-            val f = makeScanPhotoFile(ctx); pendingStockScan = f
-            val i = cameraScanIntent(ctx, f)
-            if(i != null) stockCamera.launch(i)
-        }
-    }
+    var stockScanOpen by remember { mutableStateOf(false) }
+    fun startStockScan() { stockScanOpen = true }
+    if(stockScanOpen) BarcodeScannerDialog(
+        onValue = { v -> imei = if(imei.isBlank()) v else imei.trimEnd() + "\n" + v; stockScanOpen = false },
+        onClose = { stockScanOpen = false })
     if(adjustFor != null) {
         val e = adjustFor!!
         AlertDialog(
