@@ -87,7 +87,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "9.0 · serial matrix"
+const val APP_VERSION = "9.1 · scan"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -1367,7 +1367,8 @@ fun InvoiceScreen(isQuote: Boolean) {
     fun applyStockByImei(imeiNo: String) {
         val e = findStockByImei(stockList, imeiNo) ?: return
         iBrand = e.brand; iCls = e.cls
-        iDesc = e.model
+        // the merged field shows what was scanned, variant included
+        iDesc = e.model + (if(e.variant.isBlank()) "" else " " + e.variant)
         iHsn = e.hsn
         if(e.mrp > 0.0) iRate = if(e.mrp == e.mrp.toLong().toDouble()) e.mrp.toLong().toString() else e.mrp.toString()
         iQty = "1"
@@ -1925,7 +1926,8 @@ fun AutoSuggestField(label: String, value: String, onValueChange: (String) -> Un
         OutlinedTextField(value, onValueChange, label = { Text(label) },
             modifier = Modifier.fillMaxWidth().onFocusChanged { focused = it.isFocused },
             singleLine = true, enabled = enabled,
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search, autoCorrect = false,
+                keyboardType = KeyboardType.Text, capitalization = androidx.compose.ui.text.input.KeyboardCapitalization.None),
             keyboardActions = KeyboardActions(onSearch = { focused = false }))
         DropdownMenu(
             expanded = focused && q.isNotEmpty() && (hits.isNotEmpty() || (allowNew && !exact)),
@@ -2662,17 +2664,22 @@ fun ReceiveScreen(onDone: () -> Unit) {
         Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(10.dp)) {
             Text("Add a line", fontWeight = FontWeight.Bold)
             // Model first: a model owns its SKUs, and the list comes from Stock Master as you type
-            val brandModels = if(brand.isBlank()) emptyList()
-                else loadModels(ctx).filter { it.brand.equals(brand, true) }.map { it.name }.distinct().sorted()
+            // with no brand chosen, search across everything rather than showing nothing
+            val brandModels = loadModels(ctx)
+                .let { all -> if(brand.isBlank()) all else all.filter { it.brand.equals(brand, true) } }
+                .map { it.name }.distinct().sorted()
             AutoSuggestField(
-                label = if(brand.isBlank()) "Model - choose the brand above first" else "Model",
+                label = "Model",
                 value = lModel,
                 onValueChange = { lModel = it },
                 options = brandModels,
                 onPick = { picked ->
                     lModel = picked
-                    val m = loadModels(ctx).firstOrNull { it.name.equals(picked, true) && it.brand.equals(brand, true) }
-                    if(m != null) nsCategory = m.category
+                    val m = loadModels(ctx).firstOrNull { it.name.equals(picked, true) }
+                    if(m != null) {
+                        nsCategory = m.category
+                        if(brand.isBlank()) brand = m.brand
+                    }
                     val variants = loadSkus(ctx).filter { it.model.equals(picked, true) }
                         .map { it.variant }.filter { it.isNotBlank() }.distinct()
                     lVariant = if(variants.size == 1) variants.first() else ""
@@ -2700,10 +2707,12 @@ fun ReceiveScreen(onDone: () -> Unit) {
                 modifier = Modifier.fillMaxWidth(),
                 enabled = lModel.isNotBlank(),
                 allowNew = true)
-            val modelSkus = if(lModel.isBlank()) emptyList()
-                else loadSkus(ctx).filter { it.model.equals(lModel.trim(), true) && (lVariant.isBlank() || it.variant.equals(lVariant.trim(), true)) }.map { it.sku }.sorted()
+            val modelSkus = loadSkus(ctx)
+                .filter { lModel.isBlank() || it.model.equals(lModel.trim(), true) }
+                .filter { lVariant.isBlank() || it.variant.equals(lVariant.trim(), true) }
+                .map { it.sku }.sorted()
             AutoSuggestField(
-                label = if(lModel.isBlank()) "SKU - choose the model first" else "SKU from the challan",
+                label = "SKU from the challan",
                 value = lSku,
                 onValueChange = { lSku = it },
                 options = modelSkus,
@@ -2713,7 +2722,6 @@ fun ReceiveScreen(onDone: () -> Unit) {
                     if(k != null) { lVariant = k.variant; lHsn = k.hsn; lGst = k.gstRate.toString() }
                 },
                 modifier = Modifier.fillMaxWidth(),
-                enabled = lModel.isNotBlank(),
                 allowNew = true)
             val known = findSku(ctx, lSku)
             if(known != null) Text("= " + known.model + (if(known.variant.isBlank()) "" else "  \u00b7  " + known.variant) + "  \u00b7  " + known.category, fontSize = 10.sp, color = Color(0xFF2E7D32))
@@ -2819,14 +2827,43 @@ fun SerialScreen(grnId: Long, lineId: Long, onDone: () -> Unit) {
     }
     val filled = rows.indices.count { i -> valid(rows[i].first.trim()) && statusOf(i) == "ok" }
 
-    if(scanning >= 0) {
-        SerialScanDialog(
-            onDone = { value ->
-                if(scanning in rows.indices && value.isNotBlank())
-                    rows = rows.toMutableList().also { it[scanning] = value.trim() to rows[scanning].second }
-                scanning = -1
-            },
-            onCancel = { scanning = -1 })
+    fun fillRow(idx: Int, value: String) {
+        if(idx in rows.indices && value.isNotBlank())
+            rows = rows.toMutableList().also { it[idx] = value.trim() to rows[idx].second }
+        scanning = -1
+    }
+    var pendingScan by remember { mutableStateOf<File?>(null) }
+    var scanTarget by remember { mutableStateOf(0) }
+    val scanCamera = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
+        val f = pendingScan
+        val target = scanTarget
+        if(res.resultCode == android.app.Activity.RESULT_OK && f != null && f.exists()) {
+            decodeBarcodeFromImage(ctx, f) { v -> fillRow(target, v) }
+        } else scanning = -1
+        pendingScan = null
+    }
+    fun scanInto(target: Int) {
+        scanTarget = target
+        if(playScannerAvailable(ctx)) {
+            try {
+                GmsBarcodeScanning.getClient(ctx, GmsBarcodeScannerOptions.Builder().build()).startScan()
+                    .addOnSuccessListener { b -> val v = b.rawValue; if(v != null) fillRow(target, v) else scanning = -1 }
+                    .addOnFailureListener {
+                        // no Play Services scanner: fall back to a photo of the box
+                        val f = makeScanPhotoFile(ctx); pendingScan = f
+                        cameraScanIntent(ctx, f)?.let { scanCamera.launch(it) } ?: run { scanning = -1 }
+                    }
+            } catch(e: Exception) {
+                val f = makeScanPhotoFile(ctx); pendingScan = f
+                cameraScanIntent(ctx, f)?.let { scanCamera.launch(it) } ?: run { scanning = -1 }
+            }
+        } else {
+            val f = makeScanPhotoFile(ctx); pendingScan = f
+            cameraScanIntent(ctx, f)?.let { scanCamera.launch(it) } ?: run { scanning = -1 }
+        }
+    }
+    LaunchedEffect(scanning) {
+        if(scanning >= 0) scanInto(scanning)
     }
 
     Column(Modifier.padding(12.dp).verticalScroll(rememberScrollState())) {
@@ -2917,32 +2954,6 @@ fun SerialScreen(grnId: Long, lineId: Long, onDone: () -> Unit) {
         }
         Spacer(Modifier.height(40.dp))
     }
-}
-
-// A small scan sheet, so a serial can be read into the row it belongs to.
-@Composable
-fun SerialScanDialog(onDone: (String) -> Unit, onCancel: () -> Unit) {
-    val ctx = LocalContext.current
-    var manual by remember { mutableStateOf("") }
-    AlertDialog(
-        onDismissRequest = { onCancel() },
-        title = { Text("Scan or type") },
-        text = { Column {
-            Text("Point the camera at the box, or type the number.", fontSize = 10.sp, color = Color.Gray)
-            Spacer(Modifier.height(6.dp))
-            OutlinedTextField(manual, { manual = it }, label = { Text("Number") }, modifier = Modifier.fillMaxWidth(),
-                singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, autoCorrect = false))
-            Spacer(Modifier.height(6.dp))
-            Button(onClick = {
-                val g = GmsBarcodeScanning.getClient(ctx, GmsBarcodeScannerOptions.Builder().build())
-                try {
-                    g.startScan().addOnSuccessListener { b -> val v = b.rawValue; if(v != null) onDone(v) }
-                        .addOnFailureListener { onCancel() }
-                } catch(e: Exception) { onCancel() }
-            }, modifier = Modifier.fillMaxWidth()) { Text("SCAN") }
-        } },
-        confirmButton = { TextButton(onClick = { onDone(manual) }) { Text("USE THIS") } },
-        dismissButton = { TextButton(onClick = { onCancel() }) { Text("CANCEL") } })
 }
 
 @Composable
