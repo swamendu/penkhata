@@ -19,6 +19,7 @@ import android.os.Environment
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -68,8 +69,6 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import com.google.android.gms.common.ConnectionResult
 import com.google.android.gms.common.GoogleApiAvailability
-import com.google.mlkit.vision.barcode.BarcodeScanning
-import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
