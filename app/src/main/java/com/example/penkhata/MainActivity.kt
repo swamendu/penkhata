@@ -93,7 +93,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "9.12.1 · splash"
+const val APP_VERSION = "9.13 · clean reset"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -2161,7 +2161,14 @@ fun InvoiceScreen(isQuote: Boolean) {
 
     fun clearBill() {
         invNo = nextInvoiceNo(ctx, prefs)
+        // the customer
         bName=""; bAddr1=""; bAddr2=""; bLandmark=""; bPincode=""; bPhone=""; bGst=""; bState=""
+        // and the flags that decided what to show, or the next bill inherits them
+        nameLocked = false; addrUnlock = false; addrSnapshot = listOf("", "", "", ""); createdFor = ""
+        showCustomers = false; custQuery = ""; custResults = emptyList()
+        // the line being typed
+        iDesc = ""; iSerial = ""; iQty = "1"; iRate = ""; iUnit = "pcs"; pickQuery = ""
+        // the bill
         items = emptyList()
         billDisc=""; exchange=""; cash=""; upi=""; card=""; finance=""
         payMode=""; delNote=""
@@ -2196,7 +2203,7 @@ fun InvoiceScreen(isQuote: Boolean) {
             }
             // a customer who moved is a customer-record change, so it lives with the customer,
             // not with the buyer form
-            if(nameLocked && !addrUnlock) Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
+            if(nameLocked && !addrUnlock && bPhone.trim().length >= 10) Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
                 Text("Moved house? " + bName.ifBlank { "This customer" }, fontSize = 9.sp, color = Color(0xFFB26A00))
                 TextButton(onClick = {
                     addrSnapshot = listOf(bAddr1, bAddr2, bLandmark, bPincode)
