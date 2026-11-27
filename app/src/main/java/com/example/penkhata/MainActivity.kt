@@ -1475,9 +1475,9 @@ fun CrmScreen() {
         val repeat = rows.count { it.bills > 1 }
         val due = rows.sumOf { it.due }
         Row(Modifier.fillMaxWidth().padding(top = 8.dp)) {
-            CrmTile("Customers", rows.size.toString(), INK, Modifier.weight(1f))
+            CrmTile("Customers", rows.size.toString(), Color(0xFF1A1A1A), Modifier.weight(1f))
             Spacer(Modifier.width(6.dp))
-            CrmTile("With GSTIN", withGst.toString(), INK, Modifier.weight(1f))
+            CrmTile("With GSTIN", withGst.toString(), Color(0xFF1A1A1A), Modifier.weight(1f))
         }
         Row(Modifier.fillMaxWidth().padding(top = 6.dp)) {
             CrmTile("Repeat buyers", repeat.toString(), Color(0xFF2E7D32), Modifier.weight(1f))
@@ -1607,9 +1607,9 @@ fun CustomerPage(phone: String, prefs: android.content.SharedPreferences, onBack
             val addr = listOf(r.addr1, r.addr2, r.lmk, r.pin, r.state).filter { it.isNotBlank() }.joinToString(", ")
             if(addr.isNotBlank()) Text(addr, fontSize = 9.sp, color = Color.Gray)
             Row(Modifier.fillMaxWidth().padding(top = 8.dp)) {
-                CrmTile("Total spent", "\u20b9" + inr(r.spend), INK, Modifier.weight(1f))
+                CrmTile("Total spent", "\u20b9" + inr(r.spend), Color(0xFF1A1A1A), Modifier.weight(1f))
                 Spacer(Modifier.width(6.dp))
-                CrmTile("Bills", r.bills.toString(), INK, Modifier.weight(1f))
+                CrmTile("Bills", r.bills.toString(), Color(0xFF1A1A1A), Modifier.weight(1f))
             }
             Row(Modifier.fillMaxWidth().padding(top = 6.dp)) {
                 CrmTile("Outstanding", if(r.due > 0.5) "\u20b9" + inr(r.due) else "\u2014", if(r.due > 0.5) Color.Red else Color.Gray, Modifier.weight(1f))
