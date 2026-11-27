@@ -5,7 +5,7 @@ plugins {
 android {
     namespace = "com.example.penkhata"
     compileSdk = 34
-    defaultConfig { applicationId = "com.example.penkhata"; minSdk = 26; targetSdk = 34; versionCode = 83; versionName = "9.2" }
+    defaultConfig { applicationId = "com.example.penkhata"; minSdk = 26; targetSdk = 34; versionCode = 84; versionName = "9.3" }
     buildFeatures { compose = true }
     composeOptions { kotlinCompilerExtensionVersion = "1.5.1" }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_1_8; targetCompatibility = JavaVersion.VERSION_1_8 }
@@ -48,7 +48,11 @@ dependencies {
     implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
     implementation("com.google.zxing:core:3.5.4")
     // unbundled: Play Services downloads the model on demand, so the APK stays small.
-    // (the bundled com.google.mlkit:barcode-scanning adds ~21 MB)
-    implementation("com.google.android.gms:play-services-mlkit-barcode-scanning:18.3.1")
+    // bundled: the scanner ships inside the APK, so it opens instantly and works offline.
+    // the unbundled play-services variant downloads the model at runtime and failed on the shop phone.
+    implementation("com.google.mlkit:barcode-scanning:17.2.0")
+    implementation("androidx.camera:camera-camera2:1.3.1")
+    implementation("androidx.camera:camera-lifecycle:1.3.1")
+    implementation("androidx.camera:camera-view:1.3.1")
     debugImplementation("androidx.compose.ui:ui-tooling-preview")
 }
