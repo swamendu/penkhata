@@ -42,6 +42,7 @@ import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
@@ -84,7 +85,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "8.3 · stock and receipts"
+const val APP_VERSION = "8.4 · type-ahead"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -1738,6 +1739,41 @@ fun StockAuditScreen(onDone: () -> Unit) {
     }
 }
 
+// Type and the matches appear as you go, floating over the page so nothing is clipped.
+// It reads the master live, so a model added in Stock Master shows up here at once.
+@Composable
+fun AutoSuggestField(label: String, value: String, onValueChange: (String) -> Unit, options: List<String>,
+                     onPick: (String) -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true,
+                     allowNew: Boolean = false, noteOf: ((String) -> String)? = null) {
+    val focusManager = LocalFocusManager.current
+    var focused by remember { mutableStateOf(false) }
+    val q = value.trim()
+    val hits = if(q.isEmpty()) emptyList() else options.filter { it.contains(q, true) }.take(8)
+    val exact = options.any { it.equals(q, true) }
+    Box(modifier) {
+        OutlinedTextField(value, onValueChange, label = { Text(label) },
+            modifier = Modifier.fillMaxWidth().onFocusChanged { focused = it.isFocused },
+            singleLine = true, enabled = enabled,
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus() }))
+        DropdownMenu(
+            expanded = focused && q.isNotEmpty() && (hits.isNotEmpty() || (allowNew && !exact)),
+            onDismissRequest = { focused = false }) {
+            hits.forEach { o ->
+                DropdownMenuItem(
+                    text = { Column {
+                        Text(o, fontSize = 12.sp)
+                        if(noteOf != null) Text(noteOf(o), fontSize = 9.sp, color = Color.Gray)
+                    } },
+                    onClick = { onPick(o); focused = false; focusManager.clearFocus() })
+            }
+            if(allowNew && !exact) DropdownMenuItem(
+                text = { Text("+ Use \"" + q + "\" as new", fontSize = 12.sp, color = Color(0xFFB26A00), fontWeight = FontWeight.Bold) },
+                onClick = { onPick(q); focused = false; focusManager.clearFocus() })
+        }
+    }
+}
+
 // A searchable dropdown: tap the field, search, pick. Used wherever a value must come
 // from the master rather than be typed, so a brand cannot be invented by a typo.
 @Composable
@@ -2298,19 +2334,46 @@ fun ReceiveScreen(onDone: () -> Unit) {
 
         Card(Modifier.padding(vertical = 5.dp)) { Column(Modifier.padding(10.dp)) {
             Text("Add a line", fontWeight = FontWeight.Bold)
-            OutlinedTextField(lSku, {
-                lSku = it
-                val k = findSku(ctx, it)
-                if(k != null) { lModel = k.model; lVariant = k.variant; lHsn = k.hsn; lGst = k.gstRate.toString() }
-            }, label={Text("SKU from the challan, e.g. SM-E556B 8/128")}, modifier=Modifier.fillMaxWidth())
+            // Model first: a model owns its SKUs, and the list comes from Stock Master as you type
+            val brandModels = if(brand.isBlank()) emptyList()
+                else loadModels(ctx).filter { it.brand.equals(brand, true) }.map { it.name }.distinct().sorted()
+            AutoSuggestField(
+                label = if(brand.isBlank()) "Model - choose the brand above first" else "Model",
+                value = lModel,
+                onValueChange = { lModel = it },
+                options = brandModels,
+                onPick = { picked ->
+                    lModel = picked
+                    val m = loadModels(ctx).firstOrNull { it.name.equals(picked, true) && it.brand.equals(brand, true) }
+                    if(m != null) nsCategory = m.category
+                    val skus = loadSkus(ctx).filter { it.model.equals(picked, true) }
+                    lSku = if(skus.size == 1) skus.first().sku else ""
+                },
+                modifier = Modifier.fillMaxWidth(),
+                allowNew = true,
+                noteOf = { m -> val n = loadSkus(ctx).count { it.model.equals(m, true) }
+                    if(n == 1) "1 SKU" else n.toString() + " SKUs" })
+            val modelSkus = if(lModel.isBlank()) emptyList()
+                else loadSkus(ctx).filter { it.model.equals(lModel.trim(), true) }.map { it.sku }.sorted()
+            AutoSuggestField(
+                label = if(lModel.isBlank()) "SKU - choose the model first" else "SKU from the challan",
+                value = lSku,
+                onValueChange = { lSku = it },
+                options = modelSkus,
+                onPick = { picked ->
+                    lSku = picked
+                    val k = findSku(ctx, picked)
+                    if(k != null) { lVariant = k.variant; lHsn = k.hsn; lGst = k.gstRate.toString() }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = lModel.isNotBlank(),
+                allowNew = true)
             val known = findSku(ctx, lSku)
-            if(known != null) Text("= " + known.model + (if(known.variant.isBlank()) "" else "  \u00b7  " + known.variant), fontSize = 10.sp, color = Color(0xFF2E7D32))
-            else if(lSku.isNotBlank()) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("New SKU", fontSize = 10.sp, color = Color(0xFFB26A00), modifier = Modifier.weight(1f))
+            if(known != null) Text("= " + known.model + (if(known.variant.isBlank()) "" else "  \u00b7  " + known.variant) + "  \u00b7  " + known.category, fontSize = 10.sp, color = Color(0xFF2E7D32))
+            else if(lSku.isNotBlank() && lModel.isNotBlank()) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("New SKU - not in the master yet", fontSize = 10.sp, color = Color(0xFFB26A00), modifier = Modifier.weight(1f))
                 TextButton(onClick = { newSkuFor = lSku.trim(); nsModel = lModel; nsCategory = "Mobile" }) { Text("CREATE IT", fontSize = 10.sp) }
             }
-            OutlinedTextField(lModel, {lModel=it}, label={Text("Model, e.g. GALAXY F56 5G 8/128")}, modifier=Modifier.fillMaxWidth(),
-                keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
             Row {
                 OutlinedTextField(lUnits, {lUnits=it}, label={Text("Units")}, modifier=Modifier.weight(0.6f), keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number))
                 Spacer(Modifier.width(4.dp))
