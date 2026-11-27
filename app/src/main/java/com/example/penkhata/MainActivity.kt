@@ -93,7 +93,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "9.5 · rounding + auto backups"
+const val APP_VERSION = "9.6 · customers restore"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -1229,6 +1229,13 @@ fun MainAppScreen() {
     val scope = rememberCoroutineScope()
     remember { migratePlainPin(prefs) }
     remember { healPrefTypes(prefs) }
+    LaunchedEffect(Unit) {
+        if(!prefBool(prefs, "customersRebuilt", false)) {
+            val n = withContext(Dispatchers.IO) { rebuildCustomersFromBills(ctx) }
+            prefs.edit().putBoolean("customersRebuilt", true).apply()
+            if(n > 0) Toast.makeText(ctx, "Customers rebuilt from your bills: " + countRows(ctx, "customers"), Toast.LENGTH_LONG).show()
+        }
+    }
     // one pass that turns "GALAXY A56 5G 12/256" into model + variant
     LaunchedEffect(Unit) {
         val moved = withContext(Dispatchers.IO) { splitVariantsOnce(ctx) }
@@ -4398,6 +4405,42 @@ fun upsertCustomer(ctx: Context, b: BuyerInfo, ms: Long) {
         w.execSQL("UPDATE customers SET lastMs=?, bills=bills+1 WHERE phone=?", arrayOf(ms, b.phone.trim()))
     } catch(e: Exception) { }
 }
+// Every bill carries the buyer's name, phone and address, so the customer master can always be
+// rebuilt from history. The first name registered wins: an existing row is never overwritten.
+fun rebuildCustomersFromBills(ctx: Context): Int {
+    return try {
+        val w = db(ctx).writableDatabase
+        var seen = 0
+        w.beginTransaction()
+        try {
+            w.rawQuery("SELECT ms, buyer, bphone, baddr1, baddr2, blmk, bpin, bgst, bstate FROM bills ORDER BY ms", null).use { c ->
+                while(c.moveToNext()) {
+                    val phone = (c.getString(2) ?: "").trim()
+                    if(phone.length < 6) continue
+                    val cv = android.content.ContentValues()
+                    cv.put("phone", phone)
+                    cv.put("name", (c.getString(1) ?: "").trim())
+                    cv.put("addr1", c.getString(3) ?: ""); cv.put("addr2", c.getString(4) ?: "")
+                    cv.put("lmk", c.getString(5) ?: ""); cv.put("pin", c.getString(6) ?: "")
+                    cv.put("gst", c.getString(7) ?: ""); cv.put("state", c.getString(8) ?: "")
+                    cv.put("firstMs", c.getLong(0)); cv.put("lastMs", c.getLong(0)); cv.put("bills", 1)
+                    w.insertWithOnConflict("customers", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_IGNORE)
+                    seen++
+                }
+            }
+            // the counters come from the bills, so a rebuilt row is right even if the bill was
+            // restored long after the customer row was first written
+            w.execSQL("""UPDATE customers SET
+                firstMs = (SELECT MIN(ms) FROM bills WHERE TRIM(bills.bphone) = customers.phone),
+                lastMs  = (SELECT MAX(ms) FROM bills WHERE TRIM(bills.bphone) = customers.phone),
+                bills   = (SELECT COUNT(*) FROM bills WHERE TRIM(bills.bphone) = customers.phone)
+                WHERE EXISTS (SELECT 1 FROM bills WHERE TRIM(bills.bphone) = customers.phone)""")
+            w.setTransactionSuccessful()
+        } finally { w.endTransaction() }
+        seen
+    } catch(e: Exception) { 0 }
+}
+
 // Indexed search: phone by prefix, name anywhere. Capped, because a picker only
 // ever needs a screenful.
 fun searchCustomers(ctx: Context, query: String, limit: Int = 20): List<BuyerInfo> {
@@ -5005,6 +5048,23 @@ fun backupJson(ctx: Context): String {
     root.put("ledger", ledger)
     root.put("expenses", expenses)
     root.put("stock", stockArr)
+    // the customer master is the shop's own list; it must survive a restore
+    val custArr = JSONArray()
+    try {
+        db(ctx).readableDatabase.rawQuery(
+            "SELECT phone,name,addr1,addr2,lmk,pin,gst,state,firstMs,lastMs,bills FROM customers", null).use { c ->
+            while(c.moveToNext()) {
+                val o = JSONObject()
+                o.put("phone", c.getString(0) ?: ""); o.put("name", c.getString(1) ?: "")
+                o.put("addr1", c.getString(2) ?: ""); o.put("addr2", c.getString(3) ?: "")
+                o.put("lmk", c.getString(4) ?: ""); o.put("pin", c.getString(5) ?: "")
+                o.put("gst", c.getString(6) ?: ""); o.put("state", c.getString(7) ?: "")
+                o.put("firstMs", c.getLong(8)); o.put("lastMs", c.getLong(9)); o.put("bills", c.getInt(10))
+                custArr.put(o)
+            }
+        }
+    } catch(e: Exception) { }
+    root.put("customers", custArr)
     return root.toString(2)
 }
 
@@ -5338,6 +5398,9 @@ fun restoreJson(ctx: Context, text: String): String {
     try {
         // a restore replaces what is there, rather than merging two shops together
         for(t in listOf("bills", "ledger", "expenses", "stock")) w.delete(t, null, null)
+        // the customer master is replaced only when the file actually carries one: an older
+        // backup has no customers, and wiping the list would lose names that never billed
+        if((root.optJSONArray("customers")?.length() ?: 0) > 0) w.delete("customers", null, null)
         root.optJSONArray("invoices")?.let { arr ->
             for(i in 0 until arr.length()) {
                 val o = arr.optJSONObject(i) ?: continue
@@ -5375,17 +5438,37 @@ fun restoreJson(ctx: Context, text: String): String {
                 w.insertWithOnConflict("stock", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE); st++
             }
         }
+        var cust = 0
+        root.optJSONArray("customers")?.let { arr ->
+            for(i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val phone = o.optString("phone").trim()
+                if(phone.length < 6) continue
+                val cv = android.content.ContentValues()
+                cv.put("phone", phone); cv.put("name", o.optString("name"))
+                cv.put("addr1", o.optString("addr1")); cv.put("addr2", o.optString("addr2"))
+                cv.put("lmk", o.optString("lmk")); cv.put("pin", o.optString("pin"))
+                cv.put("gst", o.optString("gst")); cv.put("state", o.optString("state"))
+                cv.put("firstMs", o.optLong("firstMs", 0)); cv.put("lastMs", o.optLong("lastMs", 0))
+                cv.put("bills", o.optInt("bills", 0))
+                w.insertWithOnConflict("customers", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE)
+                cust++
+            }
+        }
         w.setTransactionSuccessful()
     } catch(e: Exception) {
         return "Restore failed: " + (e.message ?: "unknown error")
     } finally {
         w.endTransaction()
     }
+    // a backup made before the master existed has no customers: the bills still know them
+    val rebuilt = rebuildCustomersFromBills(ctx)
     // the restored master may still carry "GALAXY A56 5G 12/256" as one name
     prefs.edit().putBoolean("variantSplitDone", false).apply()
     // backups made before 3.6.2 carry no tax columns; rebuild them from the lines
     val repaired = try { repairAggregates(ctx) } catch(e: Exception) { 0 }
     return "Restored $settingsCount settings, $inv invoices, $led ledger entries, $exp expenses, $st stock lines." +
+           " Customers rebuilt from bills: " + countRows(ctx, "customers") + "." +
            (if(repaired > 0) " Rebuilt tax for $repaired old bill(s)." else "")
 }
 
