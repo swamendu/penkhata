@@ -2143,10 +2143,10 @@ fun StockMasterScreen(onDone: () -> Unit) {
                         if(its.isNotEmpty()) {
                             val byVariant = its.groupBy { it.variant.trim() }
                             byVariant.toList().sortedBy { it.first.lowercase() }.forEach { vg ->
-                                Text("      " + (if(vg.key.isBlank()) "(no variant)" else vg.key) +
-                                     (if(vg.key.isBlank()) "" else "  \u2192  ") +
-                                     vg.value.joinToString(", ") { it.sku } +
-                                     (if(vg.value.first().mrp > 0.0) "  \u00b7  MRP \u20b9" + inr(vg.value.first().mrp) else ""),
+                                Text("      " + (if(vg.first.isBlank()) "(no variant)" else vg.first) +
+                                     (if(vg.first.isBlank()) "" else "  \u2192  ") +
+                                     vg.second.joinToString(", ") { it.sku } +
+                                     (if(vg.second.first().mrp > 0.0) "  \u00b7  MRP \u20b9" + inr(vg.second.first().mrp) else ""),
                                     fontSize = 9.sp, color = Color(0xFF2E7D32))
                             }
                         }
