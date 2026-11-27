@@ -38,7 +38,6 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.saveable.Saver
@@ -94,7 +93,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "9.3.2 · launcher"
+const val APP_VERSION = "9.4 · pickers fixed"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -228,6 +227,33 @@ fun healPrefTypes(prefs: android.content.SharedPreferences) {
         ed.apply()
     } catch(e: Exception) { }
 }
+
+// Open a system file picker with our own small request code. No ActivityResultRegistry, so the
+// "Can only use lower 16 bits for requestCode" crash cannot happen at all.
+fun requestCameraPermission(ctx: Context) {
+    val activity = ctx as? Activity ?: return
+    try {
+        androidx.core.app.ActivityCompat.requestPermissions(activity, arrayOf(android.Manifest.permission.CAMERA), MainActivity.RC_CAMERA)
+    } catch(e: Exception) { }
+}
+fun launchPicker(ctx: Context, intent: Intent, code: Int, onResult: (android.net.Uri?) -> Unit) {
+    val activity = ctx as? Activity
+    if(activity == null) { Toast.makeText(ctx, "Cannot open the file picker here", Toast.LENGTH_LONG).show(); return }
+    MainActivity.pickers[code] = onResult
+    try { activity.startActivityForResult(intent, code) }
+    catch(e: Exception) {
+        MainActivity.pickers.remove(code)
+        Toast.makeText(ctx, "Could not open the file picker: " + (e.message ?: "unknown"), Toast.LENGTH_LONG).show()
+    }
+}
+fun createDocIntent(mime: String, name: String): Intent =
+    Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+        addCategory(Intent.CATEGORY_OPENABLE); type = mime; putExtra(Intent.EXTRA_TITLE, name)
+    }
+fun openDocIntent(vararg mimes: String): Intent =
+    Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+        addCategory(Intent.CATEGORY_OPENABLE); type = "*/*"; putExtra(Intent.EXTRA_MIME_TYPES, mimes)
+    }
 
 // Firing a launcher before the screen is STARTED makes ActivityResultRegistry fall back to
 // startActivityForResult, whose request code does not fit in 16 bits - and FragmentActivity throws
@@ -1114,6 +1140,28 @@ fun bumpInvoiceNo(ctx: Context, prefs: android.content.SharedPreferences) {
 }
 
 class MainActivity : FragmentActivity() {
+    companion object {
+        // request codes below 65536: FragmentActivity refuses anything larger, and
+        // ActivityResultRegistry hands out codes above that limit
+        const val RC_RESTORE = 4201
+        const val RC_BACKUP = 4202
+        const val RC_BACKUP_ENC = 4203
+        const val RC_XLSX = 4204
+        const val RC_CSV = 4205
+        const val RC_REGISTER = 4206
+        const val RC_CAMERA = 4207
+        val pickers = mutableMapOf<Int, (android.net.Uri?) -> Unit>()
+    }
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if(requestCode == RC_CAMERA && (grantResults.isEmpty() || grantResults[0] != android.content.pm.PackageManager.PERMISSION_GRANTED))
+            android.widget.Toast.makeText(this, "Camera permission is needed to scan. Allow it in Settings.", android.widget.Toast.LENGTH_LONG).show()
+    }
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        val handler = pickers.remove(requestCode) ?: return
+        handler(if(resultCode == RESULT_OK) data?.data else null)
+    }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         installCrashLogger(this)
@@ -1425,14 +1473,6 @@ fun InvoiceScreen(isQuote: Boolean) {
         bName = c.name; bAddr1 = c.addr1; bAddr2 = c.addr2; bLandmark = c.landmark
         bPincode = c.pincode; bGst = c.gst; bState = c.state
         Toast.makeText(ctx, "Customer details filled: " + c.name, Toast.LENGTH_SHORT).show()
-    }
-    var pendingScan by remember { mutableStateOf<File?>(null) }
-    val scanCamera = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
-        val f = pendingScan
-        if(res.resultCode == android.app.Activity.RESULT_OK && f != null && f.exists()) {
-            decodeBarcodeFromImage(ctx, f) { v -> iSerial = v; applyStockByImei(v) }
-        }
-        pendingScan = null
     }
     var scanOpen by remember { mutableStateOf(false) }
     fun startImeiScan() { scanOpen = true }
@@ -1949,13 +1989,10 @@ fun BarcodeScannerDialog(onValue: (String) -> Unit, onClose: () -> Unit) {
     val ctx = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val found = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
-    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if(!granted) { Toast.makeText(ctx, "Camera permission is needed to scan", Toast.LENGTH_LONG).show(); onClose() }
-    }
+    val hasCamera = androidx.core.content.ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.CAMERA) ==
+        android.content.pm.PackageManager.PERMISSION_GRANTED
     LaunchedEffect(Unit) {
-        if(androidx.core.content.ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.CAMERA)
-            != android.content.pm.PackageManager.PERMISSION_GRANTED)
-            launchWhenReady(lifecycleOwner) { permission.launch(android.Manifest.permission.CAMERA) }
+        if(!hasCamera) requestCameraPermission(ctx)
     }
     Dialog(onDismissRequest = { onClose() }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Box(Modifier.fillMaxSize().background(Color.Black)) {
@@ -3457,32 +3494,29 @@ fun monthlySales(ctx: Context, months: Int): List<Pair<String, Double>> {
     var expNote by rememberSaveable { mutableStateOf("") }
     var expAmount by rememberSaveable { mutableStateOf("") }
     val (startMs, endMs) = monthRange(offset)
-    val xlsxLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")) { uri ->
+    fun writeWorkbook(uri: android.net.Uri?) {
         pickerInFlight = false
-        if(uri != null) {
-            try {
-                ctx.contentResolver.openOutputStream(uri)?.use { it.write(exportWorkbook(ctx)) }
-                Toast.makeText(ctx, "Workbook exported", Toast.LENGTH_LONG).show()
-            } catch(e: Exception) { Toast.makeText(ctx, "Export failed: " + (e.message ?: "unknown"), Toast.LENGTH_LONG).show() }
-        }
+        if(uri == null) return
+        try {
+            ctx.contentResolver.openOutputStream(uri)?.use { it.write(exportWorkbook(ctx)) }
+            Toast.makeText(ctx, "Workbook exported", Toast.LENGTH_LONG).show()
+        } catch(e: Exception) { Toast.makeText(ctx, "Export failed: " + (e.message ?: "unknown"), Toast.LENGTH_LONG).show() }
     }
-    val registerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")) { uri ->
+    fun writeRegister(uri: android.net.Uri?) {
         pickerInFlight = false
-        if(uri != null) {
-            try {
-                ctx.contentResolver.openOutputStream(uri)?.use { it.write(buildRegisterXlsx(ctx, startMs, endMs)) }
-                Toast.makeText(ctx, "Installation register exported", Toast.LENGTH_LONG).show()
-            } catch(e: Exception) { Toast.makeText(ctx, "Export failed: " + (e.message ?: "unknown"), Toast.LENGTH_LONG).show() }
-        }
+        if(uri == null) return
+        try {
+            ctx.contentResolver.openOutputStream(uri)?.use { it.write(buildRegisterXlsx(ctx, startMs, endMs)) }
+            Toast.makeText(ctx, "Installation register exported", Toast.LENGTH_LONG).show()
+        } catch(e: Exception) { Toast.makeText(ctx, "Export failed: " + (e.message ?: "unknown"), Toast.LENGTH_LONG).show() }
     }
-    val csvLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri ->
+    fun writeCsv(uri: android.net.Uri?) {
         pickerInFlight = false
-        if(uri != null) {
-            try {
-                ctx.contentResolver.openOutputStream(uri)?.use { it.write(exportCsvBills(ctx, startMs, endMs).toByteArray()) }
-                Toast.makeText(ctx, "CSV exported", Toast.LENGTH_LONG).show()
-            } catch(e: Exception) { Toast.makeText(ctx, "Export failed: " + (e.message ?: "unknown"), Toast.LENGTH_LONG).show() }
-        }
+        if(uri == null) return
+        try {
+            ctx.contentResolver.openOutputStream(uri)?.use { it.write(exportCsvBills(ctx, startMs, endMs).toByteArray()) }
+            Toast.makeText(ctx, "CSV exported", Toast.LENGTH_LONG).show()
+        } catch(e: Exception) { Toast.makeText(ctx, "Export failed: " + (e.message ?: "unknown"), Toast.LENGTH_LONG).show() }
     }
     val monthInv = invoices.filter { it.whenMs in startMs until endMs }.sortedBy { it.whenMs }
     val monthExp = expenses.filter { it.ms in startMs until endMs }
@@ -3563,17 +3597,17 @@ fun monthlySales(ctx: Context, months: Int): List<Pair<String, Double>> {
             Spacer(Modifier.height(8.dp))
             Button(onClick = {
                 pickerInFlight = true
-                launchWhenReady(lifecycleOwner) { xlsxLauncher.launch("PenKhata-export-" + SimpleDateFormat("yyyyMMdd", Locale.ENGLISH).format(Date()) + ".xlsx") }
+                launchPicker(ctx, createDocIntent("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "PenKhata-export-" + SimpleDateFormat("yyyyMMdd", Locale.ENGLISH).format(Date()) + ".xlsx"), MainActivity.RC_XLSX) { uri -> writeWorkbook(uri) }
             }, modifier = Modifier.fillMaxWidth()) { Text("EXPORT XLSX") }
             Spacer(Modifier.height(6.dp))
             Button(onClick = {
                 pickerInFlight = true
-                launchWhenReady(lifecycleOwner) { csvLauncher.launch("PenKhata-bills-" + SimpleDateFormat("MMMyyyy", Locale.ENGLISH).format(Date(startMs)) + ".csv") }
+                launchPicker(ctx, createDocIntent("text/csv", "PenKhata-bills-" + SimpleDateFormat("MMMyyyy", Locale.ENGLISH).format(Date(startMs)) + ".csv"), MainActivity.RC_CSV) { uri -> writeCsv(uri) }
             }, modifier = Modifier.fillMaxWidth()) { Text("EXPORT CSV (THIS MONTH)") }
             Spacer(Modifier.height(6.dp))
             Button(onClick = {
                 pickerInFlight = true
-                launchWhenReady(lifecycleOwner) { registerLauncher.launch("Installation-Register-" + SimpleDateFormat("MMMyyyy", Locale.ENGLISH).format(Date(startMs)) + ".xlsx") }
+                launchPicker(ctx, createDocIntent("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "Installation-Register-" + SimpleDateFormat("MMMyyyy", Locale.ENGLISH).format(Date(startMs)) + ".xlsx"), MainActivity.RC_REGISTER) { uri -> writeRegister(uri) }
             }, modifier = Modifier.fillMaxWidth()) { Text("INSTALLATION REGISTER (XLSX)") }
         }}
         val trend by produceState(initialValue = emptyList<Pair<String, Double>>(), offset) {
@@ -3774,64 +3808,50 @@ fun monthlySales(ctx: Context, months: Int): List<Pair<String, Double>> {
     var askPassword by remember { mutableStateOf(false) }
     // encrypted backups are raw AES-GCM bytes: declaring them as zip made the picker
     // append ".zip" and every file manager try (and fail) to extract them
-    val backupEncLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
+    fun writeBackup(uri: android.net.Uri?, encrypted: Boolean) {
         pickerInFlight = false
-        if(uri != null) {
-            try {
-                val payload = backupPayload(ctx)
+        if(uri == null) return
+        try {
+            val payload = backupPayload(ctx)
+            if(encrypted) {
                 ctx.contentResolver.openOutputStream(uri)?.use { it.write(encryptBytes(payload, backupPw)) }
                 Toast.makeText(ctx, "Encrypted backup saved - keep the password safe", Toast.LENGTH_LONG).show()
-            } catch(e: Exception) {
-                Toast.makeText(ctx, "Backup failed: " + (e.message ?: "unknown error"), Toast.LENGTH_LONG).show()
+            } else {
+                ctx.contentResolver.openOutputStream(uri)?.use { it.write(payload) }
+                Toast.makeText(ctx, "Backup saved", Toast.LENGTH_LONG).show()
             }
+        } catch(e: Exception) {
+            Toast.makeText(ctx, "Backup failed: " + (e.message ?: "unknown error"), Toast.LENGTH_LONG).show()
         }
     }
-    val backupLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+    fun doRestore(uri: android.net.Uri?) {
         pickerInFlight = false
-        if(uri != null) {
-            try {
-                val payload = backupPayload(ctx)
-                ctx.contentResolver.openOutputStream(uri)?.use {
-                    it.write(if(backupPw.isBlank()) payload else encryptBytes(payload, backupPw))
-                }
-                Toast.makeText(ctx, if(backupPw.isBlank()) "Backup saved" else "Encrypted backup saved - keep the password safe", Toast.LENGTH_LONG).show()
-            } catch(e: Exception) {
-                Toast.makeText(ctx, "Backup failed: " + (e.message ?: "unknown error"), Toast.LENGTH_LONG).show()
-            }
-        }
-    }
-    val scope = rememberCoroutineScope()
-    var confirmMaster by remember { mutableStateOf(false) }
-    var confirmAll by remember { mutableStateOf(false) }
-    val restoreLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        pickerInFlight = false
-        if(uri != null) {
-            try {
-                val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: ByteArray(0)
-                if(isEncryptedBackup(bytes)) {
-                    pendingEncrypted = bytes; restorePw = ""; askPassword = true
-                } else {
-                    scope.launch {
-                        // nothing in a restore may take the app down: a half-done restore
-                        // is recoverable, a crash is not
-                        try {
-                            val snap = withContext(Dispatchers.IO) { autoBackup(ctx) }
-                            val isZip = bytes.size > 2 && bytes[0] == 'P'.code.toByte() && bytes[1] == 'K'.code.toByte()
-                            val msg = withContext(Dispatchers.IO) {
-                                if(isZip) restoreZip(ctx, ByteArrayInputStream(bytes)) else restoreJson(ctx, String(bytes, Charsets.UTF_8))
-                            }
-                            onDataChanged()
-                            Toast.makeText(ctx, msg + (if(snap != null) " Previous data saved first." else ""), Toast.LENGTH_LONG).show()
-                        } catch(t: Throwable) {
-                            onDataChanged()
-                            Toast.makeText(ctx, "Restore stopped: " + (t.message ?: t.javaClass.simpleName) + ". Settings shows the details.", Toast.LENGTH_LONG).show()
-                            try { crashLogFile(ctx).writeText("Restore failed\n" + android.util.Log.getStackTraceString(t)) } catch(e: Exception) { }
+        if(uri == null) return
+        try {
+            val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: ByteArray(0)
+            if(isEncryptedBackup(bytes)) {
+                pendingEncrypted = bytes; restorePw = ""; askPassword = true
+            } else {
+                scope.launch {
+                    // nothing in a restore may take the app down: a half-done restore
+                    // is recoverable, a crash is not
+                    try {
+                        val snap = withContext(Dispatchers.IO) { autoBackup(ctx) }
+                        val isZip = bytes.size > 2 && bytes[0] == 'P'.code.toByte() && bytes[1] == 'K'.code.toByte()
+                        val msg = withContext(Dispatchers.IO) {
+                            if(isZip) restoreZip(ctx, java.io.ByteArrayInputStream(bytes)) else restoreJson(ctx, String(bytes, Charsets.UTF_8))
                         }
+                        onDataChanged()
+                        Toast.makeText(ctx, msg + (if(snap != null) " Previous data saved first." else ""), Toast.LENGTH_LONG).show()
+                    } catch(t: Throwable) {
+                        onDataChanged()
+                        Toast.makeText(ctx, "Restore stopped: " + (t.message ?: t.javaClass.simpleName) + ". Settings shows the details.", Toast.LENGTH_LONG).show()
+                        try { crashLogFile(ctx).writeText("Restore failed\n" + android.util.Log.getStackTraceString(t)) } catch(e: Exception) { }
                     }
                 }
-            } catch(e: Exception) {
-                Toast.makeText(ctx, "Restore failed: " + (e.message ?: "unknown error"), Toast.LENGTH_LONG).show()
             }
+        } catch(e: Exception) {
+            Toast.makeText(ctx, "Restore failed: " + (e.message ?: "unknown error"), Toast.LENGTH_LONG).show()
         }
     }
     var sName by remember{mutableStateOf(prefs.getString("sName","")?:"")}; var sState by remember{mutableStateOf(prefs.getString("sState","21")?:"21")}; var sPrefix by remember{mutableStateOf(prefs.getString("sPrefix","INV")?:"INV")}; var sAddr1 by remember{mutableStateOf(prefs.getString("sAddr1","")?:(prefs.getString("sAddr","")?:"").lineSequence().firstOrNull()?.trim()?:"")}; var sAddr2 by remember{mutableStateOf(prefs.getString("sAddr2","")?:(prefs.getString("sAddr","")?:"").lineSequence().drop(1).joinToString(" ").trim())}; var sPhone by remember{mutableStateOf(prefs.getString("sPhone","")?:"")}; var sEmail by remember{mutableStateOf(prefs.getString("sEmail","")?:"")}; var sLandmark by remember{mutableStateOf(prefs.getString("sLandmark","")?:"")}; var sPincode by remember{mutableStateOf(prefs.getString("sPincode","")?:"")}; var sUpi by remember{mutableStateOf(prefs.getString("sUpi","")?:"")}; var sGst by remember{mutableStateOf(prefs.getString("sGst","")?:"")}; var sBank by remember{mutableStateOf(prefs.getString("sBank","")?:"")}; var sIfsc by remember{mutableStateOf(prefs.getString("sIfsc","")?:"")}; var sJuris by remember{mutableStateOf(prefs.getString("sJuris","")?:"")}; var defTax by remember{mutableStateOf(prefs.getString("defTax","18")?:"18")}; var pendingPerson by remember { mutableStateOf<Person?>(null) }; var editPerson by remember { mutableStateOf<Person?>(null) }; var editName by remember { mutableStateOf("") }; var editRole by remember { mutableStateOf("") }; var editPhone by remember { mutableStateOf("") }; var editBranch by remember { mutableStateOf<Branch?>(null) }; var editCode by remember { mutableStateOf("") }; var editBName by remember { mutableStateOf("") }; var editSeries by remember { mutableStateOf("") }; var editGstin by remember { mutableStateOf("") }; var editNext by remember { mutableStateOf("1") }; var rolePin by remember { mutableStateOf("") }; var newPerson by remember{mutableStateOf("")}; var newRole by remember{mutableStateOf("MANAGER")}; var newPin by remember{mutableStateOf("")}; Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())){        Text("SETTINGS", fontSize = 24.sp, fontWeight = FontWeight.Bold)
@@ -3980,10 +4000,11 @@ if(settingsTab == "backup") {
 Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Backup & Restore", fontWeight=FontWeight.Bold); Text("One file with your data, a readable XLSX copy and any stored PDFs. Add a password to encrypt it - there is no recovery if you forget it. The app PIN is never included.", fontSize=10.sp); OutlinedTextField(backupPw, {backupPw=it}, label={Text("Password (optional)")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.height(8.dp)); Button(onClick={
                 val name = "penkhata-backup-" + SimpleDateFormat("yyyyMMdd-HHmm", Locale.ENGLISH).format(Date())
                 pickerInFlight = true
-                launchWhenReady(lifecycleOwner) {
-                    if(backupPw.isBlank()) backupLauncher.launch("$name.zip") else backupEncLauncher.launch("$name.pkh")
-                }
-            }, modifier=Modifier.fillMaxWidth()){ Text("BACKUP DATA") }; Spacer(Modifier.height(6.dp)); Button(onClick={ pickerInFlight = true; launchWhenReady(lifecycleOwner) { restoreLauncher.launch(arrayOf("application/json","text/plain","*/*")) } }, modifier=Modifier.fillMaxWidth()){ Text("RESTORE DATA") } }}; Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Reset", fontWeight=FontWeight.Bold); Text("Master reset clears bills, PDFs, customers, stock, ledger and expenses but keeps every setting on this screen. Total reset clears those as well and starts the app empty.", fontSize=10.sp); Spacer(Modifier.height(8.dp)); Button(onClick={ confirmMaster = true }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFEF6C00))){ Text("MASTER RESET (KEEP SETTINGS)") }; Spacer(Modifier.height(6.dp)); Button(onClick={ confirmAll = true }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFC62828))){ Text("TOTAL RESET (EVERYTHING)") } }};
+                if(backupPw.isBlank())
+                    launchPicker(ctx, createDocIntent("application/zip", "$name.zip"), MainActivity.RC_BACKUP) { uri -> writeBackup(uri, false) }
+                else
+                    launchPicker(ctx, createDocIntent("application/octet-stream", "$name.pkh"), MainActivity.RC_BACKUP_ENC) { uri -> writeBackup(uri, true) }
+            }, modifier=Modifier.fillMaxWidth()){ Text("BACKUP DATA") }; Spacer(Modifier.height(6.dp)); Button(onClick={ pickerInFlight = true; launchPicker(ctx, openDocIntent("application/json","application/zip","text/plain","application/octet-stream"), MainActivity.RC_RESTORE) { uri -> doRestore(uri) } }, modifier=Modifier.fillMaxWidth()){ Text("RESTORE DATA") } }}; Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Reset", fontWeight=FontWeight.Bold); Text("Master reset clears bills, PDFs, customers, stock, ledger and expenses but keeps every setting on this screen. Total reset clears those as well and starts the app empty.", fontSize=10.sp); Spacer(Modifier.height(8.dp)); Button(onClick={ confirmMaster = true }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFEF6C00))){ Text("MASTER RESET (KEEP SETTINGS)") }; Spacer(Modifier.height(6.dp)); Button(onClick={ confirmAll = true }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFC62828))){ Text("TOTAL RESET (EVERYTHING)") } }};
             }
 }
      if(editPerson != null) AlertDialog(
