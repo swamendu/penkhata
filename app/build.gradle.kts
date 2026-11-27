@@ -5,7 +5,7 @@ plugins {
 android {
     namespace = "com.example.penkhata"
     compileSdk = 34
-    defaultConfig { applicationId = "com.example.penkhata"; minSdk = 26; targetSdk = 34; versionCode = 96; versionName = "9.12" }
+    defaultConfig { applicationId = "com.example.penkhata"; minSdk = 26; targetSdk = 34; versionCode = 97; versionName = "9.12.1" }
     buildFeatures { compose = true }
     composeOptions { kotlinCompilerExtensionVersion = "1.5.1" }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_1_8; targetCompatibility = JavaVersion.VERSION_1_8 }
