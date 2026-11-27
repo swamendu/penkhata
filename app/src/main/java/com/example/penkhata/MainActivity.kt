@@ -93,7 +93,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "9.9 · CRM segments"
+const val APP_VERSION = "9.10 · customer form"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -2026,24 +2026,12 @@ fun InvoiceScreen(isQuote: Boolean) {
     var bLandmark by rememberSaveable { mutableStateOf("") }; var bPincode by rememberSaveable { mutableStateOf("") }
     var bPhone by rememberSaveable { mutableStateOf("") }
     var nameLocked by rememberSaveable { mutableStateOf(false) }
-    var ownerUnlock by remember { mutableStateOf(false) }
-    var unlockPin by remember { mutableStateOf("") }
+    // a customer who moved: only the address fields open, and only on request
+    var addrUnlock by remember { mutableStateOf(false) }
+    var addrSnapshot by remember { mutableStateOf(listOf("", "", "", "")) }
+    var createdFor by remember { mutableStateOf("") }
     var custQuery by rememberSaveable { mutableStateOf("") }
     var custResults by remember { mutableStateOf(listOf<BuyerInfo>()) }
-    if(ownerUnlock) AlertDialog(
-        onDismissRequest = { ownerUnlock = false; unlockPin = "" },
-        title = { Text("Bill under a different name?") },
-        text = { Column {
-            Text("The customer record keeps its original name. This changes only this bill, and the owner PIN is required.", fontSize = 11.sp)
-            OutlinedTextField(unlockPin, {unlockPin=it}, label={Text("Owner PIN")}, visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.NumberPassword), modifier=Modifier.fillMaxWidth())
-        } },
-        confirmButton = { TextButton(onClick = {
-            if(pinMatches(prefs, unlockPin)) { nameLocked = false; ownerUnlock = false; unlockPin = ""; Toast.makeText(ctx, "Name editable for this bill only", Toast.LENGTH_SHORT).show() }
-            else Toast.makeText(ctx, "Wrong PIN", Toast.LENGTH_SHORT).show()
-        }) { Text("UNLOCK") } },
-        dismissButton = { TextButton(onClick = { ownerUnlock = false; unlockPin = "" }) { Text("CANCEL") } }
-    )
     var bGst by rememberSaveable { mutableStateOf("") }; var bState by rememberSaveable { mutableStateOf("") }
     var iDesc by rememberSaveable { mutableStateOf("") }; var iSerial by rememberSaveable { mutableStateOf("") }
     var iHsn by rememberSaveable { mutableStateOf("") }; var iQty by rememberSaveable { mutableStateOf("1") }
@@ -2154,15 +2142,44 @@ fun InvoiceScreen(isQuote: Boolean) {
             Text("Buyer Details", fontWeight=FontWeight.Bold)
             if(nameLocked) {
                 Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
-                    Text("Name locked to the registered owner of this number", fontSize = 9.sp, color = Color(0xFF2E7D32))
-                    TextButton(onClick = { ownerUnlock = true }) { Text("BILL ANOTHER NAME", fontSize = 9.sp) }
+                    Text("Existing customer - name, phone and GSTIN are locked", fontSize = 9.sp, color = Color(0xFF2E7D32))
+                    if(!addrUnlock) TextButton(onClick = {
+                        addrSnapshot = listOf(bAddr1, bAddr2, bLandmark, bPincode)
+                        addrUnlock = true
+                    }) { Text("CUSTOMER MOVED?", fontSize = 9.sp) }
                 }
             }
+            if(addrUnlock) Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
+                Text("Change the address, then save it to the record.", fontSize = 9.sp, color = Color(0xFFB26A00))
+                Row {
+                    TextButton(onClick = {
+                        bAddr1 = addrSnapshot.getOrElse(0) { "" }; bAddr2 = addrSnapshot.getOrElse(1) { "" }
+                        bLandmark = addrSnapshot.getOrElse(2) { "" }; bPincode = addrSnapshot.getOrElse(3) { "" }
+                        addrUnlock = false
+                    }) { Text("CANCEL", fontSize = 9.sp) }
+                    TextButton(onClick = {
+                        scope.launch {
+                            val ok = withContext(Dispatchers.IO) {
+                                try {
+                                    db(ctx).writableDatabase.execSQL(
+                                        "UPDATE customers SET addr1=?, addr2=?, lmk=?, pin=? WHERE phone=?",
+                                        arrayOf(bAddr1, bAddr2, bLandmark, bPincode, bPhone.trim()))
+                                    true
+                                } catch(e: Exception) { false }
+                            }
+                            addrUnlock = false
+                            Toast.makeText(ctx, if(ok) "Address updated. Previous bills keep the address they were printed with." else "Could not update the address",
+                                Toast.LENGTH_LONG).show()
+                        }
+                    }) { Text("SAVE NEW ADDRESS", fontSize = 9.sp, color = Color(0xFF2E7D32), fontWeight = FontWeight.Bold) }
+                }
+            }
+            val addrReadOnly = nameLocked && !addrUnlock
             OutlinedTextField(bName, {if(!nameLocked) bName=it}, readOnly = nameLocked, label={Text("Name")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
-            OutlinedTextField(bAddr1, {bAddr1=it}, label={Text("Address Line 1")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
-            OutlinedTextField(bAddr2, {bAddr2=it}, label={Text("Address Line 2")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
-            OutlinedTextField(bLandmark, {bLandmark=it}, label={Text("Landmark")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
-            OutlinedTextField(bPincode, {bPincode=it}, label={Text("Pincode")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+            OutlinedTextField(bAddr1, {if(!addrReadOnly) bAddr1=it}, readOnly = addrReadOnly, label={Text("Address Line 1")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+            OutlinedTextField(bAddr2, {if(!addrReadOnly) bAddr2=it}, readOnly = addrReadOnly, label={Text("Address Line 2")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+            OutlinedTextField(bLandmark, {if(!addrReadOnly) bLandmark=it}, readOnly = addrReadOnly, label={Text("Landmark")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+            OutlinedTextField(bPincode, {if(!addrReadOnly) bPincode=it}, readOnly = addrReadOnly, label={Text("Pincode")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }), modifier=Modifier.fillMaxWidth())
             OutlinedTextField(bPhone, {
                 bPhone = it
                 applyCustomerByPhone(it)
@@ -2175,10 +2192,20 @@ fun InvoiceScreen(isQuote: Boolean) {
                         Toast.makeText(ctx, "Number registered to " + known.name, Toast.LENGTH_SHORT).show()
                     } else {
                         nameLocked = false
+                        // the record exists from now on, and the bill completes it
+                        if(it.trim().length >= 10 && createdFor != it.trim()) {
+                            createdFor = it.trim()
+                            scope.launch {
+                                withContext(Dispatchers.IO) {
+                                    upsertCustomer(ctx, BuyerInfo(bName.trim(), bAddr1, bAddr2, bLandmark,
+                                        bPincode, it.trim(), bGst, bState), System.currentTimeMillis())
+                                }
+                            }
+                        }
                     }
                 }
             }, label={Text("Phone")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Phone, imeAction=ImeAction.Next), modifier=Modifier.fillMaxWidth(), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
-            Row { OutlinedTextField(bGst, {bGst=it}, label={Text("GSTIN")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.width(5.dp)); OutlinedTextField(bState, {bState=it}, label={Text("State Code")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })) }
+            Row { OutlinedTextField(bGst, {if(!nameLocked) bGst=it}, readOnly = nameLocked, label={Text("GSTIN")}, modifier=Modifier.weight(1f), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.width(5.dp)); OutlinedTextField(bState, {if(!nameLocked) bState=it}, readOnly = nameLocked, label={Text("State Code")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })) }
             if(calc.interState) Text("Other state: IGST will be charged", fontSize=10.sp, color=Color(0xFF2E7D32))
         }}
         Card(Modifier.padding(vertical=5.dp)) { Column(Modifier.padding(10.dp)) {
