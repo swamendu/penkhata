@@ -93,7 +93,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "9.4 · pickers fixed"
+const val APP_VERSION = "9.5 · rounding + auto backups"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -142,7 +142,11 @@ data class BillCalc(
 fun discountDivisor(prefs: android.content.SharedPreferences): Boolean = prefBool(prefs, "discDivisor", true)
 fun netAfterDiscount(gross: Double, discPct: Double, divisor: Boolean): Double {
     val d = discPct.coerceIn(0.0, 100.0)
-    return if(divisor) gross / (1 + d / 100.0) else gross * (1 - d / 100.0)
+    if(d == 0.0) return gross
+    val raw = if(divisor) gross / (1 + d / 100.0) else gross * (1 - d / 100.0)
+    // 79,999 at 4% is 76,922.115 - rounding down would quietly cost the shop 12 paise
+    // on every bill, so the discounted price rounds up to the rupee: 76,923.
+    return Math.ceil(raw - 0.000000001)
 }
 fun discountAmount(gross: Double, discPct: Double, divisor: Boolean): Double =
     gross - netAfterDiscount(gross, discPct, divisor)
@@ -3826,7 +3830,26 @@ fun monthlySales(ctx: Context, months: Int): List<Pair<String, Double>> {
     }
     val scope = rememberCoroutineScope()
     var confirmMaster by remember { mutableStateOf(false) }
+    var restoreAuto by remember { mutableStateOf<File?>(null) }
+    var autoReload by remember { mutableStateOf(0) }
     var confirmAll by remember { mutableStateOf(false) }
+    fun doRestoreBytes(bytes: ByteArray) {
+        scope.launch {
+            try {
+                val snap = withContext(Dispatchers.IO) { autoBackup(ctx) }
+                val isZip = bytes.size > 2 && bytes[0] == 'P'.code.toByte() && bytes[1] == 'K'.code.toByte()
+                val msg = withContext(Dispatchers.IO) {
+                    if(isZip) restoreZip(ctx, java.io.ByteArrayInputStream(bytes)) else restoreJson(ctx, String(bytes, Charsets.UTF_8))
+                }
+                onDataChanged()
+                Toast.makeText(ctx, msg + (if(snap != null) " Previous data saved first." else ""), Toast.LENGTH_LONG).show()
+            } catch(t: Throwable) {
+                onDataChanged()
+                Toast.makeText(ctx, "Restore stopped: " + (t.message ?: t.javaClass.simpleName) + ". Settings shows the details.", Toast.LENGTH_LONG).show()
+                try { crashLogFile(ctx).writeText("Restore failed\n" + android.util.Log.getStackTraceString(t)) } catch(e: Exception) { }
+            }
+        }
+    }
     fun doRestore(uri: android.net.Uri?) {
         pickerInFlight = false
         if(uri == null) return
@@ -4009,7 +4032,47 @@ Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Ba
                     launchPicker(ctx, createDocIntent("application/octet-stream", "$name.pkh"), MainActivity.RC_BACKUP_ENC) { uri -> writeBackup(uri, true) }
             }, modifier=Modifier.fillMaxWidth()){ Text("BACKUP DATA") }; Spacer(Modifier.height(6.dp)); Button(onClick={ pickerInFlight = true; launchPicker(ctx, openDocIntent("application/json","application/zip","text/plain","application/octet-stream"), MainActivity.RC_RESTORE) { uri -> doRestore(uri) } }, modifier=Modifier.fillMaxWidth()){ Text("RESTORE DATA") } }}; Card(Modifier.padding(vertical=10.dp)){Column(Modifier.padding(10.dp)){ Text("Reset", fontWeight=FontWeight.Bold); Text("Master reset clears bills, PDFs, customers, stock, ledger and expenses but keeps every setting on this screen. Total reset clears those as well and starts the app empty.", fontSize=10.sp); Spacer(Modifier.height(8.dp)); Button(onClick={ confirmMaster = true }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFEF6C00))){ Text("MASTER RESET (KEEP SETTINGS)") }; Spacer(Modifier.height(6.dp)); Button(onClick={ confirmAll = true }, modifier=Modifier.fillMaxWidth(), colors=ButtonDefaults.buttonColors(containerColor=Color(0xFFC62828))){ Text("TOTAL RESET (EVERYTHING)") } }};
             }
+Card(Modifier.padding(vertical=6.dp)){Column(Modifier.padding(10.dp)){
+    val autos = autoBackupFiles(ctx)
+    Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
+        Text("Auto backups (" + autos.size + ")", fontWeight = FontWeight.Bold)
+        TextButton(onClick = { autoReload++ }) { Text("REFRESH", fontSize = 9.sp) }
+    }
+    Text("Saved automatically when you leave the app. The newest three are kept.",
+        fontSize = 9.sp, color = Color.Gray)
+    if(autos.isEmpty()) Text("None yet.", fontSize = 10.sp, color = Color.Gray)
+    autos.forEach { f ->
+        Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(f.name, fontSize = 10.sp, maxLines = 1)
+                Text(fileSizeLabel(f.length()) + "  \u00b7  " +
+                     SimpleDateFormat("dd-MMM  h:mm a", Locale.ENGLISH).format(Date(f.lastModified())),
+                    fontSize = 9.sp, color = Color.Gray)
+            }
+            TextButton(onClick = { restoreAuto = f }) { Text("RESTORE", fontSize = 9.sp) }
+        }
+        Divider(color = Color(0x18000000))
+    }
+}}
 }
+     if(restoreAuto != null) AlertDialog(
+        onDismissRequest = { restoreAuto = null },
+        title = { Text("Restore this backup?") },
+        text = { Column {
+            Text(restoreAuto!!.name, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+            Text(fileSizeLabel(restoreAuto!!.length()) + "  \u00b7  " +
+                 SimpleDateFormat("dd-MMM-yyyy h:mm a", Locale.ENGLISH).format(Date(restoreAuto!!.lastModified())), fontSize = 10.sp, color = Color.Gray)
+            Spacer(Modifier.height(6.dp))
+            Text("Everything in the app is replaced by what this file holds. Your current data is saved as an auto backup first.",
+                fontSize = 10.sp)
+        } },
+        confirmButton = { TextButton(onClick = {
+            val f = restoreAuto; restoreAuto = null
+            if(f != null) try { doRestoreBytes(f.readBytes()) } catch(e: Exception) {
+                Toast.makeText(ctx, "Could not read that backup: " + (e.message ?: "unknown"), Toast.LENGTH_LONG).show()
+            }
+        }) { Text("RESTORE", color = Color.Red, fontWeight = FontWeight.Bold) } },
+        dismissButton = { TextButton(onClick = { restoreAuto = null }) { Text("CANCEL") } })
      if(editPerson != null) AlertDialog(
         onDismissRequest = { editPerson = null },
         title = { Text("Edit person") },
@@ -4949,6 +5012,16 @@ fun backupJson(ctx: Context): String {
 // bills back into the Files tab, not just the settings.
 // Written every time the app is closed, so an accidental exit never costs data.
 // Keeps the newest three and lives in the app's Documents folder.
+fun autoBackupFiles(ctx: Context): List<File> {
+    val dir = File(ctx.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS), "auto-backups")
+    // autoReload is only a recomposition key; the files are read fresh each time
+    return try { dir.listFiles()?.sortedByDescending { it.lastModified() } ?: emptyList() } catch(e: Exception) { emptyList() }
+}
+fun fileSizeLabel(bytes: Long): String = when {
+    bytes >= 1024 * 1024 -> String.format("%.1f MB", bytes / 1048576.0)
+    bytes >= 1024 -> String.format("%.1f KB", bytes / 1024.0)
+    else -> bytes.toString() + " B"
+}
 fun autoBackup(ctx: Context): File? {
     return try {
         val dir = File(ctx.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS), "auto-backups").apply { mkdirs() }
