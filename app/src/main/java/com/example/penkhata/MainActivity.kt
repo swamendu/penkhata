@@ -85,7 +85,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "8.4 · type-ahead"
+const val APP_VERSION = "8.5 · variants"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -675,6 +675,99 @@ fun inr(v: Double): String {
     return (if(neg) "-" else "") + sb.toString()
 }
 
+// What a variant means depends on the category: RAM and storage for a phone, screen size for
+// a TV, tonnage for an AC. The label is the only thing that changes; the value is the paper's.
+fun variantLabel(category: String): String = when(category.trim().lowercase()) {
+    "mobile" -> "Variant - RAM / Storage"
+    "watch" -> "Variant - size / connectivity"
+    "tv" -> "Variant - screen size"
+    "ac", "air conditioner" -> "Variant - tonnage / star"
+    "refrigerator" -> "Variant - capacity (litres)"
+    "washing machine" -> "Variant - capacity (kg)"
+    "audio", "earbuds", "accessories", "spare part" -> "Variant - colour or model code"
+    else -> "Variant"
+}
+
+// "GALAXY A56 5G 12/256" was one string; it is really a model and a variant.
+// Split the trailing variant off, once, and overwrite the old names.
+val VARIANT_PATTERNS = listOf(
+    Regex("""^(.+?)\s+(\d{1,2}\s*/\s*\d{2,4})$"""),
+    Regex("""^(.+?)\s+(\d{2,4}\s*(?:GB|TB))$"""),
+    Regex("""^(.+?)\s+(\d{2,3}\s*(?:inch|INCH|"))$"""),
+    Regex("""^(.+?)\s+(\d(?:\.\d)?\s*(?:T|Ton|ton))$"""),
+    Regex("""^(.+?)\s+(\d{2,3}\s*(?:L|ltr|litre|Litre))$"""),
+    Regex("""^(.+?)\s+(\d{1,2}(?:\.\d)?\s*(?:kg|KG|Kg))$""")
+)
+
+fun splitVariantOf(name: String): Pair<String, String>? {
+    for(rx in VARIANT_PATTERNS) {
+        val m = rx.find(name.trim()) ?: continue
+        val base = m.groupValues[1].trim()
+        val tail = m.groupValues[2].trim()
+        if(base.length >= 3 && tail.isNotEmpty()) return base to tail
+    }
+    return null
+}
+
+// Runs once. Overwrites the model names in the master, the SKUs, the stock and the GRN lines,
+// so that a variant is a field rather than part of a name.
+fun splitVariantsOnce(ctx: Context): Int {
+    val prefs = ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE)
+    if(prefs.getBoolean("variantSplitDone", false)) return -1
+    var changed = 0
+    try {
+        val w = db(ctx).writableDatabase
+        w.beginTransaction()
+        try {
+            // SKUs: model name loses the trailing variant, and the variant field gains it
+            w.rawQuery("SELECT rowid, model, variant FROM skus", null).use { c ->
+                while(c.moveToNext()) {
+                    val id = c.getLong(0); val model = c.getString(1) ?: ""; val variant = c.getString(2) ?: ""
+                    val split = splitVariantOf(model) ?: continue
+                    val newVariant = if(variant.isBlank()) split.second else variant
+                    w.execSQL("UPDATE skus SET model=?, variant=? WHERE rowid=?", arrayOf(split.first, newVariant, id))
+                    changed++
+                }
+            }
+            // models: the same name, minus the variant. A name that already exists is dropped.
+            val seen = mutableSetOf<String>()
+            w.rawQuery("SELECT id, brand, name FROM models", null).use { c ->
+                while(c.moveToNext()) {
+                    val id = c.getLong(0); val brand = c.getString(1) ?: ""; val name = c.getString(2) ?: ""
+                    val split = splitVariantOf(name) ?: continue
+                    val key = (brand + "|" + split.first).uppercase()
+                    if(seen.contains(key)) { w.execSQL("DELETE FROM models WHERE id=?", arrayOf(id)) }
+                    else {
+                        w.execSQL("UPDATE models SET name=? WHERE id=?", arrayOf(split.first, id))
+                        seen.add(key)
+                    }
+                    changed++
+                }
+            }
+            // stock and the GRN lines carry the model as text: rewrite it the same way
+            w.rawQuery("SELECT id, model FROM stock", null).use { c ->
+                while(c.moveToNext()) {
+                    val id = c.getLong(0); val model = c.getString(1) ?: ""
+                    val split = splitVariantOf(model) ?: continue
+                    w.execSQL("UPDATE stock SET model=? WHERE id=?", arrayOf(split.first, id))
+                    changed++
+                }
+            }
+            w.rawQuery("SELECT id, model FROM grn_lines", null).use { c ->
+                while(c.moveToNext()) {
+                    val id = c.getLong(0); val model = c.getString(1) ?: ""
+                    val split = splitVariantOf(model) ?: continue
+                    w.execSQL("UPDATE grn_lines SET model=? WHERE id=?", arrayOf(split.first, id))
+                    changed++
+                }
+            }
+            w.setTransactionSuccessful()
+        } finally { w.endTransaction() }
+        prefs.edit().putBoolean("variantSplitDone", true).apply()
+    } catch(e: Exception) { return -2 }
+    return changed
+}
+
 // A pending receipt never touched stock, so it can simply go.
 fun voidGrn(ctx: Context, grnId: Long): String? {
     return try {
@@ -1029,6 +1122,11 @@ fun MainAppScreen() {
     val prefs = remember { ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE) }
     val scope = rememberCoroutineScope()
     remember { migratePlainPin(prefs) }
+    // one pass that turns "GALAXY A56 5G 12/256" into model + variant
+    LaunchedEffect(Unit) {
+        val moved = withContext(Dispatchers.IO) { splitVariantsOnce(ctx) }
+        if(moved > 0) android.widget.Toast.makeText(ctx, "Stock master tidied: " + moved + " names split into model and variant", android.widget.Toast.LENGTH_LONG).show()
+    }
     var hasPinState by remember { mutableStateOf(hasPin(prefs)) }
     var isLocked by remember { mutableStateOf(hasPin(prefs)) }
     var menuOpen by remember { mutableStateOf(false) }
@@ -2281,6 +2379,16 @@ fun ReceiveScreen(onDone: () -> Unit) {
                     }
                 }
             }
+            AutoSuggestField(
+                label = variantLabel(nsCategory),
+                value = nsVariant,
+                onValueChange = { nsVariant = it },
+                options = if(nsModel.isBlank()) emptyList()
+                    else loadSkus(ctx).filter { it.model.equals(nsModel.trim(), true) }.map { it.variant }
+                        .filter { it.isNotBlank() }.distinct().sorted(),
+                onPick = { nsVariant = it },
+                modifier = Modifier.fillMaxWidth(),
+                allowNew = true)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 PickerField("Category", nsCategory, loadCategories(ctx), { nsCategory = it }, Modifier.weight(1f))
                 Spacer(Modifier.width(4.dp))
@@ -2296,7 +2404,7 @@ fun ReceiveScreen(onDone: () -> Unit) {
             val price = lPrice.toDoubleOrNull() ?: 0.0
             scope.launch {
                 val err = withContext(Dispatchers.IO) {
-                    saveSku(ctx, SkuInfo(sku.trim(), brand, nsCategory, nsModel, "", nsHsn,
+                    saveSku(ctx, SkuInfo(sku.trim(), brand, nsCategory, nsModel, nsVariant.trim(), nsHsn,
                         nsGst.toDoubleOrNull() ?: 18.0, 0.0, identTypeFor(nsCategory)))
                 }
                 if(err != null) { Toast.makeText(ctx, "Could not save: " + err, Toast.LENGTH_LONG).show(); return@launch }
@@ -2346,15 +2454,35 @@ fun ReceiveScreen(onDone: () -> Unit) {
                     lModel = picked
                     val m = loadModels(ctx).firstOrNull { it.name.equals(picked, true) && it.brand.equals(brand, true) }
                     if(m != null) nsCategory = m.category
-                    val skus = loadSkus(ctx).filter { it.model.equals(picked, true) }
+                    val variants = loadSkus(ctx).filter { it.model.equals(picked, true) }
+                        .map { it.variant }.filter { it.isNotBlank() }.distinct()
+                    lVariant = if(variants.size == 1) variants.first() else ""
+                    val skus = loadSkus(ctx).filter { it.model.equals(picked, true) &&
+                        (lVariant.isBlank() || it.variant.equals(lVariant, true)) }
                     lSku = if(skus.size == 1) skus.first().sku else ""
                 },
                 modifier = Modifier.fillMaxWidth(),
                 allowNew = true,
                 noteOf = { m -> val n = loadSkus(ctx).count { it.model.equals(m, true) }
                     if(n == 1) "1 SKU" else n.toString() + " SKUs" })
+            val modelVariants = if(lModel.isBlank()) emptyList()
+                else loadSkus(ctx).filter { it.model.equals(lModel.trim(), true) }.map { it.variant }.filter { it.isNotBlank() }.distinct().sorted()
+            val pickedCat = loadSkus(ctx).firstOrNull { it.model.equals(lModel.trim(), true) }?.category ?: "Mobile"
+            AutoSuggestField(
+                label = if(lModel.isBlank()) "Variant - choose the model first" else variantLabel(pickedCat),
+                value = lVariant,
+                onValueChange = { lVariant = it },
+                options = modelVariants,
+                onPick = { picked ->
+                    lVariant = picked
+                    val skus = loadSkus(ctx).filter { it.model.equals(lModel.trim(), true) && it.variant.equals(picked, true) }
+                    lSku = if(skus.size == 1) skus.first().sku else ""
+                },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = lModel.isNotBlank(),
+                allowNew = true)
             val modelSkus = if(lModel.isBlank()) emptyList()
-                else loadSkus(ctx).filter { it.model.equals(lModel.trim(), true) }.map { it.sku }.sorted()
+                else loadSkus(ctx).filter { it.model.equals(lModel.trim(), true) && (lVariant.isBlank() || it.variant.equals(lVariant.trim(), true)) }.map { it.sku }.sorted()
             AutoSuggestField(
                 label = if(lModel.isBlank()) "SKU - choose the model first" else "SKU from the challan",
                 value = lSku,
