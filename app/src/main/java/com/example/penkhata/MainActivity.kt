@@ -19,6 +19,7 @@ import android.os.Environment
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
@@ -93,7 +94,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "9.11 · picker + form"
+const val APP_VERSION = "9.12 · first run"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -1173,6 +1174,80 @@ class MainActivity : FragmentActivity() {
     }
 }
 
+// ---------------------------------------------------------------- first run
+// Nothing is asked over a half-made invoice. The app introduces itself, asks one question at a
+// time, and then puts the shop in front of the screen it needs.
+@Composable
+fun OnboardingScreen(onDone: (multi: Boolean, dest: String) -> Unit) {
+    val ctx = LocalContext.current
+    var step by remember { mutableStateOf("splash") }
+    var multi by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.delay(1000)
+        step = "outlet"
+    }
+    Box(Modifier.fillMaxSize().background(Color.White), contentAlignment = Alignment.Center) {
+        when(step) {
+            "splash" -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Image(
+                    painter = androidx.compose.ui.res.painterResource(id = com.example.penkhata.R.mipmap.ic_launcher),
+                    contentDescription = null,
+                    modifier = Modifier.size(96.dp)
+                )
+                Spacer(Modifier.height(12.dp))
+                Text("PenKhata", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color(0xFF2E7D32))
+                Text("Billing, stock and customers", fontSize = 11.sp, color = Color.Gray)
+            }
+            "outlet" -> Column(Modifier.fillMaxWidth().padding(24.dp)) {
+                Text("Is this one shop or several?", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Text("This decides how invoice numbers are built, and whether the app shows outlets at all.",
+                    fontSize = 11.sp, color = Color.Gray, modifier = Modifier.padding(top = 6.dp))
+                Spacer(Modifier.height(18.dp))
+                Card(Modifier.fillMaxWidth().clickable { multi = false; step = "start" }) {
+                    Column(Modifier.padding(14.dp)) {
+                        Text("One shop", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        Text("MOBMAN/26-27/00001 - your firm prefix, one counter, no branch codes.",
+                            fontSize = 10.sp, color = Color.Gray)
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                Card(Modifier.fillMaxWidth().clickable { multi = true; step = "start" }) {
+                    Column(Modifier.padding(14.dp)) {
+                        Text("More than one shop", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        Text("S11/SA2627/00001 - each outlet has its own code, series and counter.",
+                            fontSize = 10.sp, color = Color.Gray)
+                    }
+                }
+                Spacer(Modifier.height(14.dp))
+                Text("You can change this later under Settings -> Team.", fontSize = 9.sp, color = Color.Gray)
+            }
+            "start" -> Column(Modifier.fillMaxWidth().padding(24.dp)) {
+                Text("Starting fresh, or bringing your data?", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Text("Both end up in Settings - one fills in your business details, the other opens the backup you already have.",
+                    fontSize = 11.sp, color = Color.Gray, modifier = Modifier.padding(top = 6.dp))
+                Spacer(Modifier.height(18.dp))
+                Card(Modifier.fillMaxWidth().clickable { onDone(multi, "business") }) {
+                    Column(Modifier.padding(14.dp)) {
+                        Text("This is a new shop", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        Text("Firm name, GSTIN, address and invoice prefix - then you are ready to bill.",
+                            fontSize = 10.sp, color = Color.Gray)
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                Card(Modifier.fillMaxWidth().clickable { onDone(multi, "backup") }) {
+                    Column(Modifier.padding(14.dp)) {
+                        Text("I have a backup to restore", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        Text("Opens Backup & Restore. Your bills, stock and customers come back from the file.",
+                            fontSize = 10.sp, color = Color.Gray)
+                    }
+                }
+                Spacer(Modifier.height(14.dp))
+                TextButton(onClick = { step = "outlet" }) { Text("BACK", fontSize = 10.sp) }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------- app lock
 // The PIN is never stored as typed: only a salted SHA-256 hash is kept.
 fun sha256Hex(text: String): String {
@@ -1316,32 +1391,19 @@ fun MainAppScreen() {
     )
     // a SharedPreferences change does not recompose anything, so the answer is held in
     // state; without this the modal stayed on screen and nothing could be tapped
-    var outletAsked by remember { mutableStateOf(!askOutletMode(prefs)) }
-    if(!outletAsked) AlertDialog(
-        onDismissRequest = { outletAsked = true; prefs.edit().putBoolean("multiOutlet", false).apply() },
-        title = { Text("Is this one shop or several?") },
-        text = { Column {
-            Text("This decides how invoice numbers are built, and whether the app shows outlets at all.", fontSize = 11.sp, color = Color.Gray)
-            Spacer(Modifier.height(8.dp))
-            Text("One shop", fontWeight = FontWeight.Bold, fontSize = 12.sp)
-            Text("MOBMAN/26-27/00001 - your firm prefix, one counter, no branch codes.", fontSize = 10.sp)
-            Spacer(Modifier.height(8.dp))
-            Text("More than one shop", fontWeight = FontWeight.Bold, fontSize = 12.sp)
-            Text("S11/SA2627/00001 - each outlet has its own code, series and counter.", fontSize = 10.sp)
-            Spacer(Modifier.height(8.dp))
-            Text("You can change this later under Settings \u2192 Team.", fontSize = 9.sp, color = Color(0xFF2E7D32))
-        } },
-        confirmButton = { TextButton(onClick = {
-            prefs.edit().putBoolean("multiOutlet", false).apply()
-            outletAsked = true
+    // first run: splash, then one question at a time, never over a half-made invoice
+    var onboarded by remember { mutableStateOf(prefBool(prefs, "onboardingDone", false)) }
+    var settingsStart by remember { mutableStateOf("business") }
+    if(!onboarded) {
+        OnboardingScreen { multi, dest ->
+            prefs.edit().putBoolean("multiOutlet", multi).putBoolean("onboardingDone", true).apply()
+            settingsStart = dest
+            onboarded = true
             scope.launch { withContext(Dispatchers.IO) { ensureBranch(ctx) }; dataVersion++ }
-        }) { Text("ONE SHOP") } },
-        dismissButton = { TextButton(onClick = {
-            prefs.edit().putBoolean("multiOutlet", true).apply()
-            outletAsked = true
-            scope.launch { withContext(Dispatchers.IO) { ensureBranch(ctx) }; dataVersion++ }
-        }) { Text("SEVERAL") } }
-    )
+            currentScreen = "settings"
+        }
+        return
+    }
     if (isLocked) LoginScreen(prefs) { isLocked = false }
     else Scaffold(
     ) { p -> Box(Modifier.padding(p)) {
@@ -1365,7 +1427,7 @@ fun MainAppScreen() {
         "reports" -> GSTReportScreen()
         "history" -> BillsScreen()
         "customers" -> CrmScreen()
-        else -> SettingsScreen(hasPin(prefs), onDataChanged = { dataVersion++ }) { new -> storePin(prefs, new); hasPinState = hasPin(prefs) }
+        else -> SettingsScreen(hasPin(prefs), onDataChanged = { dataVersion++ }, startTab = settingsStart) { new -> storePin(prefs, new); hasPinState = hasPin(prefs) }
             }}}
         }
         if(menuOpen) Box(Modifier.fillMaxSize().background(Color(0x99000000)).clickable { menuOpen = false }) {
@@ -4451,7 +4513,7 @@ fun monthlySales(ctx: Context, months: Int): List<Pair<String, Double>> {
     }
 }
 
-@Composable fun SettingsScreen(hasPinSet: Boolean, onDataChanged: () -> Unit, onPinSave: (String)->Unit) {
+@Composable fun SettingsScreen(hasPinSet: Boolean, onDataChanged: () -> Unit, onPinSave: (String)->Unit, startTab: String = "business") {
     val focusManager = LocalFocusManager.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val ctx=LocalContext.current
@@ -4531,7 +4593,7 @@ fun monthlySales(ctx: Context, months: Int): List<Pair<String, Double>> {
         }
     }
     var sName by remember{mutableStateOf(prefs.getString("sName","")?:"")}; var sState by remember{mutableStateOf(prefs.getString("sState","21")?:"21")}; var sPrefix by remember{mutableStateOf(prefs.getString("sPrefix","INV")?:"INV")}; var sAddr1 by remember{mutableStateOf(prefs.getString("sAddr1","")?:(prefs.getString("sAddr","")?:"").lineSequence().firstOrNull()?.trim()?:"")}; var sAddr2 by remember{mutableStateOf(prefs.getString("sAddr2","")?:(prefs.getString("sAddr","")?:"").lineSequence().drop(1).joinToString(" ").trim())}; var sPhone by remember{mutableStateOf(prefs.getString("sPhone","")?:"")}; var sEmail by remember{mutableStateOf(prefs.getString("sEmail","")?:"")}; var sLandmark by remember{mutableStateOf(prefs.getString("sLandmark","")?:"")}; var sPincode by remember{mutableStateOf(prefs.getString("sPincode","")?:"")}; var sUpi by remember{mutableStateOf(prefs.getString("sUpi","")?:"")}; var sGst by remember{mutableStateOf(prefs.getString("sGst","")?:"")}; var sBank by remember{mutableStateOf(prefs.getString("sBank","")?:"")}; var sIfsc by remember{mutableStateOf(prefs.getString("sIfsc","")?:"")}; var sJuris by remember{mutableStateOf(prefs.getString("sJuris","")?:"")}; var defTax by remember{mutableStateOf(prefs.getString("defTax","18")?:"18")}; var pendingPerson by remember { mutableStateOf<Person?>(null) }; var editPerson by remember { mutableStateOf<Person?>(null) }; var editName by remember { mutableStateOf("") }; var editRole by remember { mutableStateOf("") }; var editPhone by remember { mutableStateOf("") }; var editBranch by remember { mutableStateOf<Branch?>(null) }; var editCode by remember { mutableStateOf("") }; var editBName by remember { mutableStateOf("") }; var editSeries by remember { mutableStateOf("") }; var editGstin by remember { mutableStateOf("") }; var editNext by remember { mutableStateOf("1") }; var rolePin by remember { mutableStateOf("") }; var newPerson by remember{mutableStateOf("")}; var newRole by remember{mutableStateOf("MANAGER")}; var newPin by remember{mutableStateOf("")}; Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())){        Text("SETTINGS", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-        var settingsTab by rememberSaveable { mutableStateOf("business") }
+        var settingsTab by rememberSaveable { mutableStateOf(startTab) }
         var backupUnlocked by remember { mutableStateOf(false) }
         var backupPin by remember { mutableStateOf("") }
         Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), Arrangement.SpaceBetween) {
