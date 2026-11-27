@@ -84,7 +84,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "8.2 · lock period"
+const val APP_VERSION = "8.3 · stock and receipts"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -655,6 +655,97 @@ fun postCountedUnits(ctx: Context, grnId: Long) {
         saveStock(ctx, stock)
     } catch(e: Exception) { }
 }
+// Indian grouping, because a lakh should read as a lakh.
+fun inr(v: Double): String {
+    val neg = v < 0
+    val whole = Math.abs(Math.round(v)).toString()
+    val sb = StringBuilder()
+    if(whole.length <= 3) sb.append(whole)
+    else {
+        sb.append(whole.substring(0, whole.length - 3))
+        var i = whole.length - 3
+        val head = sb.toString()
+        val parts = mutableListOf<String>()
+        var h = head
+        while(h.length > 2) { parts.add(0, h.substring(h.length - 2)); h = h.substring(0, h.length - 2) }
+        if(h.isNotEmpty()) parts.add(0, h)
+        sb.setLength(0); sb.append(parts.joinToString(",")); sb.append(",").append(whole.substring(whole.length - 3))
+    }
+    return (if(neg) "-" else "") + sb.toString()
+}
+
+// A pending receipt never touched stock, so it can simply go.
+fun voidGrn(ctx: Context, grnId: Long): String? {
+    return try {
+        val g = loadGrns(ctx).firstOrNull { it.id == grnId } ?: return "That receipt is gone"
+        if(g.status.equals("POSTED", true)) return "This receipt is posted - reverse it instead"
+        val w = db(ctx).writableDatabase
+        w.beginTransaction()
+        try {
+            w.delete("units", "grnId=?", arrayOf(grnId.toString()))
+            w.delete("grn_lines", "grnId=?", arrayOf(grnId.toString()))
+            w.delete("grn", "id=?", arrayOf(grnId.toString()))
+            w.setTransactionSuccessful()
+        } finally { w.endTransaction() }
+        null
+    } catch(e: Exception) { e.message ?: "Could not void the receipt" }
+}
+
+// A posted receipt has already moved stock, so it is unwound, never deleted.
+// Anything already sold blocks it: that unit sits on a customer's invoice.
+fun reverseGrn(ctx: Context, grnId: Long, reason: String): String? {
+    return try {
+        val g = loadGrns(ctx).firstOrNull { it.id == grnId } ?: return "That receipt is gone"
+        val units = unitsForGrn(ctx, grnId)
+        val sold = units.count { it.status.equals("SOLD", true) }
+        if(sold > 0) return sold.toString() + " unit(s) already sold - cancel the bill first"
+        val lines = grnLines(ctx, grnId)
+        val stock = loadStock(ctx).toMutableList()
+        // serialised goods left stock rows carrying their serial: drop exactly those
+        val serials = units.flatMap { listOf(it.serial1, it.serial2) }.filter { it.isNotBlank() }.toSet()
+        if(serials.isNotEmpty()) stock.removeAll { e -> e.imeiList().any { it in serials } }
+        // counted goods sit in one aggregate row: take the quantity back out
+        lines.filter { !needsIdent(it.second.identType) }.forEach { pair ->
+            val l = pair.second
+            val idx = stock.indexOfFirst { it.model.equals(l.model, true) && it.brand.equals(g.brand, true) && it.cost == l.price }
+            if(idx >= 0) {
+                val left = stock[idx].qty - l.units
+                if(left <= 0) stock.removeAt(idx) else stock[idx] = stock[idx].copy(qty = left)
+            }
+        }
+        saveStock(ctx, stock)
+        val w = db(ctx).writableDatabase
+        w.beginTransaction()
+        try {
+            w.delete("units", "grnId=?", arrayOf(grnId.toString()))
+            w.execSQL("UPDATE grn SET status='REVERSED', reversal=?, reversedAt=? WHERE id=?",
+                arrayOf(reason, System.currentTimeMillis(), grnId.toString()))
+            w.setTransactionSuccessful()
+        } finally { w.endTransaction() }
+        null
+    } catch(e: Exception) { e.message ?: "Could not reverse the receipt" }
+}
+
+// Damage, a count error, a unit returned to the distributor: a movement with a reason,
+// never a silent edit of the quantity.
+fun adjustStock(ctx: Context, entry: StockEntry, delta: Int, reason: String): String? {
+    return try {
+        val stock = loadStock(ctx).toMutableList()
+        val idx = stock.indexOfFirst { it.id == entry.id }
+        if(idx < 0) return "That stock row is gone"
+        val left = stock[idx].qty + delta
+        if(left <= 0) stock.removeAt(idx) else stock[idx] = stock[idx].copy(qty = left)
+        saveStock(ctx, stock)
+        val prefs = ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE)
+        val cv = android.content.ContentValues()
+        cv.put("ms", System.currentTimeMillis()); cv.put("model", entry.model); cv.put("brand", entry.brand)
+        cv.put("delta", delta); cv.put("reason", reason); cv.put("by", activePerson(prefs))
+        cv.put("branch", activeBranchCode(prefs))
+        db(ctx).writableDatabase.insert("stock_adjust", null, cv)
+        null
+    } catch(e: Exception) { e.message ?: "Could not adjust stock" }
+}
+
 // Pass two: record serials for one line, then post those units into stock.
 fun saveSerials(ctx: Context, grnId: Long, lineId: Long, serials: List<Pair<String, String>>): Int {
     return try {
@@ -1651,7 +1742,7 @@ fun StockAuditScreen(onDone: () -> Unit) {
 // from the master rather than be typed, so a brand cannot be invented by a typo.
 @Composable
 fun PickerField(label: String, value: String, options: List<String>, onPick: (String) -> Unit,
-                modifier: Modifier = Modifier, allowClear: Boolean = false) {
+                modifier: Modifier = Modifier, allowClear: Boolean = false, allowNew: Boolean = false) {
     var expanded by remember { mutableStateOf(false) }
     var q by remember { mutableStateOf("") }
     OutlinedButton(onClick = { expanded = true; q = "" }, modifier = modifier.height(52.dp)) {
@@ -1666,6 +1757,10 @@ fun PickerField(label: String, value: String, options: List<String>, onPick: (St
                 val hits = options.filter { q.isBlank() || it.contains(q.trim(), true) }
                 Text(if(hits.size > 60) "60 of " + hits.size + " - keep typing" else hits.size.toString() + " shown",
                     fontSize = 9.sp, color = Color.Gray)
+                val typed = q.trim()
+                if(allowNew && typed.isNotEmpty() && options.none { it.equals(typed, true) })
+                    Text("+ Use \"" + typed + "\" as new", fontSize = 12.sp, color = Color(0xFFB26A00), fontWeight = FontWeight.Bold,
+                        modifier = Modifier.fillMaxWidth().clickable { onPick(typed); expanded = false }.padding(vertical = 8.dp))
                 LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
                     items(hits.take(60)) { o ->
                         Text(o, fontSize = 13.sp, modifier = Modifier.fillMaxWidth()
@@ -1704,7 +1799,8 @@ fun StockMasterScreen(onDone: () -> Unit) {
     var newCat by rememberSaveable { mutableStateOf("") }
     var newDist by rememberSaveable { mutableStateOf("") }
     var newDistLimit by rememberSaveable { mutableStateOf("") }
-    var newDistDays by rememberSaveable { mutableStateOf("30") }
+    // a new distributor inherits the credit days you already work on, not a silent 30
+    var newDistDays by rememberSaveable { mutableStateOf("") }
 
     var newModelBrand by rememberSaveable { mutableStateOf("") }
     var newModelName by rememberSaveable { mutableStateOf("") }
@@ -1980,16 +2076,22 @@ fun StockMasterScreen(onDone: () -> Unit) {
                     Spacer(Modifier.width(4.dp))
                     OutlinedTextField(newDistLimit, {newDistLimit=it}, label={Text("Credit \u20b9")}, modifier=Modifier.weight(1f), singleLine = true)
                     Spacer(Modifier.width(4.dp))
-                    OutlinedTextField(newDistDays, {newDistDays=it}, label={Text("Days")}, modifier=Modifier.weight(0.7f), singleLine = true)
+                    val defaultDays = loadDistributors(ctx).map { it.creditDays }.filter { it > 0 }
+                        .groupingBy { it }.eachCount().maxByOrNull { it.value }?.key ?: 30
+                    OutlinedTextField(newDistDays, {newDistDays=it}, label={Text("Days")}, modifier=Modifier.weight(0.7f), singleLine = true,
+                        placeholder={Text(defaultDays.toString())})
                 }
                 Button(onClick = {
                     if(newDist.isNotBlank()) {
                         scope.launch {
                             withContext(Dispatchers.IO) {
+                                val days = newDistDays.toIntOrNull()
+                                    ?: loadDistributors(ctx).map { it.creditDays }.filter { it > 0 }
+                                        .groupingBy { it }.eachCount().maxByOrNull { it.value }?.key ?: 30
                                 saveDistributor(ctx, Distributor(0, newDist.trim(), "", "", "", newDistLimit.toDoubleOrNull() ?: 0.0,
-                                    newDistDays.toIntOrNull() ?: 30, "", true))
+                                    days, "", true))
                             }
-                            newDist=""; newDistLimit=""; newDistDays="30"; reload++
+                            newDist=""; newDistLimit=""; newDistDays=""; reload++
                         }
                     }
                 }, modifier = Modifier.fillMaxWidth()) { Text("ADD DISTRIBUTOR") }
@@ -2039,7 +2141,7 @@ fun GrnScreen(onDone: () -> Unit) {
                     }) { Text("ENTER SERIALS", fontSize = 10.sp) }
                 }
                 grnLines(ctx, g.id).forEach { (_, l) ->
-                    Text(l.sku + "  \u00b7  " + l.model + "  \u00d7 " + l.units + "  \u00b7  \u20b9" + fmt(l.price), fontSize = 9.sp, color = Color.Gray, maxLines = 1)
+                    Text(l.model + (if(l.variant.isBlank()) "" else " " + l.variant) + "  \u00d7 " + l.units + "  \u00b7  " + l.sku + "  \u00b7  \u20b9" + inr(l.price), fontSize = 9.sp, color = Color.Gray, maxLines = 1)
                 }
             }}
         }
@@ -2235,8 +2337,8 @@ fun ReceiveScreen(onDone: () -> Unit) {
             lines.forEachIndexed { i, l ->
                 Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text(l.sku + "  \u00d7 " + l.units, fontSize = 11.sp, maxLines = 1)
-                        Text(l.model + (if(l.variant.isBlank()) "" else " " + l.variant) + "  \u00b7  " + identLabel(l.identType), fontSize = 9.sp, color = Color.Gray, maxLines = 1)
+                        Text(l.model + (if(l.variant.isBlank()) "" else " " + l.variant) + "  \u00d7 " + l.units, fontSize = 11.sp, maxLines = 1)
+                        Text(l.sku + "  \u00b7  " + identLabel(l.identType), fontSize = 9.sp, color = Color(0xFF2E7D32))
                     }
                     Text("\u20b9" + fmt(l.units * l.price), fontSize = 11.sp)
                     TextButton(onClick = { lines = lines.filterIndexed { j, _ -> j != i } }) { Text("\u00d7", color = Color.Red) }
@@ -2467,6 +2569,10 @@ fun PurchaseScreen(onDone: () -> Unit) {
     var newDist by rememberSaveable { mutableStateOf("") }
     var newDistLimit by rememberSaveable { mutableStateOf("") }
     var cls by rememberSaveable { mutableStateOf("Mobile") }
+    var stockQuery by rememberSaveable { mutableStateOf("") }
+    var expanded by remember { mutableStateOf(setOf<String>()) }
+    var adjustFor by remember { mutableStateOf<StockEntry?>(null) }
+    var adjustNote by remember { mutableStateOf("") }
     val stockScan = remember { GmsBarcodeScanning.getClient(ctx, GmsBarcodeScannerOptions.Builder().build()) }
     var pendingStockScan by remember { mutableStateOf<File?>(null) }
     val stockCamera = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
@@ -2494,6 +2600,49 @@ fun PurchaseScreen(onDone: () -> Unit) {
             val i = cameraScanIntent(ctx, f)
             if(i != null) stockCamera.launch(i)
         }
+    }
+    if(adjustFor != null) {
+        val e = adjustFor!!
+        AlertDialog(
+            onDismissRequest = { adjustFor = null; adjustNote = "" },
+            title = { Text("Adjust stock") },
+            text = { Column(Modifier.verticalScroll(rememberScrollState()).heightIn(max = 360.dp)) {
+                Text(e.model, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                if(e.imeiLabel().isNotBlank()) Text(e.imeiLabel(), fontSize = 10.sp, color = Color.Gray, maxLines = 2)
+                Text("On hand " + e.qty + "  \u00b7  cost \u20b9" + inr(e.cost), fontSize = 10.sp, color = Color.Gray)
+                Spacer(Modifier.height(8.dp))
+                Text("Why is the count changing?", fontSize = 10.sp, color = Color.Gray)
+                listOf("Damage", "Count error", "Returned to distributor", "Sample / demo", "Other").forEach { r ->
+                    OutlinedButton(onClick = { adjustNote = r }, modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(containerColor = if(adjustNote == r) Color(0xFF2E7D32) else Color.Transparent)) {
+                        Text(r, fontSize = 10.sp, color = if(adjustNote == r) Color.White else Color.Black)
+                    }
+                }
+                Text("Every adjustment is recorded with the reason and who did it.", fontSize = 9.sp, color = Color(0xFF2E7D32))
+            } },
+            confirmButton = {
+                Row {
+                    TextButton(onClick = {
+                        if(adjustNote.isBlank()) { Toast.makeText(ctx, "Pick a reason first", Toast.LENGTH_SHORT).show(); return@TextButton }
+                        scope.launch {
+                            val err = withContext(Dispatchers.IO) { adjustStock(ctx, e, -1, adjustNote) }
+                            adjustFor = null
+                            Toast.makeText(ctx, err ?: "-1 unit \u00b7 " + adjustNote, Toast.LENGTH_SHORT).show()
+                            reload++
+                        }
+                    }) { Text("-1", color = Color.Red, fontWeight = FontWeight.Bold) }
+                    TextButton(onClick = {
+                        if(adjustNote.isBlank()) { Toast.makeText(ctx, "Pick a reason first", Toast.LENGTH_SHORT).show(); return@TextButton }
+                        scope.launch {
+                            val err = withContext(Dispatchers.IO) { adjustStock(ctx, e, +1, adjustNote) }
+                            adjustFor = null
+                            Toast.makeText(ctx, err ?: "+1 unit \u00b7 " + adjustNote, Toast.LENGTH_SHORT).show()
+                            reload++
+                        }
+                    }) { Text("+1", fontWeight = FontWeight.Bold) }
+                }
+            },
+            dismissButton = { TextButton(onClick = { adjustFor = null; adjustNote = "" }) { Text("CANCEL") } })
     }
     val totalUnits = stock.sumOf { it.qty }
     val totalValue = stock.sumOf { it.cost * it.qty }
@@ -2547,25 +2696,59 @@ fun PurchaseScreen(onDone: () -> Unit) {
                 }
             }
         }}
-        stock.sortedBy { it.model.lowercase() }.forEach { e ->
-            Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text(e.model, fontWeight = FontWeight.Bold, maxLines = 2)
-                    if(e.imeiLabel().isNotBlank()) Text(e.imeiLabel(), fontSize = 10.sp, maxLines = 2)
-                    Text((if(e.brand.isBlank()) "" else e.brand + "  \u00b7  ") + (if(e.cls.isBlank()) "" else e.cls + "  \u00b7  ") + "in since " + e.addedOn, fontSize = 10.sp, maxLines = 1)
-                    Text("Cost \u20b9${fmt(e.cost)}  \u00b7  MRP \u20b9${fmt(e.mrp)}  \u00b7  value \u20b9${fmt(e.cost * e.qty)}", fontSize = 10.sp, maxLines = 1)
-                    if(e.supplier.isNotBlank()) Text(e.supplier, fontSize = 10.sp, maxLines = 1)
-                }
-                Column(horizontalAlignment = Alignment.End, modifier = Modifier.width(56.dp)) {
-                    Text("Qty ${e.qty}", color = if(e.qty <= 1) Color.Red else Color(0xFF2E7D32), fontWeight = FontWeight.Bold)
-                    if(e.qty <= 1) Text("LOW", fontSize = 10.sp, color = Color.Red)
-                }
-                IconButton(onClick = {
-                    scope.launch {
-                        withContext(Dispatchers.IO) { saveStock(ctx, loadStock(ctx).filter { it.id != e.id }) }
-                        reload++
+        OutlinedTextField(stockQuery, { stockQuery = it }, label = { Text("Search model, SKU or IMEI") },
+            modifier = Modifier.fillMaxWidth(), singleLine = true)
+        // one row per model: ten units of the same phone are one thing, not ten
+        val groups = stock
+            .filter { e -> stockQuery.isBlank() ||
+                e.model.contains(stockQuery.trim(), true) ||
+                e.brand.contains(stockQuery.trim(), true) ||
+                e.imeiList().any { it.contains(stockQuery.trim(), true) } }
+            .groupBy { (if(it.brand.isBlank()) "" else it.brand + " \u00b7 ") + it.model.trim().uppercase() }
+            .toList().sortedBy { it.first.lowercase() }
+        if(stockQuery.isNotBlank()) Text(groups.size.toString() + " model(s) match", fontSize = 10.sp, color = Color.Gray)
+        groups.forEach { pair ->
+            val key = pair.first
+            val items = pair.second
+            val qty = items.sumOf { it.qty }
+            val value = items.sumOf { it.cost * it.qty }
+            val open = expanded.contains(key)
+            val first = items.first()
+            Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                Row(Modifier.fillMaxWidth().clickable { expanded = if(open) expanded - key else expanded + key },
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(first.model + (if(first.cls.isBlank()) "" else "  \u00b7  " + first.cls), fontWeight = FontWeight.Bold, maxLines = 2)
+                        Text((if(first.brand.isBlank()) "" else first.brand + "  \u00b7  ") +
+                             items.size.toString() + (if(items.size == 1) " entry" else " entries") +
+                             "  \u00b7  cost \u20b9" + inr(first.cost) + "  \u00b7  value \u20b9" + inr(value),
+                            fontSize = 10.sp, color = Color.Gray, maxLines = 2)
                     }
-                }) { Icon(Icons.Default.Delete, "Del", tint = Color.Red) }
+                    Column(horizontalAlignment = Alignment.End, modifier = Modifier.width(64.dp)) {
+                        Text("Qty " + qty, color = if(qty <= 1) Color.Red else Color(0xFF2E7D32), fontWeight = FontWeight.Bold)
+                        Text(if(open) "\u25b2" else "\u25bc show", fontSize = 9.sp, color = Color.Gray)
+                    }
+                }
+                if(open) {
+                    items.sortedBy { it.addedOn }.forEach { e ->
+                        Row(Modifier.fillMaxWidth().padding(start = 12.dp, top = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                if(e.imeiLabel().isNotBlank()) Text(e.imeiLabel(), fontSize = 10.sp, maxLines = 3)
+                                Text("in since " + e.addedOn + (if(e.supplier.isBlank()) "" else "  \u00b7  " + e.supplier), fontSize = 9.sp, color = Color.Gray, maxLines = 1)
+                            }
+                            Text("\u00d7" + e.qty, fontSize = 10.sp)
+                            TextButton(onClick = { adjustFor = e; adjustNote = "" }, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp)) {
+                                Text("ADJUST", fontSize = 9.sp)
+                            }
+                            IconButton(onClick = {
+                                scope.launch {
+                                    withContext(Dispatchers.IO) { saveStock(ctx, loadStock(ctx).filter { it.id != e.id }) }
+                                    reload++
+                                }
+                            }) { Icon(Icons.Default.Delete, "Del", tint = Color.Red) }
+                        }
+                    }
+                }
             }
             Divider()
         }
@@ -3807,6 +3990,11 @@ class PenDb(ctx: Context) : android.database.sqlite.SQLiteOpenHelper(ctx, "penkh
             "salesman" to "TEXT DEFAULT ''", "deliveryDate" to "TEXT DEFAULT ''"))
         healColumns(db, "stock", listOf("brand" to "TEXT DEFAULT ''", "cls" to "TEXT DEFAULT ''"))
         healColumns(db, "skus", listOf("modelId" to "INTEGER DEFAULT 0"))
+        healColumns(db, "grn", listOf("reversal" to "TEXT DEFAULT ''", "reversedAt" to "INTEGER DEFAULT 0"))
+        try {
+            db.execSQL("""CREATE TABLE IF NOT EXISTS stock_adjust(id INTEGER PRIMARY KEY AUTOINCREMENT, ms INTEGER,
+                model TEXT, brand TEXT, delta INTEGER, reason TEXT, by TEXT, branch TEXT)""")
+        } catch(e: Exception) { }
         try { db.execSQL("CREATE TABLE IF NOT EXISTS models(id INTEGER PRIMARY KEY AUTOINCREMENT, brand TEXT, category TEXT, name TEXT, UNIQUE(brand, name))") } catch(e: Exception) { }
         try {
             db.execSQL("""CREATE TABLE IF NOT EXISTS purchases(ms INTEGER PRIMARY KEY, distributor TEXT, invoiceNo TEXT, date TEXT, branch TEXT,
