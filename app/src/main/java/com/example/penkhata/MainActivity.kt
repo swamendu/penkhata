@@ -19,7 +19,6 @@ import android.os.Environment
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
@@ -94,7 +93,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "9.12 · first run"
+const val APP_VERSION = "9.12.1 · splash"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -1189,11 +1188,10 @@ fun OnboardingScreen(onDone: (multi: Boolean, dest: String) -> Unit) {
     Box(Modifier.fillMaxSize().background(Color.White), contentAlignment = Alignment.Center) {
         when(step) {
             "splash" -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Image(
-                    painter = androidx.compose.ui.res.painterResource(id = com.example.penkhata.R.mipmap.ic_launcher),
-                    contentDescription = null,
-                    modifier = Modifier.size(96.dp)
-                )
+                Box(
+                    Modifier.size(96.dp).background(Color(0xFF2E7D32), androidx.compose.foundation.shape.RoundedCornerShape(24.dp)),
+                    contentAlignment = Alignment.Center
+                ) { Text("PK", fontSize = 34.sp, fontWeight = FontWeight.Bold, color = Color.White) }
                 Spacer(Modifier.height(12.dp))
                 Text("PenKhata", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color(0xFF2E7D32))
                 Text("Billing, stock and customers", fontSize = 11.sp, color = Color.Gray)
