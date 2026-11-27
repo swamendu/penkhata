@@ -85,7 +85,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "8.5 · variants"
+const val APP_VERSION = "8.6 · pickers"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -101,7 +101,7 @@ val InvItemListSaver: Saver<List<InvItem>, String> = Saver(
 )
 data class StockEntry(val id: Long, val model: String, val imei: String, val hsn: String,
                       val cost: Double, val mrp: Double, val qty: Int, val supplier: String, val addedOn: String,
-                      val brand: String = "", val cls: String = "")
+                      val brand: String = "", val cls: String = "", val variant: String = "")
 // A stock line can hold several IMEIs (one per handset), stored newline-separated.
 fun StockEntry.imeiList(): List<String> =
     imei.split("\n", ",", " ").map{ it.trim() }.filter{ it.isNotBlank() }.distinct()
@@ -650,8 +650,8 @@ fun postCountedUnits(ctx: Context, grnId: Long) {
         for((_, l) in counted) {
             val existing = stock.indexOfFirst { it.model.equals(l.model, true) && it.brand.equals(g.brand, true) && it.cost == l.price }
             if(existing >= 0) stock[existing] = stock[existing].copy(qty = stock[existing].qty + l.units)
-            else stock.add(StockEntry(System.currentTimeMillis() + stock.size, l.model, "", l.hsn, l.price, 0.0,
-                l.units, g.distributor, g.date, g.brand, l.category))
+            else stock.add(StockEntry(System.currentTimeMillis() + stock.size, l.model, "", l.hsn, l.price, skuMrp(ctx, l.sku),
+                l.units, g.distributor, g.date, g.brand, l.category, l.variant))
         }
         saveStock(ctx, stock)
     } catch(e: Exception) { }
@@ -768,6 +768,11 @@ fun splitVariantsOnce(ctx: Context): Int {
     return changed
 }
 
+// The shelf price comes from the product master, so a unit is never born with MRP 0.
+fun skuMrp(ctx: Context, sku: String): Double = try {
+    loadSkus(ctx).firstOrNull { it.sku.equals(sku.trim(), true) }?.mrp ?: 0.0
+} catch(e: Exception) { 0.0 }
+
 // A pending receipt never touched stock, so it can simply go.
 fun voidGrn(ctx: Context, grnId: Long): String? {
     return try {
@@ -878,9 +883,10 @@ fun postUnitsToStock(ctx: Context, grnId: Long) {
                 val already = stock.any { it.imeiList().contains(s1) || (s2.isNotBlank() && it.imeiList().contains(s2)) }
                 if(already) continue
                 val line = lines[sku]
+                val mrpOf = skuMrp(ctx, sku)
                 stock.add(StockEntry(System.currentTimeMillis() + stock.size, line?.model ?: sku,
-                    if(s2.isBlank()) s1 else s1 + "\n" + s2, line?.hsn ?: "", cost, 0.0, 1,
-                    g.distributor, dateIn, g.brand, line?.category ?: ""))
+                    if(s2.isBlank()) s1 else s1 + "\n" + s2, line?.hsn ?: "", cost, mrpOf, 1,
+                    g.distributor, dateIn, g.brand, line?.category ?: "", line?.variant ?: ""))
                 changed = true
             }
         }
@@ -1345,6 +1351,8 @@ fun InvoiceScreen(isQuote: Boolean) {
     var card by rememberSaveable { mutableStateOf("") }; var finance by rememberSaveable { mutableStateOf("") }
     val (stockList, _) = loadState(emptyList<StockEntry>(), ctx) { withContext(Dispatchers.IO) { loadStock(ctx) } }
     var showStock by rememberSaveable { mutableStateOf(false) }
+    var pickQuery by rememberSaveable { mutableStateOf("") }
+    var pickOpen by remember { mutableStateOf(setOf<String>()) }
     // one row per handset: a stock line holding 3 IMEIs offers 3 choices
     val stockUnits: List<Pair<StockEntry, String>> = stockList.filter { it.qty > 0 }.flatMap { e ->
         val ims = e.imeiList()
@@ -1498,23 +1506,53 @@ fun InvoiceScreen(isQuote: Boolean) {
                 TextButton(onClick = { showStock = !showStock }) { Text(if(showStock) "HIDE" else "PICK") }
             }
             if(stockUnits.isEmpty()) Text("No stock yet - add it in the Stock tab", fontSize = 10.sp)
-            if(showStock) stockUnits.forEach { pair ->
-                val entry = pair.first; val imeiNo = pair.second
-                Column(Modifier.fillMaxWidth().clickable {
-                    iBrand = entry.brand; iCls = entry.cls
-                    iDesc = entry.model
-                    iSerial = imeiNo
-                    iHsn = entry.hsn
-                    if(entry.mrp > 0.0) iRate = if(entry.mrp == entry.mrp.toLong().toDouble()) entry.mrp.toLong().toString() else entry.mrp.toString()
-                    iQty = "1"
-                    showStock = false
-                    Toast.makeText(ctx, "Filled from stock", Toast.LENGTH_SHORT).show()
-                }.padding(vertical = 6.dp)) {
-                    Text(entry.model, fontWeight = FontWeight.Bold, maxLines = 3)
-                    if(imeiNo.isNotBlank()) Text("IMEI: $imeiNo", fontSize = 10.sp)
-                    Text("MRP \u20b9${fmt(entry.mrp)}" + (if(entry.supplier.isBlank()) "" else "  \u00b7  ${entry.supplier}"), fontSize = 10.sp)
+            if(showStock) {
+                // a thousand models cannot be a wall: ask for one, then show only its units
+                OutlinedTextField(pickQuery, { pickQuery = it }, label = { Text("Type model, variant, SKU or IMEI") },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true)
+                val q = pickQuery.trim()
+                val shown = stockUnits.filter { pair ->
+                    q.isEmpty() || pair.first.model.contains(q, true) || pair.first.variant.contains(q, true) ||
+                    pair.first.brand.contains(q, true) || pair.second.contains(q, true)
                 }
-                Divider()
+                val byGroup = shown.groupBy { pair ->
+                    pair.first.model.trim().uppercase() + "|" + pair.first.variant.trim().uppercase()
+                }.toList().sortedBy { it.first.lowercase() }
+                if(q.isEmpty()) Text("Type to find a model - " + byGroup.size + " model(s) in stock", fontSize = 9.sp, color = Color.Gray)
+                else if(byGroup.isEmpty()) Text("Nothing in stock matches \"" + q + "\"", fontSize = 10.sp, color = Color(0xFFB26A00))
+                byGroup.take(if(q.isEmpty()) 12 else 40).forEach { group ->
+                    val items = group.second
+                    val first = items.first().first
+                    val key = group.first
+                    val open = pickOpen.contains(key)
+                    Row(Modifier.fillMaxWidth().clickable { pickOpen = if(open) pickOpen - key else pickOpen + key }
+                        .padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(first.model + (if(first.variant.isBlank()) "" else "  \u00b7  " + first.variant), fontWeight = FontWeight.Bold, maxLines = 2)
+                            Text(items.size.toString() + (if(items.size == 1) " in stock" else " in stock") +
+                                 (if(first.mrp > 0.0) "  \u00b7  MRP \u20b9" + inr(first.mrp) else "  \u00b7  MRP not set") +
+                                 (if(first.supplier.isBlank()) "" else "  \u00b7  " + first.supplier), fontSize = 10.sp, color = Color.Gray, maxLines = 2)
+                        }
+                        Text(if(open) "\u25b2" else "\u25bc", fontSize = 10.sp, color = Color.Gray)
+                    }
+                    if(open) items.forEach { pair ->
+                        val entry = pair.first; val imeiNo = pair.second
+                        Row(Modifier.fillMaxWidth().clickable {
+                            iBrand = entry.brand; iCls = entry.cls
+                            iDesc = entry.model + (if(entry.variant.isBlank()) "" else " " + entry.variant)
+                            iSerial = imeiNo
+                            iHsn = entry.hsn
+                            if(entry.mrp > 0.0) iRate = if(entry.mrp == entry.mrp.toLong().toDouble()) entry.mrp.toLong().toString() else entry.mrp.toString()
+                            iQty = "1"
+                            showStock = false
+                            Toast.makeText(ctx, "Filled from stock", Toast.LENGTH_SHORT).show()
+                        }.padding(start = 12.dp, top = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text(if(imeiNo.isBlank()) "no serial" else imeiNo, fontSize = 10.sp, modifier = Modifier.weight(1f), maxLines = 2)
+                            Text("ADD", fontSize = 9.sp, color = Color(0xFF2E7D32), fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    Divider()
+                }
             }
         }}
         Card(Modifier.padding(vertical=5.dp)) { Column(Modifier.padding(10.dp)) {
@@ -2307,6 +2345,7 @@ fun ReceiveScreen(onDone: () -> Unit) {
     var newSkuFor by remember { mutableStateOf<String?>(null) }
     var nsModel by remember { mutableStateOf("") }
     var nsVariant by remember { mutableStateOf("") }
+    var nsMrp by remember { mutableStateOf("") }
     var nsCategory by remember { mutableStateOf("Mobile") }
     var nsHsn by remember { mutableStateOf("") }
     var nsGst by remember { mutableStateOf("18") }
@@ -2394,6 +2433,8 @@ fun ReceiveScreen(onDone: () -> Unit) {
                 Spacer(Modifier.width(4.dp))
                 OutlinedTextField(nsGst, {nsGst=it}, label={Text("GST %")}, modifier=Modifier.weight(0.6f), singleLine = true)
             }
+            OutlinedTextField(nsMrp, {nsMrp=it}, label={Text("MRP - the shelf price on the box")}, modifier=Modifier.fillMaxWidth(), singleLine = true,
+                keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number))
             OutlinedTextField(nsHsn, {nsHsn=it}, label={Text("HSN")}, modifier=Modifier.fillMaxWidth(), singleLine = true)
             Text("Saving creates the model if it is new, and adds the line to this challan.", fontSize = 9.sp, color = Color(0xFF2E7D32))
         } },
@@ -2405,7 +2446,7 @@ fun ReceiveScreen(onDone: () -> Unit) {
             scope.launch {
                 val err = withContext(Dispatchers.IO) {
                     saveSku(ctx, SkuInfo(sku.trim(), brand, nsCategory, nsModel, nsVariant.trim(), nsHsn,
-                        nsGst.toDoubleOrNull() ?: 18.0, 0.0, identTypeFor(nsCategory)))
+                        nsGst.toDoubleOrNull() ?: 18.0, nsMrp.toDoubleOrNull() ?: 0.0, identTypeFor(nsCategory)))
                 }
                 if(err != null) { Toast.makeText(ctx, "Could not save: " + err, Toast.LENGTH_LONG).show(); return@launch }
                 // straight onto the challan, no second trip
@@ -2895,7 +2936,8 @@ fun PurchaseScreen(onDone: () -> Unit) {
                 e.model.contains(stockQuery.trim(), true) ||
                 e.brand.contains(stockQuery.trim(), true) ||
                 e.imeiList().any { it.contains(stockQuery.trim(), true) } }
-            .groupBy { (if(it.brand.isBlank()) "" else it.brand + " \u00b7 ") + it.model.trim().uppercase() }
+            .groupBy { (if(it.brand.isBlank()) "" else it.brand + " \u00b7 ") + it.model.trim().uppercase() +
+                (if(it.variant.isBlank()) "" else " \u00b7 " + it.variant.trim().uppercase()) }
             .toList().sortedBy { it.first.lowercase() }
         if(stockQuery.isNotBlank()) Text(groups.size.toString() + " model(s) match", fontSize = 10.sp, color = Color.Gray)
         groups.forEach { pair ->
@@ -2909,7 +2951,8 @@ fun PurchaseScreen(onDone: () -> Unit) {
                 Row(Modifier.fillMaxWidth().clickable { expanded = if(open) expanded - key else expanded + key },
                     verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text(first.model + (if(first.cls.isBlank()) "" else "  \u00b7  " + first.cls), fontWeight = FontWeight.Bold, maxLines = 2)
+                        Text(first.model + (if(first.variant.isBlank()) "" else "  \u00b7  " + first.variant) +
+                             (if(first.cls.isBlank()) "" else "  \u00b7  " + first.cls), fontWeight = FontWeight.Bold, maxLines = 2)
                         Text((if(first.brand.isBlank()) "" else first.brand + "  \u00b7  ") +
                              items.size.toString() + (if(items.size == 1) " entry" else " entries") +
                              "  \u00b7  cost \u20b9" + inr(first.cost) + "  \u00b7  value \u20b9" + inr(value),
@@ -4179,7 +4222,7 @@ class PenDb(ctx: Context) : android.database.sqlite.SQLiteOpenHelper(ctx, "penkh
             "cancelled" to "INTEGER DEFAULT 0", "cancelReason" to "TEXT DEFAULT ''",
             "branch" to "TEXT DEFAULT ''", "series" to "TEXT DEFAULT ''",
             "salesman" to "TEXT DEFAULT ''", "deliveryDate" to "TEXT DEFAULT ''"))
-        healColumns(db, "stock", listOf("brand" to "TEXT DEFAULT ''", "cls" to "TEXT DEFAULT ''"))
+        healColumns(db, "stock", listOf("brand" to "TEXT DEFAULT ''", "cls" to "TEXT DEFAULT ''", "variant" to "TEXT DEFAULT ''"))
         healColumns(db, "skus", listOf("modelId" to "INTEGER DEFAULT 0"))
         healColumns(db, "grn", listOf("reversal" to "TEXT DEFAULT ''", "reversedAt" to "INTEGER DEFAULT 0"))
         try {
@@ -4321,10 +4364,10 @@ fun importJsonIfNeeded(ctx: Context) {
 fun loadStock(ctx: Context): List<StockEntry> {
     val out = mutableListOf<StockEntry>()
     try {
-        db(ctx).readableDatabase.rawQuery("SELECT id,model,imei,hsn,cost,mrp,qty,supplier,addedOn,brand,cls FROM stock ORDER BY model", null).use { c ->
+        db(ctx).readableDatabase.rawQuery("SELECT id,model,imei,hsn,cost,mrp,qty,supplier,addedOn,brand,cls,variant FROM stock ORDER BY model", null).use { c ->
             while(c.moveToNext()) out.add(StockEntry(c.getLong(0), c.getString(1) ?: "", c.getString(2) ?: "", c.getString(3) ?: "",
                 c.getDouble(4), c.getDouble(5), c.getInt(6), c.getString(7) ?: "", c.getString(8) ?: "",
-                c.getString(9) ?: "", c.getString(10) ?: ""))
+                c.getString(9) ?: "", c.getString(10) ?: "", c.getString(11) ?: ""))
         }
     } catch(e: Exception) { }
     return out
@@ -4338,7 +4381,7 @@ fun saveStock(ctx: Context, list: List<StockEntry>) {
             val cv = android.content.ContentValues()
             cv.put("id", e.id); cv.put("model", e.model); cv.put("imei", e.imei); cv.put("hsn", e.hsn)
             cv.put("cost", e.cost); cv.put("mrp", e.mrp); cv.put("qty", e.qty); cv.put("supplier", e.supplier); cv.put("addedOn", e.addedOn)
-            cv.put("brand", e.brand); cv.put("cls", e.cls)
+            cv.put("brand", e.brand); cv.put("cls", e.cls); cv.put("variant", e.variant)
             w.insertWithOnConflict("stock", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE)
         }
         w.setTransactionSuccessful()
