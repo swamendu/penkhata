@@ -3445,6 +3445,7 @@ fun monthlySales(ctx: Context, months: Int): List<Pair<String, Double>> {
 }
 
 @Composable fun GSTReportScreen() {
+    val lifecycleOwner = LocalLifecycleOwner.current
     val focusManager = LocalFocusManager.current
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -3562,17 +3563,17 @@ fun monthlySales(ctx: Context, months: Int): List<Pair<String, Double>> {
             Spacer(Modifier.height(8.dp))
             Button(onClick = {
                 pickerInFlight = true
-                launchWhenReady(LocalLifecycleOwner.current) { xlsxLauncher.launch("PenKhata-export-" + SimpleDateFormat("yyyyMMdd", Locale.ENGLISH).format(Date()) + ".xlsx") }
+                launchWhenReady(lifecycleOwner) { xlsxLauncher.launch("PenKhata-export-" + SimpleDateFormat("yyyyMMdd", Locale.ENGLISH).format(Date()) + ".xlsx") }
             }, modifier = Modifier.fillMaxWidth()) { Text("EXPORT XLSX") }
             Spacer(Modifier.height(6.dp))
             Button(onClick = {
                 pickerInFlight = true
-                launchWhenReady(LocalLifecycleOwner.current) { csvLauncher.launch("PenKhata-bills-" + SimpleDateFormat("MMMyyyy", Locale.ENGLISH).format(Date(startMs)) + ".csv") }
+                launchWhenReady(lifecycleOwner) { csvLauncher.launch("PenKhata-bills-" + SimpleDateFormat("MMMyyyy", Locale.ENGLISH).format(Date(startMs)) + ".csv") }
             }, modifier = Modifier.fillMaxWidth()) { Text("EXPORT CSV (THIS MONTH)") }
             Spacer(Modifier.height(6.dp))
             Button(onClick = {
                 pickerInFlight = true
-                launchWhenReady(LocalLifecycleOwner.current) { registerLauncher.launch("Installation-Register-" + SimpleDateFormat("MMMyyyy", Locale.ENGLISH).format(Date(startMs)) + ".xlsx") }
+                launchWhenReady(lifecycleOwner) { registerLauncher.launch("Installation-Register-" + SimpleDateFormat("MMMyyyy", Locale.ENGLISH).format(Date(startMs)) + ".xlsx") }
             }, modifier = Modifier.fillMaxWidth()) { Text("INSTALLATION REGISTER (XLSX)") }
         }}
         val trend by produceState(initialValue = emptyList<Pair<String, Double>>(), offset) {
