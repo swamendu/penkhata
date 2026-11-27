@@ -87,7 +87,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "9.1 · scan"
+const val APP_VERSION = "9.2 · serial session"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -2460,7 +2460,17 @@ fun GrnScreen(onDone: () -> Unit) {
     var serialTarget by remember { mutableStateOf<Pair<Long, Long>?>(null) }
     val grns by produceState(initialValue = emptyList<Grn>(), reload) { value = withContext(Dispatchers.IO) { loadGrns(ctx) } }
 
-    if(showReceive) { ReceiveScreen { showReceive = false; reload++ }; return }
+    if(showReceive) {
+        ReceiveScreen(onDone = { showReceive = false; reload++ }, onSavedGrn = { id ->
+            showReceive = false
+            val first = grnLines(ctx, id).firstOrNull { (_, l) ->
+                needsIdent(l.identType) && unitsForGrn(ctx, id).any { it.status == "PENDING" && it.sku == l.sku }
+            }
+            if(first != null) serialTarget = id to first.first
+            reload++
+        })
+        return
+    }
     if(serialTarget != null) {
         SerialScreen(serialTarget!!.first, serialTarget!!.second) { serialTarget = null; reload++ }
         return
@@ -2501,7 +2511,7 @@ fun GrnScreen(onDone: () -> Unit) {
 }
 
 @Composable
-fun ReceiveScreen(onDone: () -> Unit) {
+fun ReceiveScreen(onDone: () -> Unit, onSavedGrn: (Long) -> Unit = { onDone() }) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
@@ -2784,7 +2794,8 @@ fun ReceiveScreen(onDone: () -> Unit) {
                         saving = false
                         if(id > 0) {
                             Toast.makeText(ctx, "GRN " + no + " saved - " + lines.sumOf { it.units } + " units received", Toast.LENGTH_LONG).show()
-                            onDone()
+                            // straight into the serials, not back to the list
+                            onSavedGrn(id)
                         } else Toast.makeText(ctx, "Could not save the receipt", Toast.LENGTH_LONG).show()
                     }
                 }
@@ -2797,17 +2808,37 @@ fun ReceiveScreen(onDone: () -> Unit) {
 fun SerialScreen(grnId: Long, lineId: Long, onDone: () -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
-    val grn = remember { loadGrns(ctx).firstOrNull { it.id == grnId } }
-    val line = remember { grnLines(ctx, grnId).firstOrNull { it.first == lineId }?.second }
-    val ident = line?.identType ?: "SERIAL"
-    val pendingUnits = remember { unitsForGrn(ctx, grnId).filter { it.status == "PENDING" && it.sku == (line?.sku ?: "") } }
+    var reload by remember { mutableStateOf(0) }
+    val grn = remember(reload) { loadGrns(ctx).firstOrNull { it.id == grnId } }
+    // every line of this challan that still needs serials, walked in order
+    val pendingLines = remember(reload) {
+        grnLines(ctx, grnId).filter { (_, l) ->
+            needsIdent(l.identType) && unitsForGrn(ctx, grnId).any { it.status == "PENDING" && it.sku == l.sku }
+        }
+    }
+    var idx by remember(reload) {
+        mutableStateOf(pendingLines.indexOfFirst { it.first == lineId }.let { if(it < 0) 0 else it })
+    }
+    if(pendingLines.isEmpty()) {
+        LaunchedEffect(Unit) {
+            Toast.makeText(ctx, "All serials entered - stock posted", Toast.LENGTH_LONG).show()
+            onDone()
+        }
+        return
+    }
+    val pair = pendingLines[idx.coerceIn(0, pendingLines.size - 1)]
+    val currentLineId = pair.first
+    val line = pair.second
+    val ident = line.identType
+    val pendingUnits = remember(currentLineId, reload) {
+        unitsForGrn(ctx, grnId).filter { it.status == "PENDING" && it.sku == line.sku }
+    }
     val needsTwo = ident == "SERIAL2"
-    // one row per unit: the serial is entered where it belongs, not into a blob
-    var rows by remember { mutableStateOf(List(pendingUnits.size) { "" to "" }) }
+    // one row per unit, reset whenever the line changes
+    var rows by remember(currentLineId, reload) { mutableStateOf(List(pendingUnits.size) { "" to "" }) }
     var scanning by remember { mutableStateOf(-1) }
-    val known = remember {
-        val fromUnits = unitsForGrn(ctx, grnId).map { it.serial1 }.filter { it.isNotBlank() } +
-                        unitsForGrn(ctx, grnId).map { it.serial2 }.filter { it.isNotBlank() }
+    val known = remember(reload) {
+        val fromUnits = unitsForGrn(ctx, grnId).flatMap { listOf(it.serial1, it.serial2) }.filter { it.isNotBlank() }
         val fromStock = loadStock(ctx).flatMap { it.imeiList() }
         (fromUnits + fromStock).toSet()
     }
@@ -2817,8 +2848,8 @@ fun SerialScreen(grnId: Long, lineId: Long, onDone: () -> Unit) {
         if(ident == "IMEI") return t.length == 15 && t.all { it.isDigit() }
         return t.length >= 5
     }
-    fun statusOf(idx: Int): String {
-        val v = rows[idx].first.trim()
+    fun statusOf(i: Int): String {
+        val v = rows[i].first.trim()
         if(v.isEmpty()) return ""
         if(!valid(v)) return if(ident == "IMEI") v.length.toString() + " digits" else "too short"
         if(known.contains(v)) return "already in stock"
@@ -2826,10 +2857,12 @@ fun SerialScreen(grnId: Long, lineId: Long, onDone: () -> Unit) {
         return "ok"
     }
     val filled = rows.indices.count { i -> valid(rows[i].first.trim()) && statusOf(i) == "ok" }
+    val totalUnits = pendingLines.sumOf { (_, l) -> unitsForGrn(ctx, grnId).count { it.status == "PENDING" && it.sku == l.sku } }
+    val doneUnits = totalUnits - pendingUnits.size + filled
 
-    fun fillRow(idx: Int, value: String) {
-        if(idx in rows.indices && value.isNotBlank())
-            rows = rows.toMutableList().also { it[idx] = value.trim() to rows[idx].second }
+    fun fillRow(target: Int, value: String) {
+        if(target in rows.indices && value.isNotBlank())
+            rows = rows.toMutableList().also { it[target] = value.trim() to rows[target].second }
         scanning = -1
     }
     var pendingScan by remember { mutableStateOf<File?>(null) }
@@ -2849,7 +2882,6 @@ fun SerialScreen(grnId: Long, lineId: Long, onDone: () -> Unit) {
                 GmsBarcodeScanning.getClient(ctx, GmsBarcodeScannerOptions.Builder().build()).startScan()
                     .addOnSuccessListener { b -> val v = b.rawValue; if(v != null) fillRow(target, v) else scanning = -1 }
                     .addOnFailureListener {
-                        // no Play Services scanner: fall back to a photo of the box
                         val f = makeScanPhotoFile(ctx); pendingScan = f
                         cameraScanIntent(ctx, f)?.let { scanCamera.launch(it) } ?: run { scanning = -1 }
                     }
@@ -2873,9 +2905,11 @@ fun SerialScreen(grnId: Long, lineId: Long, onDone: () -> Unit) {
         }
         Text((grn?.no ?: "") + "  \u00b7  " + (grn?.distributor ?: "") + (if((grn?.brand ?: "").isBlank()) "" else "  \u00b7  " + grn!!.brand),
             fontSize = 10.sp, color = Color.Gray)
-        Text((line?.model ?: "") + (if((line?.variant ?: "").isBlank()) "" else "  \u00b7  " + line!!.variant), fontSize = 13.sp, fontWeight = FontWeight.Bold)
-        Text((line?.sku ?: "") + "  \u00b7  " + identLabel(ident) + "  \u00b7  " + pendingUnits.size + " unit(s)",
-            fontSize = 10.sp, color = Color(0xFFB26A00))
+        Text("Line " + (idx + 1) + " of " + pendingLines.size + "  \u00b7  " + doneUnits + " of " + totalUnits + " serials entered",
+            fontSize = 10.sp, color = Color(0xFF1565C0), fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(4.dp))
+        Text(line.model + (if(line.variant.isBlank()) "" else "  \u00b7  " + line.variant), fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        Text(line.sku + "  \u00b7  " + identLabel(ident) + "  \u00b7  " + pendingUnits.size + " unit(s)", fontSize = 10.sp, color = Color(0xFFB26A00))
         Spacer(Modifier.height(6.dp))
 
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -2903,7 +2937,6 @@ fun SerialScreen(grnId: Long, lineId: Long, onDone: () -> Unit) {
                     OutlinedTextField(
                         rows[i].first,
                         { v ->
-                            // pasting a list of serials fills the rows below instead of one box
                             val parts = v.split("\n").map { it.trim() }.filter { it.isNotBlank() }
                             if(parts.size > 1) {
                                 val next = rows.toMutableList()
@@ -2936,21 +2969,33 @@ fun SerialScreen(grnId: Long, lineId: Long, onDone: () -> Unit) {
             }
         }}
 
-        val ready = rows.mapIndexed { i, r -> i to r }.filter { (i, r) -> valid(r.first.trim()) && statusOf(i) == "ok" }
+        val ready = rows.indices.filter { i -> valid(rows[i].first.trim()) && statusOf(i) == "ok" }
         Text("Duplicates, short numbers and serials already in stock are not saved.", fontSize = 9.sp, color = Color.Gray)
         Spacer(Modifier.height(4.dp))
         Button(onClick = {
             if(ready.isEmpty()) { Toast.makeText(ctx, "No valid serials to save", Toast.LENGTH_SHORT).show(); return@Button }
             scope.launch {
                 val n = withContext(Dispatchers.IO) {
-                    saveSerials(ctx, grnId, lineId, ready.map { (i, r) -> r.first.trim() to r.second.trim() })
+                    saveSerials(ctx, grnId, currentLineId, ready.map { i -> rows[i].first.trim() to rows[i].second.trim() })
                 }
-                Toast.makeText(ctx, if(n > 0) "$n serial(s) recorded" + (if(n < rows.size) ", " + (rows.size - n) + " left pending" else "")
-                    else "Nothing saved", Toast.LENGTH_LONG).show()
-                onDone()
+                if(n <= 0) { Toast.makeText(ctx, "Nothing saved", Toast.LENGTH_LONG).show(); return@launch }
+                // next line of the same challan, without a trip back to the list
+                val left = withContext(Dispatchers.IO) {
+                    grnLines(ctx, grnId).filter { (_, l) ->
+                        needsIdent(l.identType) && unitsForGrn(ctx, grnId).any { it.status == "PENDING" && it.sku == l.sku }
+                    }
+                }
+                if(left.isEmpty()) {
+                    Toast.makeText(ctx, n.toString() + " serials saved - all serials entered, stock posted", Toast.LENGTH_LONG).show()
+                    onDone()
+                } else {
+                    Toast.makeText(ctx, n.toString() + " saved - next: " + left.first().second.model, Toast.LENGTH_SHORT).show()
+                    idx = 0
+                    reload++
+                }
             }
         }, modifier = Modifier.fillMaxWidth(), enabled = ready.isNotEmpty()) {
-            Text(if(ready.size == rows.size) "SAVE ALL " + rows.size else "SAVE " + ready.size + " OF " + rows.size)
+            Text(if(ready.size == rows.size) "SAVE " + rows.size + " AND CONTINUE" else "SAVE " + ready.size + " OF " + rows.size)
         }
         Spacer(Modifier.height(40.dp))
     }
