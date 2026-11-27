@@ -3824,6 +3824,9 @@ fun monthlySales(ctx: Context, months: Int): List<Pair<String, Double>> {
             Toast.makeText(ctx, "Backup failed: " + (e.message ?: "unknown error"), Toast.LENGTH_LONG).show()
         }
     }
+    val scope = rememberCoroutineScope()
+    var confirmMaster by remember { mutableStateOf(false) }
+    var confirmAll by remember { mutableStateOf(false) }
     fun doRestore(uri: android.net.Uri?) {
         pickerInFlight = false
         if(uri == null) return
