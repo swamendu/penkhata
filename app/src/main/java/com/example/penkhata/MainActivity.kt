@@ -94,7 +94,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "9.3 · in-app scanner"
+const val APP_VERSION = "9.3.1 · restore"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -140,7 +140,7 @@ data class BillCalc(
 // A discount percentage can mean two different things, and the shop decides which:
 //   divisor = true  -> the price is (1 + d%) of the discounted value, so divide  (25,000 / 1.03)
 //   divisor = false -> d% off the price, so multiply                              (25,000 x 0.97)
-fun discountDivisor(prefs: android.content.SharedPreferences): Boolean = prefs.getBoolean("discDivisor", true)
+fun discountDivisor(prefs: android.content.SharedPreferences): Boolean = prefBool(prefs, "discDivisor", true)
 fun netAfterDiscount(gross: Double, discPct: Double, divisor: Boolean): Double {
     val d = discPct.coerceIn(0.0, 100.0)
     return if(divisor) gross / (1 + d / 100.0) else gross * (1 - d / 100.0)
@@ -214,7 +214,33 @@ data class Person(val id: Long, val name: String, val role: String, val branch: 
 
 // Single outlet is the common case and should look like it: one shop, one counter, no
 // branch codes in the invoice number. Multi outlet switches the whole concept on.
-fun isMultiOutlet(prefs: android.content.SharedPreferences): Boolean = prefs.getBoolean("multiOutlet", false)
+// A restore used to write booleans back as strings, which made every getBoolean throw.
+// This repairs a phone that was already damaged by one, and is harmless otherwise.
+fun healPrefTypes(prefs: android.content.SharedPreferences) {
+    try {
+        val ed = prefs.edit()
+        for((k, v) in prefs.all) {
+            if(k == "appPin" || v == null) continue
+            val raw = v.toString()
+            if(raw.equals("true", true) || raw.equals("false", true)) ed.putBoolean(k, raw.equals("true", true))
+            else if(k == "lockMinutes" || k == "nextInv" || k == "creditDays") raw.toIntOrNull()?.let { ed.putInt(k, it) }
+        }
+        ed.apply()
+    } catch(e: Exception) { }
+}
+
+// A preference can be the wrong type after a bad restore. Reading it must never crash.
+fun prefBool(prefs: android.content.SharedPreferences, key: String, def: Boolean): Boolean =
+    try { prefs.getBoolean(key, def) } catch(e: ClassCastException) {
+        prefs.getString(key, null)?.equals("true", true) ?: def
+    }
+fun prefInt(prefs: android.content.SharedPreferences, key: String, def: Int): Int =
+    try { prefs.getInt(key, def) } catch(e: ClassCastException) {
+        prefs.getString(key, null)?.toIntOrNull() ?: def
+    }
+
+fun isMultiOutlet(prefs: android.content.SharedPreferences): Boolean =
+    prefBool(prefs, "multiOutlet", false)
 fun askOutletMode(prefs: android.content.SharedPreferences): Boolean = !prefs.contains("multiOutlet")
 
 fun loadBranches(ctx: Context): List<Branch> {
@@ -722,7 +748,7 @@ fun splitVariantOf(name: String): Pair<String, String>? {
 // so that a variant is a field rather than part of a name.
 fun splitVariantsOnce(ctx: Context): Int {
     val prefs = ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE)
-    if(prefs.getBoolean("variantSplitDone", false)) return -1
+    if(prefBool(prefs, "variantSplitDone", false)) return -1
     var changed = 0
     try {
         val w = db(ctx).writableDatabase
@@ -1057,7 +1083,7 @@ fun nextInvoiceNo(ctx: Context, prefs: android.content.SharedPreferences): Strin
     val b = branches.firstOrNull { it.code == activeBranchCode(prefs) } ?: branches.firstOrNull()
     if(b == null) {
         val prefix = (prefs.getString("sPrefix", "") ?: "").trim().ifEmpty { "INV" }
-        return "$prefix/${fyLabel()}/" + String.format("%03d", prefs.getInt("nextInv", 1))
+        return "$prefix/${fyLabel()}/" + String.format("%03d", prefInt(prefs, "nextInv", 1))
     }
     val n = String.format("%05d", b.nextSerial)
     // MAIN is the placeholder the app invents when it has no outlet yet; a single-outlet
@@ -1137,6 +1163,7 @@ fun MainAppScreen() {
     val prefs = remember { ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE) }
     val scope = rememberCoroutineScope()
     remember { migratePlainPin(prefs) }
+    remember { healPrefTypes(prefs) }
     // one pass that turns "GALAXY A56 5G 12/256" into model + variant
     LaunchedEffect(Unit) {
         val moved = withContext(Dispatchers.IO) { splitVariantsOnce(ctx) }
@@ -1149,16 +1176,16 @@ fun MainAppScreen() {
     // FLAG_SECURE stops screenshots and screen recording. The owner may capture; a
     // manager, stock keeper or rep may not, so the shop's data cannot walk out as an image.
     val windowActivity = ctx as? Activity
-    LaunchedEffect(activeRole(prefs), prefs.getBoolean("blockShots", true)) {
+    LaunchedEffect(activeRole(prefs), prefBool(prefs, "blockShots", true)) {
         try {
-            if(windowActivity != null && prefs.getBoolean("blockShots", true) && activeRole(prefs) != "OWNER")
+            if(windowActivity != null && prefBool(prefs, "blockShots", true) && activeRole(prefs) != "OWNER")
                 windowActivity.window.setFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE, android.view.WindowManager.LayoutParams.FLAG_SECURE)
             else windowActivity?.window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
         } catch(e: Exception) { }
     }
     val lifecycleOwner = LocalLifecycleOwner.current
     // -1 never, 0 immediately on leaving, otherwise minutes of grace
-    val lockMinutes = remember { prefs.getInt("lockMinutes", 5) }
+    val lockMinutes = remember { prefInt(prefs, "lockMinutes", 5) }
     var leftAt by remember { mutableStateOf(0L) }
     var lastTouch by remember { mutableStateOf(System.currentTimeMillis()) }
     DisposableEffect(lifecycleOwner, hasPinState, lockMinutes) {
@@ -3875,7 +3902,7 @@ val crashText by produceState(initialValue = "", ctx) { value = withContext(Disp
             }}
             Text("Lock after", fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
             Text("How long the app stays open before it asks for the PIN again.", fontSize = 9.sp, color = Color.Gray)
-            val lockNow = prefs.getInt("lockMinutes", 5)
+            val lockNow = prefInt(prefs, "lockMinutes", 5)
             Row(Modifier.fillMaxWidth().padding(top = 4.dp)) {
                 listOf(-1 to "Never", 0 to "Now").forEach { pair ->
                     OutlinedButton(onClick = { prefs.edit().putInt("lockMinutes", pair.first).apply(); onDataChanged() },
@@ -5180,7 +5207,12 @@ fun restoreJson(ctx: Context, text: String): String {
         for(k in settings.keys()) {
             if(k == "appPin") continue
             val raw = settings.opt(k)
-            if(raw is Number) ed.putInt(k, raw.toInt()) else ed.putString(k, raw?.toString() ?: "")
+            // a boolean written back as a string makes every getBoolean() throw later
+            when(raw) {
+                is Boolean -> ed.putBoolean(k, raw)
+                is Number -> ed.putInt(k, raw.toInt())
+                else -> ed.putString(k, raw?.toString() ?: "")
+            }
             settingsCount++
         }
     }
@@ -5224,6 +5256,7 @@ fun restoreJson(ctx: Context, text: String): String {
                 cv.put("imei", o.optString("imei")); cv.put("hsn", o.optString("hsn"))
                 cv.put("cost", o.optDouble("cost", 0.0)); cv.put("mrp", o.optDouble("mrp", 0.0))
                 cv.put("qty", o.optInt("qty", 0)); cv.put("supplier", o.optString("supplier")); cv.put("addedOn", o.optString("addedOn"))
+                cv.put("brand", o.optString("brand")); cv.put("cls", o.optString("cls")); cv.put("variant", o.optString("variant"))
                 w.insertWithOnConflict("stock", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE); st++
             }
         }
@@ -5233,8 +5266,10 @@ fun restoreJson(ctx: Context, text: String): String {
     } finally {
         w.endTransaction()
     }
+    // the restored master may still carry "GALAXY A56 5G 12/256" as one name
+    prefs.edit().putBoolean("variantSplitDone", false).apply()
     // backups made before 3.6.2 carry no tax columns; rebuild them from the lines
-    val repaired = repairAggregates(ctx)
+    val repaired = try { repairAggregates(ctx) } catch(e: Exception) { 0 }
     return "Restored $settingsCount settings, $inv invoices, $led ledger entries, $exp expenses, $st stock lines." +
            (if(repaired > 0) " Rebuilt tax for $repaired old bill(s)." else "")
 }
