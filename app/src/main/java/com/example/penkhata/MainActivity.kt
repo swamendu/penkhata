@@ -93,7 +93,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "9.10 · customer form"
+const val APP_VERSION = "9.11 · picker + form"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -1701,6 +1701,10 @@ fun CrmScreen() {
     var addPhone by remember { mutableStateOf("") }
     var addAddr by remember { mutableStateOf("") }
     var addGst by remember { mutableStateOf("") }
+    var addAddr2 by remember { mutableStateOf("") }
+    var addLandmark by remember { mutableStateOf("") }
+    var addPincode by remember { mutableStateOf("") }
+    var addState by remember { mutableStateOf("") }
 
     val now = System.currentTimeMillis()
     val fyStart = remember { fyStartMs() }
@@ -1732,13 +1736,25 @@ fun CrmScreen() {
     if(showAdd) AlertDialog(
         onDismissRequest = { showAdd = false },
         title = { Text("Add a customer") },
-        text = { Column(Modifier.verticalScroll(rememberScrollState())) {
+        text = { Column(Modifier.verticalScroll(rememberScrollState()).heightIn(max = 460.dp)) {
+            Text("Same fields as the billing screen.", fontSize = 9.sp, color = Color.Gray)
+            OutlinedTextField(addName, { addName = it }, label = { Text("Name") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+            OutlinedTextField(addAddr, { addAddr = it }, label = { Text("Address Line 1") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+            OutlinedTextField(addAddr2, { addAddr2 = it }, label = { Text("Address Line 2") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+            OutlinedTextField(addLandmark, { addLandmark = it }, label = { Text("Landmark") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+            OutlinedTextField(addPincode, { addPincode = it.filter { ch -> ch.isDigit() } }, label = { Text("Pincode") },
+                modifier = Modifier.fillMaxWidth(), singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
             OutlinedTextField(addPhone, { addPhone = it.filter { ch -> ch.isDigit() } }, label = { Text("Phone") },
                 modifier = Modifier.fillMaxWidth(), singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone))
-            OutlinedTextField(addName, { addName = it }, label = { Text("Name") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-            OutlinedTextField(addAddr, { addAddr = it }, label = { Text("Address") }, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(addGst, { addGst = it.uppercase() }, label = { Text("GSTIN (optional)") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+            Row {
+                OutlinedTextField(addGst, { addGst = it.uppercase() }, label = { Text("GSTIN") }, modifier = Modifier.weight(1f), singleLine = true)
+                Spacer(Modifier.width(5.dp))
+                OutlinedTextField(addState, { addState = it.filter { ch -> ch.isDigit() }.take(2) }, label = { Text("State Code") },
+                    modifier = Modifier.weight(0.6f), singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+            }
             Text("The phone number is the key: one number, one customer.", fontSize = 9.sp, color = Color.Gray)
         } },
         confirmButton = { TextButton(onClick = {
@@ -1747,9 +1763,11 @@ fun CrmScreen() {
             }
             scope.launch {
                 withContext(Dispatchers.IO) {
-                    upsertCustomer(ctx, BuyerInfo(addName.trim(), addAddr, "", "", "", addPhone.trim(), addGst.trim(), ""), System.currentTimeMillis())
+                    upsertCustomer(ctx, BuyerInfo(addName.trim(), addAddr, addAddr2, addLandmark,
+                        addPincode, addPhone.trim(), addGst.trim(), addState), System.currentTimeMillis())
                 }
                 showAdd = false; addName = ""; addPhone = ""; addAddr = ""; addGst = ""
+                addAddr2 = ""; addLandmark = ""; addPincode = ""; addState = ""
                 Toast.makeText(ctx, "Customer added", Toast.LENGTH_SHORT).show(); reload++
             }
         }) { Text("SAVE") } },
@@ -2115,6 +2133,15 @@ fun InvoiceScreen(isQuote: Boolean) {
                 Text("Customers (" + customerCount(ctx) + ")", fontWeight = FontWeight.Bold)
                 TextButton(onClick = { showCustomers = !showCustomers }) { Text(if(showCustomers) "HIDE" else "SEARCH") }
             }
+            // a customer who moved is a customer-record change, so it lives with the customer,
+            // not with the buyer form
+            if(nameLocked && !addrUnlock) Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
+                Text("Moved house? " + bName.ifBlank { "This customer" }, fontSize = 9.sp, color = Color(0xFFB26A00))
+                TextButton(onClick = {
+                    addrSnapshot = listOf(bAddr1, bAddr2, bLandmark, bPincode)
+                    addrUnlock = true
+                }) { Text("UPDATE ADDRESS", fontSize = 9.sp, fontWeight = FontWeight.Bold) }
+            }
             if(showCustomers) {
                 OutlinedTextField(custQuery, { custQuery = it; custResults = searchCustomers(ctx, it, 20) },
                     label={Text("Phone or name")}, modifier=Modifier.fillMaxWidth(),
@@ -2140,15 +2167,7 @@ fun InvoiceScreen(isQuote: Boolean) {
         }}
         Card(Modifier.padding(vertical=5.dp)) { Column(Modifier.padding(10.dp)) {
             Text("Buyer Details", fontWeight=FontWeight.Bold)
-            if(nameLocked) {
-                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
-                    Text("Existing customer - name, phone and GSTIN are locked", fontSize = 9.sp, color = Color(0xFF2E7D32))
-                    if(!addrUnlock) TextButton(onClick = {
-                        addrSnapshot = listOf(bAddr1, bAddr2, bLandmark, bPincode)
-                        addrUnlock = true
-                    }) { Text("CUSTOMER MOVED?", fontSize = 9.sp) }
-                }
-            }
+            if(nameLocked) Text("Existing customer - name, phone and GSTIN are locked", fontSize = 9.sp, color = Color(0xFF2E7D32))
             if(addrUnlock) Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
                 Text("Change the address, then save it to the record.", fontSize = 9.sp, color = Color(0xFFB26A00))
                 Row {
