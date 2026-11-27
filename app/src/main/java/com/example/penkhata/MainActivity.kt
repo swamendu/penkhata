@@ -93,7 +93,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "9.7 · CRM"
+const val APP_VERSION = "9.7.1 · CRM fit"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -1413,10 +1413,7 @@ fun CrmScreen() {
     var addPhone by remember { mutableStateOf("") }
     var addAddr by remember { mutableStateOf("") }
     var addGst by remember { mutableStateOf("") }
-    val hScroll = rememberScrollState()
-    val colName = 210.dp; val colPhone = 130.dp; val colBills = 56.dp
-    val colSpend = 110.dp; val colDue = 100.dp; val colLast = 92.dp
-    val tableWidth = colName + colPhone + colBills + colSpend + colDue + colLast
+    val colBills = 46.dp; val colSpend = 92.dp; val colDue = 84.dp
 
     val monthStart = remember {
         Calendar.getInstance().apply { set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0) }.timeInMillis
@@ -1485,12 +1482,13 @@ fun CrmScreen() {
             CrmTile("Outstanding", "\u20b9" + inr(due), if(due > 0) Color.Red else Color.Gray, Modifier.weight(1f))
         }
 
-        Row(Modifier.fillMaxWidth().padding(top = 10.dp)) {
-            listOf("all" to "All", "gst" to "With GSTIN", "due" to "Outstanding", "month" to "This month").forEach { (id, label) ->
+        Row(Modifier.fillMaxWidth().padding(top = 10.dp).horizontalScroll(rememberScrollState())) {
+            listOf("all" to "All", "gst" to "GSTIN", "due" to "Due", "month" to "This month").forEach { (id, label) ->
                 val on = filter == id
                 OutlinedButton(onClick = { filter = id }, modifier = Modifier.padding(end = 6.dp),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 2.dp),
                     colors = ButtonDefaults.outlinedButtonColors(containerColor = if(on) Color(0xFF2E7D32) else Color.Transparent)) {
-                    Text(label, fontSize = 9.sp, color = if(on) Color.White else Color.Black)
+                    Text(label, fontSize = 9.sp, maxLines = 1, color = if(on) Color.White else Color.Black)
                 }
             }
         }
@@ -1499,39 +1497,26 @@ fun CrmScreen() {
             Text("No customers yet.", fontSize = 11.sp, color = Color.Gray, modifier = Modifier.padding(top = 12.dp))
             Text("They appear here as soon as a bill is made with a phone number.", fontSize = 10.sp, color = Color.Gray)
         } else {
-            Row(Modifier.fillMaxWidth().background(Color(0xFFE8EDE8)).horizontalScroll(hScroll)) {
-                Column(Modifier.width(tableWidth)) {
-                    Row(Modifier.padding(vertical = 6.dp)) {
-                        Text("NAME", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color(0xFF465046), modifier = Modifier.width(colName))
-                        Text("PHONE", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color(0xFF465046), modifier = Modifier.width(colPhone))
-                        Text("BILLS", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color(0xFF465046), modifier = Modifier.width(colBills))
-                        Text("SPEND", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color(0xFF465046), modifier = Modifier.width(colSpend))
-                        Text("DUE", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color(0xFF465046), modifier = Modifier.width(colDue))
-                        Text("LAST", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color(0xFF465046), modifier = Modifier.width(colLast))
-                    }
-                }
+            Row(Modifier.fillMaxWidth().background(Color(0xFFE8EDE8)).padding(vertical = 6.dp)) {
+                Text("CUSTOMER", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color(0xFF465046), modifier = Modifier.weight(1f))
+                Text("BILLS", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color(0xFF465046), modifier = Modifier.width(colBills))
+                Text("SPEND", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color(0xFF465046), modifier = Modifier.width(colSpend))
+                Text("DUE", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color(0xFF465046), modifier = Modifier.width(colDue))
             }
             shown.take(200).forEach { r ->
-                Row(Modifier.fillMaxWidth().clickable { openPhone = r.phone }
-                    .horizontalScroll(hScroll).padding(vertical = 5.dp)) {
-                    Column(Modifier.width(tableWidth)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Column(Modifier.width(colName)) {
-                                Text(r.name.ifBlank { "\u2014" }, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-                                Text(listOf(r.pin, r.state).filter { it.isNotBlank() }.joinToString(" \u00b7 "),
-                                    fontSize = 8.sp, color = Color.Gray, maxLines = 1)
-                            }
-                            Text(r.phone, fontSize = 9.sp, modifier = Modifier.width(colPhone), maxLines = 1)
-                            Text(r.bills.toString(), fontSize = 9.sp, modifier = Modifier.width(colBills))
-                            Text("\u20b9" + inr(r.spend), fontSize = 9.sp, modifier = Modifier.width(colSpend), maxLines = 1)
-                            Text(if(r.due > 0.5) "\u20b9" + inr(r.due) else "-", fontSize = 9.sp,
-                                color = if(r.due > 0.5) Color.Red else Color.Gray,
-                                fontWeight = if(r.due > 0.5) FontWeight.Bold else FontWeight.Normal,
-                                modifier = Modifier.width(colDue), maxLines = 1)
-                            Text(if(r.lastMs > 0) SimpleDateFormat("dd-MMM", Locale.ENGLISH).format(Date(r.lastMs)) else "-",
-                                fontSize = 8.sp, color = Color.Gray, modifier = Modifier.width(colLast))
-                        }
+                Row(Modifier.fillMaxWidth().clickable { openPhone = r.phone }.padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(r.name.ifBlank { "\u2014" }, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                        Text(r.phone + (if(r.lastMs > 0) "  \u00b7  " + SimpleDateFormat("dd-MMM", Locale.ENGLISH).format(Date(r.lastMs)) else ""),
+                            fontSize = 8.sp, color = Color.Gray, maxLines = 1)
                     }
+                    Text(r.bills.toString(), fontSize = 9.sp, modifier = Modifier.width(colBills))
+                    Text("\u20b9" + inr(r.spend), fontSize = 9.sp, modifier = Modifier.width(colSpend), maxLines = 1)
+                    Text(if(r.due > 0.5) "\u20b9" + inr(r.due) else "-", fontSize = 9.sp,
+                        color = if(r.due > 0.5) Color.Red else Color.Gray,
+                        fontWeight = if(r.due > 0.5) FontWeight.Bold else FontWeight.Normal,
+                        modifier = Modifier.width(colDue), maxLines = 1)
                 }
                 Divider(color = Color(0x18000000))
             }
