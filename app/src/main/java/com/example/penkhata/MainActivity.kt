@@ -85,7 +85,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "8.7 · add a product"
+const val APP_VERSION = "8.8 · search first"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -1977,6 +1977,8 @@ fun StockMasterScreen(onDone: () -> Unit) {
     var newModelBrand by rememberSaveable { mutableStateOf("") }
     var newModelName by rememberSaveable { mutableStateOf("") }
     var newModelCat by rememberSaveable { mutableStateOf("Mobile") }
+    var showAddProduct by remember { mutableStateOf(false) }
+    var modelOpen by remember { mutableStateOf(setOf<Long>()) }
     var newModelVariant by rememberSaveable { mutableStateOf("") }
     var newModelSku by rememberSaveable { mutableStateOf("") }
     var newModelMrp by rememberSaveable { mutableStateOf("") }
@@ -2105,9 +2107,79 @@ fun StockMasterScreen(onDone: () -> Unit) {
             }
         }
 
+        if(showAddProduct) Dialog(onDismissRequest = { showAddProduct = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false)) {
+            Card(Modifier.fillMaxWidth(0.94f).fillMaxHeight(0.9f).background(Color.White)) {
+                Column(Modifier.padding(14.dp).fillMaxSize().verticalScroll(rememberScrollState())) {
+                    Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
+                        Text("Add a product", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        TextButton(onClick = { showAddProduct = false }) { Text("CLOSE") }
+                    }
+                    Text("A model can hold many variants; each variant is one sellable product with its own SKU.",
+                        fontSize = 9.sp, color = Color.Gray)
+                    Spacer(Modifier.height(6.dp))
+                    Row(Modifier.fillMaxWidth()) {
+                        PickerField("Brand", newModelBrand, brands, { newModelBrand = it }, Modifier.weight(1f))
+                        Spacer(Modifier.width(4.dp))
+                        PickerField("Category", newModelCat, cats, { newModelCat = it }, Modifier.weight(1f))
+                    }
+                    AutoSuggestField("Model, e.g. GALAXY A23 5G", newModelName, { newModelName = it },
+                        if(newModelBrand.isBlank()) emptyList()
+                        else loadModels(ctx).filter { it.brand.equals(newModelBrand, true) }.map { it.name }.distinct().sorted(),
+                        { newModelName = it }, Modifier.fillMaxWidth(), allowNew = true)
+                    AutoSuggestField(variantLabel(newModelCat), newModelVariant, { newModelVariant = it },
+                        if(newModelName.isBlank()) emptyList()
+                        else loadSkus(ctx).filter { it.model.equals(newModelName.trim(), true) }.map { it.variant }
+                            .filter { it.isNotBlank() }.distinct().sorted(),
+                        { newModelVariant = it }, Modifier.fillMaxWidth(), allowNew = true)
+                    AutoSuggestField("SKU from the box, e.g. A235B 8/128", newModelSku, { newModelSku = it },
+                        if(newModelName.isBlank()) emptyList()
+                        else loadSkus(ctx).filter { it.model.equals(newModelName.trim(), true) &&
+                            (newModelVariant.isBlank() || it.variant.equals(newModelVariant.trim(), true)) }.map { it.sku }.sorted(),
+                        { newModelSku = it }, Modifier.fillMaxWidth(), allowNew = true)
+                    Row(Modifier.fillMaxWidth()) {
+                        OutlinedTextField(newModelMrp, { newModelMrp = it }, label = { Text("MRP") }, modifier = Modifier.weight(1f),
+                            singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                        Spacer(Modifier.width(4.dp))
+                        OutlinedTextField(newModelGst, { newModelGst = it }, label = { Text("GST %") }, modifier = Modifier.weight(0.6f), singleLine = true)
+                        Spacer(Modifier.width(4.dp))
+                        OutlinedTextField(newModelHsn, { newModelHsn = it }, label = { Text("HSN") }, modifier = Modifier.weight(0.8f), singleLine = true)
+                    }
+                    if(newModelBrand.isNotBlank() && newModelName.isNotBlank() && newModelSku.isNotBlank())
+                        Text(newModelBrand + "  \u2192  " + newModelName.trim() +
+                             (if(newModelVariant.isBlank()) "" else "  \u2192  " + newModelVariant.trim()) +
+                             "  \u2192  " + newModelSku.trim(), fontSize = 9.sp, color = Color(0xFF2E7D32), fontWeight = FontWeight.Bold)
+                    Button(onClick = {
+                        if(newModelBrand.isBlank() || newModelName.isBlank() || newModelSku.isBlank()) {
+                            Toast.makeText(ctx, "Brand, model and SKU are needed", Toast.LENGTH_SHORT).show()
+                            return@Button
+                        }
+                        scope.launch {
+                            val err = withContext(Dispatchers.IO) {
+                                saveModel(ctx, Model(0, newModelBrand, newModelCat, newModelName.trim()))
+                                saveSku(ctx, SkuInfo(newModelSku.trim(), newModelBrand, newModelCat, newModelName.trim(),
+                                    newModelVariant.trim(), newModelHsn.trim(), newModelGst.toDoubleOrNull() ?: 18.0,
+                                    newModelMrp.toDoubleOrNull() ?: 0.0, identTypeFor(newModelCat)))
+                            }
+                            Toast.makeText(ctx, err ?: "Product saved: " + newModelName.trim() +
+                                (if(newModelVariant.isBlank()) "" else " " + newModelVariant.trim()), Toast.LENGTH_LONG).show()
+                            if(err == null) {
+                                newModelName = ""; newModelVariant = ""; newModelSku = ""; newModelMrp = ""
+                                showAddProduct = false; reload++
+                            }
+                        }
+                    }, modifier = Modifier.fillMaxWidth()) { Text("ADD PRODUCT") }
+                }
+            }
+        }
+
         if(tab == "models") {
             Card(Modifier.padding(vertical = 4.dp)) { Column(Modifier.padding(12.dp)) {
-                OutlinedTextField(q, {q=it}, label={Text("Search model, SKU or brand")}, modifier=Modifier.fillMaxWidth(),
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Find a product", fontWeight = FontWeight.Bold, fontSize = 11.sp, modifier = Modifier.weight(1f))
+                    Text(models.size.toString() + " models \u00b7 " + countRows(ctx, "skus") + " SKUs", fontSize = 9.sp, color = Color.Gray)
+                }
+                OutlinedTextField(q, {q=it}, label={Text("Search model, SKU, variant or brand")}, modifier=Modifier.fillMaxWidth(),
                     keyboardOptions=KeyboardOptions(imeAction=ImeAction.Search))
                 Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     PickerField("Brand", fBrand, brands, { fBrand = it }, Modifier.weight(1f), allowClear = true)
@@ -2120,29 +2192,37 @@ fun StockMasterScreen(onDone: () -> Unit) {
                     Spacer(Modifier.weight(1f))
                     TextButton(onClick = { q=""; fBrand=""; fCat=""; fOnlyNoSku=false }) { Text("CLEAR", fontSize = 9.sp) }
                 }
-                val hits = models.filter { matches(it) }
-                val shown = if(q.isBlank() && fBrand.isBlank() && fCat.isBlank() && !fOnlyNoSku) models.take(20) else hits.take(30)
-                Text(if(hits.size > shown.size) shown.size.toString() + " of " + hits.size + " - keep typing to narrow" else hits.size.toString() + " model(s)",
-                    fontSize = 9.sp, color = Color.Gray)
-                Text("SKUs in the database: " + countRows(ctx, "skus"), fontSize = 9.sp, color = Color(0xFF1565C0))
-                Spacer(Modifier.height(4.dp))
-                shown.forEach { m ->
-                    val its = skusOf(m)
-                    Column(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            Column(Modifier.weight(1f)) {
-                                Text(m.brand + "  " + m.name, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-                                Text(m.category + "  \u00b7  " + (if(its.isEmpty()) "no SKU yet" else its.size.toString() + " SKU"), fontSize = 9.sp,
-                                    color = if(its.isEmpty()) Color(0xFFB26A00) else Color.Gray)
+                val asking = q.isNotBlank() || fBrand.isNotBlank() || fCat.isNotBlank() || fOnlyNoSku
+                if(!asking) {
+                    Text("Type a model, a variant, an SKU or a brand to begin.", fontSize = 10.sp, color = Color.Gray)
+                    Text("Or pick a brand above to see everything it makes.", fontSize = 9.sp, color = Color.Gray)
+                } else {
+                    val hits = models.filter { matches(it) }
+                    val shown = hits.take(20)
+                    Text(if(hits.size > shown.size) shown.size.toString() + " of " + hits.size + " - keep typing to narrow"
+                         else hits.size.toString() + " model(s)", fontSize = 9.sp, color = Color.Gray)
+                    Spacer(Modifier.height(4.dp))
+                    shown.forEach { m ->
+                        val its = skusOf(m)
+                        val open = modelOpen.contains(m.id)
+                        Column(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+                            Row(Modifier.fillMaxWidth().clickable { modelOpen = if(open) modelOpen - m.id else modelOpen + m.id },
+                                verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(m.brand + "  " + m.name, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                                    val variants = its.map { it.variant }.filter { it.isNotBlank() }.distinct()
+                                    Text(m.category + "  \u00b7  " + (if(its.isEmpty()) "no SKU yet"
+                                            else variants.size.toString() + (if(variants.size == 1) " variant" else " variants") +
+                                                 "  \u00b7  " + its.size + (if(its.size == 1) " SKU" else " SKUs")),
+                                        fontSize = 9.sp, color = if(its.isEmpty()) Color(0xFFB26A00) else Color.Gray)
+                                }
+                                Text(if(open) "\u25b2" else "\u25bc", fontSize = 10.sp, color = Color.Gray)
+                                TextButton(onClick = { skuForModel = m; skuCode = "" }) { Text("+ SKU", fontSize = 9.sp) }
+                                Text("\u00d7", fontSize = 11.sp, color = Color.Red, modifier = Modifier.clickable {
+                                    scope.launch { withContext(Dispatchers.IO) { deleteModel(ctx, m.id) }; reload++ }
+                                }.padding(horizontal = 6.dp))
                             }
-                            TextButton(onClick = { skuForModel = m; skuCode = "" }) { Text("+ SKU", fontSize = 9.sp) }
-                            Text("\u00d7", fontSize = 11.sp, color = Color.Red, modifier = Modifier.clickable {
-                                scope.launch { withContext(Dispatchers.IO) { deleteModel(ctx, m.id) }; reload++ }
-                            }.padding(horizontal = 6.dp))
-                        }
-                        if(its.isNotEmpty()) {
-                            val byVariant = its.groupBy { it.variant.trim() }
-                            byVariant.toList().sortedBy { it.first.lowercase() }.forEach { vg ->
+                            if(open) its.groupBy { it.variant.trim() }.toList().sortedBy { it.first.lowercase() }.forEach { vg ->
                                 Text("      " + (if(vg.first.isBlank()) "(no variant)" else vg.first) +
                                      (if(vg.first.isBlank()) "" else "  \u2192  ") +
                                      vg.second.joinToString(", ") { it.sku } +
@@ -2150,64 +2230,12 @@ fun StockMasterScreen(onDone: () -> Unit) {
                                     fontSize = 9.sp, color = Color(0xFF2E7D32))
                             }
                         }
+                        Divider()
                     }
-                    Divider()
                 }
             }}
 
-            Card(Modifier.padding(vertical = 4.dp)) { Column(Modifier.padding(12.dp)) {
-                Text("Add a product", fontWeight = FontWeight.Bold, fontSize = 11.sp)
-                Text("A model can hold many variants; each variant is one sellable product with its own SKU.",
-                    fontSize = 9.sp, color = Color.Gray)
-                Row(Modifier.fillMaxWidth()) {
-                    PickerField("Brand", newModelBrand, brands, { newModelBrand = it }, Modifier.weight(1f))
-                    Spacer(Modifier.width(4.dp))
-                    PickerField("Category", newModelCat, cats, { newModelCat = it }, Modifier.weight(1f))
-                }
-                AutoSuggestField("Model, e.g. GALAXY A23 5G", newModelName, { newModelName = it },
-                    if(newModelBrand.isBlank()) emptyList()
-                    else loadModels(ctx).filter { it.brand.equals(newModelBrand, true) }.map { it.name }.distinct().sorted(),
-                    { newModelName = it }, Modifier.fillMaxWidth(), allowNew = true)
-                AutoSuggestField(variantLabel(newModelCat), newModelVariant, { newModelVariant = it },
-                    if(newModelName.isBlank()) emptyList()
-                    else loadSkus(ctx).filter { it.model.equals(newModelName.trim(), true) }.map { it.variant }
-                        .filter { it.isNotBlank() }.distinct().sorted(),
-                    { newModelVariant = it }, Modifier.fillMaxWidth(), allowNew = true)
-                AutoSuggestField("SKU from the box, e.g. A235B 8/128", newModelSku, { newModelSku = it },
-                    if(newModelName.isBlank()) emptyList()
-                    else loadSkus(ctx).filter { it.model.equals(newModelName.trim(), true) &&
-                        (newModelVariant.isBlank() || it.variant.equals(newModelVariant.trim(), true)) }.map { it.sku }.sorted(),
-                    { newModelSku = it }, Modifier.fillMaxWidth(), allowNew = true)
-                Row(Modifier.fillMaxWidth()) {
-                    OutlinedTextField(newModelMrp, { newModelMrp = it }, label = { Text("MRP") }, modifier = Modifier.weight(1f),
-                        singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
-                    Spacer(Modifier.width(4.dp))
-                    OutlinedTextField(newModelGst, { newModelGst = it }, label = { Text("GST %") }, modifier = Modifier.weight(0.6f), singleLine = true)
-                    Spacer(Modifier.width(4.dp))
-                    OutlinedTextField(newModelHsn, { newModelHsn = it }, label = { Text("HSN") }, modifier = Modifier.weight(0.8f), singleLine = true)
-                }
-                if(newModelBrand.isNotBlank() && newModelName.isNotBlank() && newModelSku.isNotBlank())
-                    Text(newModelBrand + "  \u2192  " + newModelName.trim() +
-                         (if(newModelVariant.isBlank()) "" else "  \u2192  " + newModelVariant.trim()) +
-                         "  \u2192  " + newModelSku.trim(), fontSize = 9.sp, color = Color(0xFF2E7D32), fontWeight = FontWeight.Bold)
-                Button(onClick = {
-                    if(newModelBrand.isBlank() || newModelName.isBlank() || newModelSku.isBlank()) {
-                        Toast.makeText(ctx, "Brand, model and SKU are needed", Toast.LENGTH_SHORT).show()
-                        return@Button
-                    }
-                    scope.launch {
-                        val err = withContext(Dispatchers.IO) {
-                            saveModel(ctx, Model(0, newModelBrand, newModelCat, newModelName.trim()))
-                            saveSku(ctx, SkuInfo(newModelSku.trim(), newModelBrand, newModelCat, newModelName.trim(),
-                                newModelVariant.trim(), newModelHsn.trim(), newModelGst.toDoubleOrNull() ?: 18.0,
-                                newModelMrp.toDoubleOrNull() ?: 0.0, identTypeFor(newModelCat)))
-                        }
-                        Toast.makeText(ctx, err ?: "Product saved: " + newModelName.trim() +
-                            (if(newModelVariant.isBlank()) "" else " " + newModelVariant.trim()), Toast.LENGTH_LONG).show()
-                        if(err == null) { newModelName = ""; newModelVariant = ""; newModelSku = ""; newModelMrp = ""; reload++ }
-                    }
-                }, modifier = Modifier.fillMaxWidth()) { Text("ADD PRODUCT") }
-            }}
+            Button(onClick = { showAddProduct = true }, modifier = Modifier.fillMaxWidth()) { Text("+ ADD A PRODUCT") }
         }
 
         if(tab == "brands") {
