@@ -93,7 +93,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "9.15 · disbursement"
+const val APP_VERSION = "9.16 · invoice finance"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -2224,6 +2224,7 @@ fun InvoiceScreen(isQuote: Boolean) {
     var finTenure by rememberSaveable { mutableStateOf("6") }
     var finLoanId by rememberSaveable { mutableStateOf("") }
     var finDisb by rememberSaveable { mutableStateOf("") }
+    var finEmi by rememberSaveable { mutableStateOf("") }
     var cardType by rememberSaveable { mutableStateOf("Credit") }
     var advAction by rememberSaveable { mutableStateOf("KEEP") }
     val (stockList, _) = loadState(emptyList<StockEntry>(), ctx) { withContext(Dispatchers.IO) { loadStock(ctx) } }
@@ -2270,7 +2271,7 @@ fun InvoiceScreen(isQuote: Boolean) {
         items = emptyList()
         billDisc=""; exchange=""; cash=""; upi=""; card=""; finance=""
         payMode=""; delNote=""
-        finOn = false; finLender = ""; finTenure = "6"; finLoanId = ""; finDisb = ""
+        finOn = false; finLender = ""; finTenure = "6"; finLoanId = ""; finDisb = ""; finEmi = ""
         cardType = "Credit"; advAction = "KEEP"
     }
 
@@ -2552,6 +2553,15 @@ fun InvoiceScreen(isQuote: Boolean) {
                 }
                 // the Delivery Order states the disbursement: what the lender pays the shop.
                 // the down payment is whatever the bill needs on top of it, and it is not typed.
+                Row(Modifier.fillMaxWidth()) {
+                    OutlinedTextField(finEmi, { finEmi = it.filter { ch -> ch.isDigit() || ch == '.' } },
+                        label = { Text("Monthly EMI \u20b9") }, modifier = Modifier.weight(1f), singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                    Spacer(Modifier.width(5.dp))
+                    Text("x " + (finTenure.ifBlank { "0" }) + " months = \u20b9" +
+                         inr((finEmi.toDoubleOrNull() ?: 0.0) * (finTenure.toIntOrNull() ?: 0)),
+                        fontSize = 9.sp, color = Color.Gray, modifier = Modifier.weight(1f))
+                }
                 OutlinedTextField(finDisb, { finDisb = it.filter { ch -> ch.isDigit() || ch == '.' } },
                     label = { Text("Disbursement on the DO \u20b9") }, modifier = Modifier.fillMaxWidth(), singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
@@ -2599,10 +2609,16 @@ fun InvoiceScreen(isQuote: Boolean) {
             }
             else {
                 // Snapshot everything now: the form is cleared once the PDF is written.
-                val snapInv = invNo; val snapDate = date; val snapPay = payMode; val snapNote = delNote
+                val snapInv = invNo; val snapDate = date
+                // a bill with a lender or a balance must say so on the invoice
+                val snapPay = listOf(payMode, if(finOn) "FINANCE" else "", if(calc.balance > 0.5) "UDHAAR" else "")
+                    .filter { it.isNotBlank() }.distinct().joinToString(", ")
+                val snapNote = delNote
                 val snapItems = items; val snapCalc = calc
                 val snapBuyer = listOf(bName, bAddr1, bAddr2, bLandmark, bPincode, bPhone, bGst, bState)
-                val snapFinance = finance
+                val snapFinance = if(finOn) listOf("FINANCE", finLender.trim(), finTenure.ifBlank { "0" },
+                    (finEmi.toDoubleOrNull() ?: 0.0).toString(), (finDisb.toDoubleOrNull() ?: 0.0).toString(),
+                    finLoanId.trim()).joinToString("|") else finance
                 val billMs = System.currentTimeMillis()
                 // snapshot the outlet details with the bill, so a reprint later shows the
                 // address that was in force when the bill was made
@@ -6754,7 +6770,8 @@ fun createPdf(ctx: Context, isQuote: Boolean, invNo: String, date: String, payMo
     val sGstLine=if(sGst.isBlank()) "" else "GSTIN: $sGst"
     val bGstLine=if(bGst.isBlank()) "" else "GSTIN: $bGst"
     val bStateLine=if(bState.isBlank()) "" else "State: $bState"
-    val bDetail=listOf(bAddr1, bAddr2,
+    val bAddr2Shown = if(bAddr2.trim().equals(bAddr1.trim(), true)) "" else bAddr2
+    val bDetail=listOf(bAddr1, bAddr2Shown,
         if(bLandmark.isBlank()) "" else "Landmark: $bLandmark",
         if(bPincode.isBlank()) "" else "Pincode: $bPincode",
         if(bPhone.isBlank()) "" else "Ph: $bPhone")
@@ -6916,17 +6933,29 @@ fun createPdf(ctx: Context, isQuote: Boolean, invNo: String, date: String, payMo
     var ly=fTop+16f
     drawAmountInWords(c, "Amount: "+amountInWords(calc.grand), m+5, ly, p, leftLimit)
     p.textSize=9f
+    val finParts = finance.split("|")
+    val isFinBill = finParts.size >= 6 && finParts[0] == "FINANCE"
     if(calc.paid>0.004) {
         val parts=mutableListOf<String>()
         if(calc.cash>0.004) parts.add("Cash "+fmt(calc.cash))
         if(calc.upi>0.004) parts.add("UPI "+fmt(calc.upi))
         if(calc.card>0.004) parts.add("Card "+fmt(calc.card))
         ly+=14f
-        drawAmountInWords(c, "Paid: \u20b9 "+fmt(calc.paid)+(if(parts.isEmpty()) "" else " ("+parts.joinToString(", ")+")"), m+5, ly, p, leftLimit)
+        val head = if(isFinBill) "Down payment: \u20b9 " else "Paid: \u20b9 "
+        drawAmountInWords(c, head+fmt(calc.paid)+(if(parts.isEmpty()) "" else " ("+parts.joinToString(", ")+")"), m+5, ly, p, leftLimit)
     }
     if(Math.abs(calc.balance)>0.004) { ly+=13f; c.drawText("Balance Due: \u20b9 "+fmt(calc.balance),m+5,ly,p) }
     if(calc.exchange>0.004) { ly+=13f; c.drawText("Exchange adjusted: \u20b9 "+fmt(calc.exchange),m+5,ly,p) }
-    if(finance.isNotBlank()) { ly+=13f; drawAmountInWords(c, "Finance: "+finance, m+5, ly, p, leftLimit) }
+    // the finance strip: who lent, how much, how long, and what he pays each month
+    if(isFinBill) {
+        val lender = finParts[1]; val months = finParts[2]; val emi = finParts[3].toDoubleOrNull() ?: 0.0
+        val disb = finParts[4]; val loanId = finParts[5]
+        ly+=14f; p.isFakeBoldText=true
+        drawAmountInWords(c, "Finance: "+lender, m+5, ly, p, leftLimit); p.isFakeBoldText=false
+        ly+=12f
+        drawAmountInWords(c, "Disbursement \u20b9 "+disb+"  \u00b7  "+months+" months  \u00b7  EMI \u20b9 "+fmt(emi)+" x "+months+" = \u20b9 "+fmt(emi*(months.toIntOrNull() ?: 0)), m+5, ly, p, leftLimit)
+        if(loanId.isNotBlank()) { ly+=12f; c.drawText("Loan / App ID: "+loanId, m+5, ly, p) }
+    } else if(finance.isNotBlank()) { ly+=13f; drawAmountInWords(c, "Finance: "+finance, m+5, ly, p, leftLimit) }
     p.textSize=10f
     if(sBank.isNotEmpty()) {
         val bankY=Math.min(ly+30f, dy-16f)
@@ -6938,7 +6967,7 @@ fun createPdf(ctx: Context, isQuote: Boolean, invNo: String, date: String, payMo
     c.drawLine(m,dy,tX,dy,bp); p.isFakeBoldText=false; p.textSize=8f
     c.drawText("Declaration: We declare this invoice shows the actual price of goods.",m+5,dy+12,p)
     c.drawText("Subject to $sJuris Jurisdiction",m+5,dy+22,p); p.isFakeBoldText=true
-    c.drawText("GOODS ONCE SOLD CANNOT BE RETURNED",m+5,dy+35,p)
+    c.drawText("Goods are covered by the manufacturer's warranty. DOA units are replaced as per brand policy.",m+5,dy+35,p)
     c.drawLine(c5,dy,m+w,dy,bp)
     p.textSize=10f; p.isFakeBoldText=true; p.textAlign=Paint.Align.CENTER
     val sigX = (c5 + m + w) / 2
