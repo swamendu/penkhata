@@ -93,7 +93,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "9.20 · settlement"
+const val APP_VERSION = "9.21 · scheme models"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -1938,6 +1938,12 @@ fun SchemeScreen() {
         var slab1 by remember { mutableStateOf(editing?.slabs?.getOrNull(0)?.let { it.fromQty.toInt().toString() + "-" + it.toQty.toInt().toString() + "=" + it.perUnit.toInt() } ?: "") }
         var slab2 by remember { mutableStateOf(editing?.slabs?.getOrNull(1)?.let { it.fromQty.toInt().toString() + "-" + it.toQty.toInt().toString() + "=" + it.perUnit.toInt() } ?: "") }
         var slab3 by remember { mutableStateOf(editing?.slabs?.getOrNull(2)?.let { it.fromQty.toInt().toString() + "-" + it.toQty.toInt().toString() + "=" + it.perUnit.toInt() } ?: "") }
+        var planNo by remember { mutableStateOf(editing?.planNo ?: "") }
+        var dealerShareTxt by remember { mutableStateOf(editing?.dealerShare?.let { if(it > 0) it.toString() else "" } ?: "") }
+        var needsImei by remember { mutableStateOf(editing?.needsImei ?: false) }
+        var noCombine by remember { mutableStateOf(editing?.noCombine ?: "") }
+        var settleBy by remember { mutableStateOf(editing?.settleBy ?: "Credit note") }
+        var modelsTxt by remember { mutableStateOf(editing?.models?.joinToString("\n") { it.modelCode + " = " + it.perUnit.toInt() + (if(it.modelName.isNotBlank() && it.modelName != it.modelCode) " | " + it.modelName else "") } ?: "") }
 
         AlertDialog(
             onDismissRequest = { showForm = false },
@@ -1956,8 +1962,15 @@ fun SchemeScreen() {
                         }
                     }
                 }
-                OutlinedTextField(modelScope, { modelScope = it }, label = { Text("Models (blank = all of the brand)") },
+                OutlinedTextField(planNo, { planNo = it }, label = { Text("Plan number (e.g. 6.13.2)") },
                     modifier = Modifier.fillMaxWidth(), singleLine = true)
+                OutlinedTextField(modelScope, { modelScope = it }, label = { Text("Model name filter (blank = all of the brand)") },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true)
+                Text("Model codes, as the scheme letter lists them", fontSize = 9.sp, color = Color.Gray)
+                OutlinedTextField(modelsTxt, { modelsTxt = it },
+                    label = { Text("A576BF = 2885") }, modifier = Modifier.fillMaxWidth().heightIn(max = 140.dp),
+                    placeholder = { Text("one per line:\nA576BF = 2885\nA576BG = 4327", fontSize = 10.sp) })
+                Text("Paste the letter's list here. Code = rupees per unit, one per line.", fontSize = 8.sp, color = Color.Gray)
                 Row(Modifier.fillMaxWidth()) {
                     OutlinedTextField(fromTxt, { fromTxt = it }, label = { Text("From dd-mm-yyyy") }, modifier = Modifier.weight(1f), singleLine = true)
                     Spacer(Modifier.width(5.dp))
@@ -1981,6 +1994,21 @@ fun SchemeScreen() {
                     else -> OutlinedTextField(perUnitTxt, { perUnitTxt = it.filter { c -> c.isDigit() || c == '.' } },
                         label = { Text("\u20b9 per unit") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
                 }
+                Row(Modifier.fillMaxWidth()) {
+                    OutlinedTextField(dealerShareTxt, { dealerShareTxt = it.filter { c -> c.isDigit() || c == '.' } },
+                        label = { Text("Dealer pays \u20b9/unit") }, modifier = Modifier.weight(1f), singleLine = true)
+                    Spacer(Modifier.width(5.dp))
+                    OutlinedButton(onClick = { settleBy = if(settleBy == "Credit note") "Cash" else "Credit note" }, modifier = Modifier.weight(1f)) {
+                        Text(settleBy, fontSize = 9.sp)
+                    }
+                }
+                Text("Dealer share comes out of your margin - the brand does not pay it.", fontSize = 8.sp, color = Color(0xFFB26A00))
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = needsImei, onCheckedChange = { needsImei = it })
+                    Text("Needs the IMEI uploaded in the period", fontSize = 9.sp)
+                }
+                OutlinedTextField(noCombine, { noCombine = it }, label = { Text("Cannot combine with (e.g. BCB, EMI)") },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true)
             } },
             confirmButton = { TextButton(onClick = {
                 if(name.isBlank()) { Toast.makeText(ctx, "Give the scheme a name", Toast.LENGTH_SHORT).show(); return@TextButton }
@@ -1992,11 +2020,18 @@ fun SchemeScreen() {
                     return SchemeSlab(m.groupValues[1].toDouble(), m.groupValues[2].toDouble(), m.groupValues[3].toDouble())
                 }
                 val sl = listOf(slab1, slab2, slab3).mapNotNull { parseSlab(it) }
+                val modelList = modelsTxt.split("\n").mapNotNull { line ->
+                    val m = Regex("""^\s*([A-Za-z0-9\-]+)\s*[=\t,]\s*([\d.]+)\s*(?:\|\s*(.+))?$""").find(line.trim()) ?: return@mapNotNull null
+                    SchemeModel(m.groupValues[1].trim().uppercase(), m.groupValues[3].trim().ifBlank { m.groupValues[1].trim().uppercase() },
+                        m.groupValues[2].toDoubleOrNull() ?: 0.0)
+                }
                 val rec = Scheme(editing?.id ?: 0L, name.trim(), brand.trim(), kind, modelScope.trim(),
                     parseDate(fromTxt), parseDate(toTxt).let { if(it == 0L) Long.MAX_VALUE else it },
                     perUnitTxt.toDoubleOrNull() ?: 0.0, targetQtyTxt.toDoubleOrNull() ?: 0.0,
                     targetAmtTxt.toDoubleOrNull() ?: 0.0, 0.0, 0L, editing?.claimedAmt ?: 0.0,
-                    editing?.status ?: "OPEN", editing?.note ?: "", sl)
+                    editing?.status ?: "OPEN", editing?.note ?: "", sl,
+                    planNo.trim(), dealerShareTxt.toDoubleOrNull() ?: 0.0, needsImei, noCombine.trim(), settleBy,
+                    modelList)
                 scope.launch {
                     withContext(Dispatchers.IO) { saveScheme(ctx, rec) }
                     showForm = false; editing = null; reload++
@@ -2023,8 +2058,32 @@ fun SchemeScreen() {
                 if(p.nextLabel.isNotBlank()) Text(p.nextLabel, fontSize = 10.sp, color = Color(0xFFB26A00))
                 Spacer(Modifier.height(6.dp))
                 Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
-                    Text("Earned", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    Text("Earned from the brand", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     Text("\u20b9" + inr(p.earned), fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFF2E7D32))
+                }
+                if(detail.dealerShare > 0.5) {
+                    Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
+                        Text("You pay (dealer share)", fontSize = 10.sp, color = Color(0xFFB26A00))
+                        Text("\u20b9" + inr(detail.dealerShare * p.units), fontSize = 10.sp, color = Color(0xFFB26A00))
+                    }
+                    Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
+                        Text("Customer benefit", fontSize = 10.sp)
+                        Text("\u20b9" + inr(p.earned + detail.dealerShare * p.units), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
+                Text("Settled by " + detail.settleBy.toLowerCase() + (if(detail.needsImei) "  \u00b7  needs IMEI upload" else "") +
+                     (if(detail.noCombine.isNotBlank()) "  \u00b7  not with " + detail.noCombine else ""),
+                    fontSize = 8.sp, color = Color.Gray)
+                if(detail.models.isNotEmpty()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text("Model codes", fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                    detail.models.take(8).forEach { m ->
+                        Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
+                            Text(m.modelCode, fontSize = 9.sp); Text("\u20b9" + inr(m.perUnit) + "/unit", fontSize = 9.sp)
+                        }
+                    }
+                    if(detail.models.size > 8) Text("and " + (detail.models.size - 8) + " more", fontSize = 8.sp, color = Color.Gray)
                 }
                 if(detail.claimedAmt > 0.5) Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
                     Text("Claimed", fontSize = 10.sp, color = Color.Gray)
@@ -2075,7 +2134,8 @@ fun SchemeScreen() {
                     Text(sc.name, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f), maxLines = 1)
                     Text("\u20b9" + inr(p.earned), fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF2E7D32))
                 }
-                Text((if(sc.brand.isBlank()) "All brands" else sc.brand) + "  \u00b7  " + p.units.toInt() + " unit(s)  \u00b7  " + p.slabLabel,
+                Text((if(sc.planNo.isNotBlank()) sc.planNo + "  \u00b7  " else "") + (if(sc.brand.isBlank()) "All brands" else sc.brand) +
+                     "  \u00b7  " + p.units.toInt() + " unit(s)  \u00b7  " + p.slabLabel,
                     fontSize = 9.sp, color = Color.Gray, maxLines = 2)
                 if(p.nextLabel.isNotBlank()) Text(p.nextLabel, fontSize = 9.sp, color = Color(0xFFB26A00))
             }
@@ -5912,10 +5972,14 @@ fun rebuildCustomersFromBills(ctx: Context): Int {
 // A scheme is money the brand owes the shop if the shop sells enough. The app's job is to keep the
 // rules, count what qualifies, and show what is earned but not yet claimed.
 data class SchemeSlab(val fromQty: Double, val toQty: Double, val perUnit: Double)
+data class SchemeModel(val modelCode: String, val modelName: String, val perUnit: Double)
 data class Scheme(val id: Long, val name: String, val brand: String, val kind: String, val scope: String,
                   val fromMs: Long, val toMs: Long, val perUnit: Double, val targetQty: Double, val targetAmt: Double,
                   val companyShare: Double, val claimByMs: Long, val claimedAmt: Double, val status: String,
-                  val note: String, val slabs: List<SchemeSlab> = emptyList())
+                  val note: String, val slabs: List<SchemeSlab> = emptyList(),
+                  val planNo: String = "", val dealerShare: Double = 0.0, val needsImei: Boolean = false,
+                  val noCombine: String = "", val settleBy: String = "Credit note",
+                  val models: List<SchemeModel> = emptyList())
 
 val SCHEME_KINDS = listOf("SLAB" to "Volume slabs", "FLAT" to "Per unit, flat", "TARGET" to "Target",
     "PROTECTION" to "Price protection")
@@ -5928,16 +5992,23 @@ fun loadSchemes(ctx: Context): List<Scheme> {
             while(c.moveToNext()) slabs.getOrPut(c.getLong(0)) { mutableListOf() }
                 .add(SchemeSlab(c.getDouble(1), c.getDouble(2), c.getDouble(3)))
         }
+        val models = HashMap<Long, MutableList<SchemeModel>>()
+        db(ctx).readableDatabase.rawQuery("SELECT schemeId, IFNULL(modelCode,''), IFNULL(modelName,''), IFNULL(perUnit,0) FROM scheme_models", null).use { c ->
+            while(c.moveToNext()) models.getOrPut(c.getLong(0)) { mutableListOf() }
+                .add(SchemeModel(c.getString(1) ?: "", c.getString(2) ?: "", c.getDouble(3)))
+        }
         db(ctx).readableDatabase.rawQuery("SELECT id, IFNULL(name,''), IFNULL(brand,''), IFNULL(kind,'SLAB'), IFNULL(scope,''), " +
             "IFNULL(fromMs,0), IFNULL(toMs,0), IFNULL(perUnit,0), IFNULL(targetQty,0), IFNULL(targetAmt,0), " +
-            "IFNULL(companyShare,0), IFNULL(claimByMs,0), IFNULL(claimedAmt,0), IFNULL(status,'OPEN'), IFNULL(note,'') " +
+            "IFNULL(companyShare,0), IFNULL(claimByMs,0), IFNULL(claimedAmt,0), IFNULL(status,'OPEN'), IFNULL(note,''), " +
+            "IFNULL(planNo,''), IFNULL(dealerShare,0), IFNULL(needsImei,0), IFNULL(noCombine,''), IFNULL(settleBy,'Credit note') " +
             "FROM schemes ORDER BY toMs DESC", null).use { c ->
             while(c.moveToNext()) {
                 val id = c.getLong(0)
                 out.add(Scheme(id, c.getString(1) ?: "", c.getString(2) ?: "", c.getString(3) ?: "SLAB",
                     c.getString(4) ?: "", c.getLong(5), c.getLong(6), c.getDouble(7), c.getDouble(8), c.getDouble(9),
                     c.getDouble(10), c.getLong(11), c.getDouble(12), c.getString(13) ?: "OPEN", c.getString(14) ?: "",
-                    slabs[id] ?: emptyList()))
+                    slabs[id] ?: emptyList(), c.getString(15) ?: "", c.getDouble(16), c.getInt(17) != 0,
+                    c.getString(18) ?: "", c.getString(19) ?: "Credit note", models[id] ?: emptyList()))
             }
         }
     } catch(e: Exception) { }
@@ -5951,10 +6022,18 @@ fun saveScheme(ctx: Context, s: Scheme): Long {
         cv.put("fromMs", s.fromMs); cv.put("toMs", s.toMs); cv.put("perUnit", s.perUnit)
         cv.put("targetQty", s.targetQty); cv.put("targetAmt", s.targetAmt); cv.put("companyShare", s.companyShare)
         cv.put("claimByMs", s.claimByMs); cv.put("claimedAmt", s.claimedAmt); cv.put("status", s.status); cv.put("note", s.note)
+        cv.put("planNo", s.planNo); cv.put("dealerShare", s.dealerShare); cv.put("needsImei", if(s.needsImei) 1 else 0)
+        cv.put("noCombine", s.noCombine); cv.put("settleBy", s.settleBy)
         val dbh = db(ctx).writableDatabase
         val id = if(s.id > 0) { dbh.update("schemes", cv, "id = ?", arrayOf(s.id.toString())); s.id }
                  else dbh.insert("schemes", null, cv)
         dbh.delete("scheme_slabs", "schemeId = ?", arrayOf(id.toString()))
+        dbh.delete("scheme_models", "schemeId = ?", arrayOf(id.toString()))
+        for(m in s.models) {
+            val mv = android.content.ContentValues()
+            mv.put("schemeId", id); mv.put("modelCode", m.modelCode); mv.put("modelName", m.modelName); mv.put("perUnit", m.perUnit)
+            dbh.insert("scheme_models", null, mv)
+        }
         for(sl in s.slabs) {
             val sv = android.content.ContentValues()
             sv.put("schemeId", id); sv.put("fromQty", sl.fromQty); sv.put("toQty", sl.toQty); sv.put("perUnit", sl.perUnit)
@@ -5968,8 +6047,21 @@ data class SchemeProgress(val units: Double, val earned: Double, val slabLabel: 
 
 // Counts what qualifies: brand and model scope, inside the scheme's own dates.
 fun schemeProgress(rows: List<SaleRow>, s: Scheme): SchemeProgress {
-    val inScope = rows.filter { r ->
-        r.ms >= s.fromMs && r.ms <= s.toMs &&
+    val inPeriod = rows.filter { it.ms >= s.fromMs && it.ms <= s.toMs }
+    // a scheme letter pays per model code: match the code inside the bill line, and pay that unit's rate
+    if(s.models.isNotEmpty()) {
+        var earned = 0.0; var units = 0.0
+        for(r in inPeriod) {
+            val hit = s.models.firstOrNull { m -> m.modelCode.isNotBlank() &&
+                (r.model + " " + r.variant + " " + r.inv).contains(m.modelCode, true) }
+                ?: s.models.firstOrNull { m -> m.modelName.isNotBlank() && (r.model + " " + r.variant).contains(m.modelName, true) }
+            if(hit != null) { units += r.qty; earned += r.qty * hit.perUnit }
+        }
+        val codes = s.models.size
+        return SchemeProgress(units, earned, codes.toString() + " model code(s)",
+            if(units <= 0.0) "no sale has matched a model code yet" else "")
+    }
+    val inScope = inPeriod.filter { r ->
         (s.brand.isBlank() || r.brand.equals(s.brand, true)) &&
         (s.scope.isBlank() || (r.model + " " + r.variant).contains(s.scope, true))
     }
@@ -6825,6 +6917,9 @@ class PenDb(ctx: Context) : android.database.sqlite.SQLiteOpenHelper(ctx, "penkh
     }
     override fun onOpen(db: android.database.sqlite.SQLiteDatabase) {
         super.onOpen(db)
+        healColumns(db, "schemes", listOf(
+            "planNo" to "TEXT DEFAULT ''", "dealerShare" to "REAL DEFAULT 0", "needsImei" to "INTEGER DEFAULT 0",
+            "noCombine" to "TEXT DEFAULT ''", "settleBy" to "TEXT DEFAULT 'Credit note'"))
         healColumns(db, "finance", listOf(
             "settlementUtr" to "TEXT DEFAULT ''", "receivedAmt" to "REAL DEFAULT 0", "settledDate" to "TEXT DEFAULT ''"))
         healColumns(db, "bills", listOf(
@@ -6872,6 +6967,8 @@ class PenDb(ctx: Context) : android.database.sqlite.SQLiteOpenHelper(ctx, "penkh
                 status TEXT DEFAULT 'OPEN', note TEXT DEFAULT '')""")
             db.execSQL("""CREATE TABLE IF NOT EXISTS scheme_slabs(id INTEGER PRIMARY KEY AUTOINCREMENT,
                 schemeId INTEGER, fromQty REAL DEFAULT 0, toQty REAL DEFAULT 0, perUnit REAL DEFAULT 0)""")
+            db.execSQL("""CREATE TABLE IF NOT EXISTS scheme_models(id INTEGER PRIMARY KEY AUTOINCREMENT,
+                schemeId INTEGER, modelCode TEXT DEFAULT '', modelName TEXT DEFAULT '', perUnit REAL DEFAULT 0)""")
             db.execSQL("""CREATE TABLE IF NOT EXISTS finance(ms INTEGER PRIMARY KEY, inv TEXT, date TEXT, buyer TEXT,
                 phone TEXT, lender TEXT, tenure INTEGER DEFAULT 0, loanId TEXT, downCash REAL DEFAULT 0,
                 downCard REAL DEFAULT 0, downUpi REAL DEFAULT 0, financed REAL DEFAULT 0, dbd REAL DEFAULT 0,
