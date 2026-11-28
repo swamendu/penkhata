@@ -93,7 +93,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "9.14 · finance"
+const val APP_VERSION = "9.14 · payments + finance"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -2218,6 +2218,16 @@ fun InvoiceScreen(isQuote: Boolean) {
     var billDisc by rememberSaveable { mutableStateOf("") }; var exchange by rememberSaveable { mutableStateOf("") }
     var cash by rememberSaveable { mutableStateOf("") }; var upi by rememberSaveable { mutableStateOf("") }
     var card by rememberSaveable { mutableStateOf("") }; var finance by rememberSaveable { mutableStateOf("") }
+    // finance, and the two things a payment can leave behind
+    var finOn by rememberSaveable { mutableStateOf(false) }
+    var finLender by rememberSaveable { mutableStateOf("") }
+    var finTenure by rememberSaveable { mutableStateOf("6") }
+    var finLoanId by rememberSaveable { mutableStateOf("") }
+    var finDoDown by rememberSaveable { mutableStateOf("") }
+    var finDbd by rememberSaveable { mutableStateOf("") }
+    var finDbdMode by rememberSaveable { mutableStateOf("Cash") }
+    var cardType by rememberSaveable { mutableStateOf("Credit") }
+    var advAction by rememberSaveable { mutableStateOf("KEEP") }
     val (stockList, _) = loadState(emptyList<StockEntry>(), ctx) { withContext(Dispatchers.IO) { loadStock(ctx) } }
     var showStock by rememberSaveable { mutableStateOf(false) }
     var pickQuery by rememberSaveable { mutableStateOf("") }
@@ -2263,6 +2273,7 @@ fun InvoiceScreen(isQuote: Boolean) {
         billDisc=""; exchange=""; cash=""; upi=""; card=""; finance=""
         payMode=""; delNote=""
         finOn = false; finLender = ""; finTenure = "6"; finLoanId = ""; finDbd = ""; finDbdMode = "Cash"
+        finDoDown = ""; cardType = "Credit"; advAction = "KEEP"
     }
 
     // Pay Mode follows the Cash / UPI / Card amounts, so it never contradicts them.
@@ -2492,9 +2503,40 @@ fun InvoiceScreen(isQuote: Boolean) {
             Divider()
         }
         Card(Modifier.padding(vertical=5.dp)) { Column(Modifier.padding(10.dp)) {
-            Text("Charges & Payment", fontWeight=FontWeight.Bold)
+            Text("Charges", fontWeight=FontWeight.Bold)
             Row { OutlinedTextField(billDisc, {billDisc=it}, label={Text("Bill Discount \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.width(5.dp)); OutlinedTextField(exchange, {exchange=it}, label={Text("Exchange \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })) }
+            Text("Payment", fontWeight=FontWeight.Bold, modifier = Modifier.padding(top = 6.dp))
             Row { OutlinedTextField(cash, {cash=it}, label={Text("Cash \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.width(5.dp)); OutlinedTextField(upi, {upi=it}, label={Text("UPI \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.width(5.dp)); OutlinedTextField(card, {card=it}, label={Text("Card \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })) }
+            Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedButton(onClick = { cardType = if(cardType == "Credit") "Debit" else "Credit" },
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 2.dp)) {
+                    Text("Card: " + cardType, fontSize = 9.sp)
+                }
+                Spacer(Modifier.width(8.dp))
+                Text("Kept for the MDR on your settlement.", fontSize = 8.sp, color = Color.Gray)
+            }
+            // what is left after everything that came in
+            val balNow = calc.grand - calc.paid - financedAmt
+            Divider(Modifier.padding(vertical = 4.dp))
+            Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
+                Text(if(balNow > 0.5) "Balance - udhaar" else if(balNow < -0.5) "Balance - advance" else "Balance",
+                    fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                Text("\u20b9" + inr(Math.abs(balNow)), fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                    color = if(balNow > 0.5) Color.Red else if(balNow < -0.5) Color(0xFFB26A00) else Color(0xFF2E7D32))
+            }
+            if(balNow > 0.5 && finOn) Text(
+                "A finance bill cannot leave a balance: the customer is already borrowing from the lender. Raise the down payment or the loan will be rejected.",
+                fontSize = 9.sp, color = Color.Red)
+            if(balNow < -0.5) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedButton(onClick = { advAction = "KEEP" }, modifier = Modifier.padding(end = 5.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(containerColor = if(advAction == "KEEP") Color(0xFF2E7D32) else Color.Transparent)) {
+                    Text("KEEP AS ADVANCE", fontSize = 8.sp, color = if(advAction == "KEEP") Color.White else Color.Black)
+                }
+                OutlinedButton(onClick = { advAction = "REFUND" },
+                    colors = ButtonDefaults.outlinedButtonColors(containerColor = if(advAction == "REFUND") Color(0xFF2E7D32) else Color.Transparent)) {
+                    Text("REFUND", fontSize = 8.sp, color = if(advAction == "REFUND") Color.White else Color.Black)
+                }
+            }
             Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(checked = finOn, onCheckedChange = { finOn = it })
                 Text("Paid by finance (EMI)", fontSize = 11.sp)
@@ -2508,6 +2550,21 @@ fun InvoiceScreen(isQuote: Boolean) {
                     Spacer(Modifier.width(5.dp))
                     OutlinedTextField(finLoanId, { finLoanId = it }, label = { Text("Loan / App ID") },
                         modifier = Modifier.weight(1.6f), singleLine = true)
+                }
+                // the financer's Delivery Order states the down payment; if the counter collected
+                // a different amount, the file does not match and the loan can be clawed back
+                OutlinedTextField(finDoDown, { finDoDown = it.filter { ch -> ch.isDigit() || ch == '.' } },
+                    label = { Text("Down payment per DO \u20b9") }, modifier = Modifier.fillMaxWidth(), singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                val doDown = finDoDown.toDoubleOrNull() ?: 0.0
+                if(doDown > 0.0) {
+                    val diff = calc.paid - doDown
+                    Text(
+                        if(Math.abs(diff) < 1.0) "\u2713 collected \u20b9" + inr(calc.paid) + " matches the Delivery Order"
+                        else if(diff > 0) "\u26a0 collected \u20b9" + inr(calc.paid) + " - the DO says \u20b9" + inr(doDown) + ". The loan is smaller than the financer expects."
+                        else "\u26a0 collected \u20b9" + inr(calc.paid) + " - the DO says \u20b9" + inr(doDown) + ". The financer thinks more came down.",
+                        fontSize = 9.sp, fontWeight = FontWeight.Bold,
+                        color = if(Math.abs(diff) < 1.0) Color(0xFF2E7D32) else Color(0xFFB26A00))
                 }
                 val financedNow = (calc.grand - calc.paid).coerceAtLeast(0.0)
                 Text("Financed \u20b9" + inr(financedNow) + "   (invoice \u20b9" + inr(calc.grand) + " minus paid \u20b9" + inr(calc.paid) + ")",
@@ -2546,6 +2603,9 @@ fun InvoiceScreen(isQuote: Boolean) {
             val sName = prefs.getString("sName", "") ?: ""
             if(sName.isEmpty()) Toast.makeText(ctx, "Setup Settings First!", Toast.LENGTH_SHORT).show()
             else if(items.isEmpty()) Toast.makeText(ctx, "Add at least one item", Toast.LENGTH_SHORT).show()
+            else if(finOn && finLender.isBlank()) Toast.makeText(ctx, "Choose the lender", Toast.LENGTH_SHORT).show()
+            else if(finOn && calc.balance > 0.5) Toast.makeText(ctx, "A finance bill must be fully funded - the loan covers what is not paid down", Toast.LENGTH_LONG).show()
+            else if(finOn && financedAmt <= 0.5) Toast.makeText(ctx, "The down payment already covers the bill - nothing to finance", Toast.LENGTH_LONG).show()
             else {
                 // Snapshot everything now: the form is cleared once the PDF is written.
                 val snapInv = invNo; val snapDate = date; val snapPay = payMode; val snapNote = delNote
@@ -2587,7 +2647,9 @@ fun InvoiceScreen(isQuote: Boolean) {
                                 saveFinance(ctx, FinanceRec(billMs, snapInv, snapDate, buyer.name, buyer.phone,
                                     finLender.trim(), finTenure.toIntOrNull() ?: 0, finLoanId.trim(),
                                     snapCash, snapCard, snapUpi, financedAmt,
-                                    finDbd.toDoubleOrNull() ?: 0.0, finDbdMode, 0.0, "PENDING", "", System.currentTimeMillis()))
+                                    finDbd.toDoubleOrNull() ?: 0.0, finDbdMode, 0.0, "PENDING",
+                                    "DO down \u20b9" + (finDoDown.toDoubleOrNull() ?: 0.0) + (if(cardType == "Debit") " \u00b7 debit card" else ""),
+                                    System.currentTimeMillis()))
                             }
                             bumpInvoiceNo(ctx, prefs); clearBill()
                             scope.launch { withContext(Dispatchers.IO) { deductStock(ctx, snapItems) } }
