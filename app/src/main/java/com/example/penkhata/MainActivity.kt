@@ -93,7 +93,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "9.16 · invoice finance"
+const val APP_VERSION = "9.17 · import"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -1156,6 +1156,7 @@ class MainActivity : FragmentActivity() {
         const val RC_CSV = 4205
         const val RC_REGISTER = 4206
         const val RC_CAMERA = 4207
+        const val RC_IMPORT = 4208
         val pickers = mutableMapOf<Int, (android.net.Uri?) -> Unit>()
     }
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
@@ -1428,6 +1429,7 @@ fun MainAppScreen() {
         "history" -> BillsScreen()
         "customers" -> CrmScreen()
         "finance" -> FinanceScreen()
+        "import" -> ImportScreen()
         else -> SettingsScreen(hasPin(prefs), onDataChanged = { dataVersion++ },
             onPinSave = { new -> storePin(prefs, new); hasPinState = hasPin(prefs) }, startTab = settingsStart)
             }}}
@@ -1447,6 +1449,7 @@ fun MainAppScreen() {
                     "history" to "Bills",
                     "customers" to "Customers",
                     "finance" to "Finance",
+                    "import" to "Import register",
                     "settings" to "Settings"
                 ).forEach { (id, label) ->
                     Text(label, fontSize = 14.sp, modifier = Modifier.fillMaxWidth()
@@ -1744,6 +1747,121 @@ fun BillSheet(ms: Long, onClose: () -> Unit, onChanged: () -> Unit) {
                 Spacer(Modifier.height(30.dp))
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------- import screen
+@Composable
+fun ImportScreen() {
+    val ctx = LocalContext.current
+    val prefs = remember { ctx.getSharedPreferences("penkhata_data", Context.MODE_PRIVATE) }
+    val scope = rememberCoroutineScope()
+    var plan by remember { mutableStateOf<ImportPlan?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    var done by remember { mutableStateOf<ImportResult?>(null) }
+    var progress by remember { mutableStateOf(0 to 0) }
+    var fileName by remember { mutableStateOf("") }
+
+    Column(Modifier.padding(14.dp).verticalScroll(rememberScrollState())) {
+        Text("IMPORT", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+        Text("Bring a sales register from another billing system, so the shop starts with history instead of an empty screen.",
+            fontSize = 10.sp, color = Color.Gray)
+
+        Card(Modifier.padding(vertical = 8.dp)) { Column(Modifier.padding(12.dp)) {
+            Text("1. Choose the file", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            Text("An .xlsx with a Bill Number column. Nothing is written until you press IMPORT.",
+                fontSize = 9.sp, color = Color.Gray)
+            Spacer(Modifier.height(6.dp))
+            Button(onClick = {
+                val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "*/*"
+                    putExtra(Intent.EXTRA_MIME_TYPES, arrayOf(
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        "application/octet-stream"))
+                }
+                launchPicker(ctx, intent, MainActivity.RC_IMPORT) { uri ->
+                    if(uri == null) return@launchPicker
+                    busy = true; done = null; plan = null
+                    scope.launch {
+                        val p = withContext(Dispatchers.IO) {
+                            try { buildImportPlan(readXlsxRows(ctx, uri)) }
+                            catch(e: Exception) { ImportPlan(error = "Could not read the file: " + (e.message ?: "unknown")) }
+                        }
+                        fileName = uri.lastPathSegment ?: ""
+                        plan = p; busy = false
+                    }
+                }
+            }, enabled = !busy) { Text("PICK A FILE") }
+            if(fileName.isNotBlank()) Text(fileName, fontSize = 8.sp, color = Color.Gray, maxLines = 1)
+        }}
+
+        val p = plan
+        if(p != null && p.error.isNotBlank()) {
+            Card(Modifier.fillMaxWidth().padding(vertical = 6.dp)) { Column(Modifier.padding(12.dp)) {
+                Text("That file cannot be imported", fontWeight = FontWeight.Bold, color = Color.Red, fontSize = 12.sp)
+                Text(p.error, fontSize = 10.sp)
+                Text("A sales register needs a header row with Bill Number, Product Name and Product Value.",
+                    fontSize = 9.sp, color = Color.Gray)
+            }}
+        }
+
+        if(p != null && p.error.isBlank()) {
+            Card(Modifier.padding(vertical = 8.dp)) { Column(Modifier.padding(12.dp)) {
+                Text("2. Check what was found", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                Spacer(Modifier.height(6.dp))
+                fun line(k: String, v: String, col: Color = Color(0xFF1A1A1A)) {
+                    Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
+                        Text(k, fontSize = 10.sp, color = Color.Gray); Text(v, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = col)
+                    }
+                }
+                line("Bills", p.bills.size.toString())
+                line("Lines", p.lines.toString())
+                line("Customers", p.customers.toString())
+                line("Products", p.products.toString())
+                line("Value", "\u20b9" + inr(p.value))
+                if(p.dupSerials.isNotEmpty()) line("Duplicate serials", p.dupSerials.size.toString(), Color(0xFFB26A00))
+                if(p.zeroValue > 0) line("Zero-value lines", p.zeroValue.toString(), Color(0xFFB26A00))
+                if(p.noBrand > 0) line("Without a brand", p.noBrand.toString() + " (kept as OTHER)", Color(0xFFB26A00))
+                Spacer(Modifier.height(6.dp))
+                Text("Bills keep their own numbers. Payment is marked IMPORTED - the register does not say how it was paid, so nothing is guessed and nothing is shown as owed.",
+                    fontSize = 8.sp, color = Color.Gray)
+                if(p.dupSerials.isNotEmpty()) {
+                    Spacer(Modifier.height(6.dp))
+                    Text("Duplicate serials kept (both sales stay)", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color(0xFFB26A00))
+                    p.dupSerials.take(12).forEach { Text(it, fontSize = 8.sp, color = Color.Gray) }
+                    if(p.dupSerials.size > 12) Text("and " + (p.dupSerials.size - 12) + " more", fontSize = 8.sp, color = Color.Gray)
+                }
+                Spacer(Modifier.height(8.dp))
+                if(busy) {
+                    LinearProgressIndicator(progress = { if(progress.second > 0) progress.first.toFloat() / progress.second else 0f },
+                        modifier = Modifier.fillMaxWidth())
+                    Text(progress.first.toString() + " of " + progress.second, fontSize = 9.sp, color = Color.Gray)
+                } else Button(onClick = {
+                    busy = true; progress = 0 to p.bills.size
+                    scope.launch {
+                        val res = withContext(Dispatchers.IO) {
+                            try { runImport(ctx, prefs, p) { a, b -> progress = a to b } }
+                            catch(e: Exception) { ImportResult(message = "Import failed: " + (e.message ?: "unknown")) }
+                        }
+                        withContext(Dispatchers.IO) { rebuildCustomersFromBills(ctx) }
+                        done = res; busy = false
+                    }
+                }, modifier = Modifier.fillMaxWidth()) { Text("IMPORT " + p.bills.size + " BILLS") }
+            }}
+        }
+
+        val d = done
+        if(d != null) {
+            Card(Modifier.padding(vertical = 8.dp)) { Column(Modifier.padding(12.dp)) {
+                Text("3. Done", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Color(0xFF2E7D32))
+                Text(d.message, fontSize = 11.sp)
+                Spacer(Modifier.height(4.dp))
+                Text("Open Bills to see the history, and Customers to see them grouped.", fontSize = 9.sp, color = Color.Gray)
+                if(d.failed > 0) Text("Some rows failed. Run the import again - the bills that landed are skipped.", fontSize = 9.sp, color = Color(0xFFB26A00))
+            }}
+        }
+        Spacer(Modifier.height(40.dp))
     }
 }
 
@@ -5352,6 +5470,184 @@ fun rebuildCustomersFromBills(ctx: Context): Int {
         } finally { w.endTransaction() }
         seen
     } catch(e: Exception) { 0 }
+}
+
+// ---------------------------------------------------------------- xlsx import
+// A shop's sales register, read straight from the file their billing software gives them.
+// No library: an xlsx is a zip of XML, and Android already reads both.
+data class ImportLine(val desc: String, val brand: String, val cls: String, val serial: String, val qty: Double, val rate: Double)
+data class ImportBill(val invNo: String, val date: String, val ms: Long, val name: String, val phone: String,
+                      val addr: String, val pincode: String, val lines: MutableList<ImportLine>, val total: Double)
+data class ImportPlan(val bills: List<ImportBill> = emptyList(), val customers: Int = 0, val products: Int = 0,
+                      val lines: Int = 0, val value: Double = 0.0, val dupSerials: List<String> = emptyList(),
+                      val zeroValue: Int = 0, val noBrand: Int = 0, val error: String = "")
+
+fun readZipEntry(ctx: Context, uri: android.net.Uri, wanted: Set<String>): Map<String, ByteArray> {
+    val out = HashMap<String, ByteArray>()
+    try {
+        ctx.contentResolver.openInputStream(uri)?.use { input ->
+            java.util.zip.ZipInputStream(java.io.BufferedInputStream(input)).use { zis ->
+                var e = zis.nextEntry
+                while(e != null) {
+                    if(wanted.contains(e.name)) out[e.name] = zis.readBytes()
+                    e = zis.nextEntry
+                }
+            }
+        }
+    } catch(e: Exception) { }
+    return out
+}
+
+fun parseSharedStrings(bytes: ByteArray?): List<String> {
+    val out = mutableListOf<String>()
+    if(bytes == null) return out
+    try {
+        val p = org.xmlpull.v1.XmlPullParserFactory.newInstance().newPullParser()
+        p.setInput(bytes.inputStream(), "UTF-8")
+        var inSi = false; val sb = StringBuilder()
+        while(p.eventType != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
+            when(p.eventType) {
+                org.xmlpull.v1.XmlPullParser.START_TAG -> if(p.name == "si") { inSi = true; sb.setLength(0) }
+                org.xmlpull.v1.XmlPullParser.TEXT -> if(inSi) sb.append(p.text)
+                org.xmlpull.v1.XmlPullParser.END_TAG -> if(p.name == "si") { inSi = false; out.add(sb.toString()) }
+            }
+            p.next()
+        }
+    } catch(e: Exception) { }
+    return out
+}
+
+fun readXlsxRows(ctx: Context, uri: android.net.Uri): List<List<String>> {
+    val parts = readZipEntry(ctx, uri, setOf("xl/sharedStrings.xml", "xl/worksheets/sheet1.xml"))
+    val shared = parseSharedStrings(parts["xl/sharedStrings.xml"])
+    val sheet = parts["xl/worksheets/sheet1.xml"] ?: return emptyList()
+    val rows = mutableListOf<List<String>>()
+    try {
+        val p = org.xmlpull.v1.XmlPullParserFactory.newInstance().newPullParser()
+        p.setInput(sheet.inputStream(), "UTF-8")
+        var row = mutableListOf<String>(); var curCol = 0; var cellType = ""
+        val text = StringBuilder(); var inCell = false; var inValue = false
+        while(p.eventType != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
+            when(p.eventType) {
+                org.xmlpull.v1.XmlPullParser.START_TAG -> when(p.name) {
+                    "row" -> { row = mutableListOf(); curCol = 0 }
+                    "c" -> {
+                        val ref = p.getAttributeValue(null, "r") ?: ""
+                        cellType = p.getAttributeValue(null, "t") ?: ""
+                        var colIdx = 0
+                        for(ch in ref) { if(ch.isLetter()) colIdx = colIdx * 26 + (ch.uppercaseChar() - 'A' + 1) else break }
+                        curCol = if(colIdx > 0) colIdx - 1 else curCol
+                        text.setLength(0); inCell = true
+                    }
+                    "v", "t" -> inValue = true
+                }
+                org.xmlpull.v1.XmlPullParser.TEXT -> if(inCell && inValue) text.append(p.text)
+                org.xmlpull.v1.XmlPullParser.END_TAG -> when(p.name) {
+                    "v", "t" -> inValue = false
+                    "c" -> {
+                        var v = text.toString()
+                        if(cellType == "s") v = shared.getOrNull(v.trim().toIntOrNull() ?: -1) ?: ""
+                        while(row.size < curCol) row.add("")
+                        if(row.size == curCol) row.add(v) else row[curCol] = v
+                        inCell = false
+                    }
+                    "row" -> rows.add(row)
+                }
+            }
+            p.next()
+        }
+    } catch(e: Exception) { }
+    return rows
+}
+
+fun excelDate(serial: Double): String {
+    val ms = Math.round(serial) * 86400000L - 2209161600000L
+    return SimpleDateFormat("dd-MM-yyyy", Locale.ENGLISH).format(Date(ms))
+}
+
+fun normHead(s: String): String = s.lowercase(Locale.ENGLISH).replace(" ", "").replace(".", "").replace("_", "")
+
+fun buildImportPlan(rows: List<List<String>>): ImportPlan {
+    if(rows.isEmpty()) return ImportPlan(error = "The file is empty")
+    var headRow = -1
+    for((i, r) in rows.withIndex()) { if(r.any { normHead(it) == "billnumber" }) { headRow = i; break } }
+    if(headRow < 0) return ImportPlan(error = "No 'Bill Number' column found - this does not look like a sales register")
+    val head = rows[headRow].map { normHead(it) }
+    fun col(vararg names: String): Int {
+        for(n in names) { val k = head.indexOf(normHead(n)); if(k >= 0) return k }
+        return -1
+    }
+    val cBill = col("Bill Number"); val cDate = col("Date"); val cName = col("Customer Name")
+    val cProd = col("Product Name"); val cMobile = col("Mobile No", "Mobile"); val cAddr = col("Address")
+    val cPin = col("Pincode"); val cBrand = col("Brand"); val cClass = col("Class")
+    val cValue = col("Product Value", "Value"); val cQty = col("Qty", "Quantity"); val cSerial = col("Product Srl No.", "Serial")
+    if(cBill < 0 || cProd < 0 || cValue < 0) return ImportPlan(error = "Missing Bill Number, Product Name or Product Value")
+    val order = LinkedHashMap<String, ImportBill>()
+    val serials = HashMap<String, Int>()
+    var zero = 0; var noBrand = 0
+    for(i in (headRow + 1) until rows.size) {
+        val r = rows[i]
+        fun cell(c: Int): String = if(c >= 0 && c < r.size) r[c].trim() else ""
+        val inv = cell(cBill); if(inv.isBlank()) continue
+        val prod = cell(cProd); if(prod.isBlank()) continue
+        val qty = cell(cQty).replace(",", "").toDoubleOrNull() ?: 1.0
+        val value = cell(cValue).replace(",", "").toDoubleOrNull() ?: 0.0
+        if(value <= 0.004) zero++
+        val brandRaw = cell(cBrand); if(brandRaw.isBlank()) noBrand++
+        val serial = cell(cSerial)
+        if(serial.isNotBlank()) serials[serial] = (serials[serial] ?: 0) + 1
+        val rawDate = cell(cDate)
+        val dNum = rawDate.toDoubleOrNull()
+        val dateStr = if(dNum != null) excelDate(dNum) else rawDate.take(10)
+        val ms = try {
+            SimpleDateFormat(if(dateStr.length >= 10 && dateStr[2] == '-') "dd-MM-yyyy" else "yyyy-MM-dd", Locale.ENGLISH)
+                .parse(dateStr.take(10))?.time ?: System.currentTimeMillis()
+        } catch(e: Exception) { System.currentTimeMillis() }
+        val rate = if(qty > 0.0) value / qty else value
+        val line = ImportLine(prod, brandRaw.ifBlank { "OTHER" }, cell(cClass), serial, qty, rate)
+        val existing = order[inv]
+        if(existing == null) order[inv] = ImportBill(inv, dateStr, ms, cell(cName), cell(cMobile), cell(cAddr), cell(cPin), mutableListOf(line), value)
+        else existing.lines.add(line)
+    }
+    val bills = order.values.map { b -> b.copy(total = b.lines.sumOf { it.qty * it.rate }) }
+    if(bills.isEmpty()) return ImportPlan(error = "No bill rows found under the header")
+    return ImportPlan(bills, bills.map { it.phone }.filter { it.isNotBlank() }.distinct().size,
+        bills.flatMap { it.lines }.map { it.desc }.distinct().size,
+        bills.sumOf { it.lines.size }, bills.sumOf { it.total },
+        serials.filter { it.value > 1 }.keys.sorted(), zero, noBrand)
+}
+
+data class ImportResult(val added: Int = 0, val skipped: Int = 0, val failed: Int = 0, val message: String = "")
+
+fun runImport(ctx: Context, prefs: android.content.SharedPreferences, plan: ImportPlan, onProgress: (Int, Int) -> Unit): ImportResult {
+    var added = 0; var skipped = 0; var failed = 0
+    val seller = SellerInfo(prefs.getString("sName","")?:"",
+        listOf(prefs.getString("sAddr1","")?:"", prefs.getString("sAddr2","")?:"").filter{it.isNotBlank()}.joinToString("\n"),
+        prefs.getString("sPhone","")?:"", prefs.getString("sEmail","")?:"", prefs.getString("sLandmark","")?:"",
+        prefs.getString("sPincode","")?:"", prefs.getString("sGst","")?:"", prefs.getString("sBank","")?:"",
+        prefs.getString("sIfsc","")?:"", prefs.getString("sJuris","")?:"", prefs.getString("sUpi","")?:"",
+        prefs.getString("sState","21")?:"21")
+    val buyerState = prefs.getString("sState","21")?:"21"
+    val seen = HashSet<String>()
+    try { db(ctx).readableDatabase.rawQuery("SELECT inv FROM bills", null).use { c -> while(c.moveToNext()) seen.add(c.getString(0) ?: "") } } catch(e: Exception) { }
+    var n = 0
+    for(b in plan.bills) {
+        n++
+        if(n % 50 == 0) onProgress(n, plan.bills.size)
+        if(seen.contains(b.invNo)) { skipped++; continue }
+        try {
+            val items = b.lines.map { InvItem(it.desc, it.serial, "", it.qty, it.rate, "pcs", 18.0, 0.0, it.brand, it.cls) }
+            val buyer = BuyerInfo(b.name, b.addr, "", "", b.pincode, b.phone, "", "")
+            // the register does not record how it was paid, so nothing is invented and nothing is owed
+            val calc = computeBill(items, 0.0, 0.0, 0.0, 0.0, 0.0, seller.state, buyerState, false).copy(balance = 0.0)
+            saveInvoiceData(ctx, b.ms, false, b.invNo, b.date, "IMPORTED", "", buyer, seller,
+                0.0, 0.0, 0.0, 0.0, 0.0, "", calc, items)
+            if(b.phone.isNotBlank()) upsertCustomer(ctx, buyer, b.ms)
+            added++
+        } catch(e: Exception) { failed++ }
+    }
+    onProgress(plan.bills.size, plan.bills.size)
+    return ImportResult(added, skipped, failed, "Imported " + added + ", already present " + skipped + ", failed " + failed)
 }
 
 // ---------------------------------------------------------------- finance
