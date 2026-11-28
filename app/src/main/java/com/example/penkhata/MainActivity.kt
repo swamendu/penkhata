@@ -93,7 +93,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "9.19 · schemes"
+const val APP_VERSION = "9.20 · settlement"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -2218,7 +2218,17 @@ fun FinanceScreen() {
     if(openLoan != null) {
         val f = openLoan!!
         var status by remember(f.ms) { mutableStateOf(f.status) }
-        var reason by remember(f.ms) { mutableStateOf(f.note) }
+        var note by remember(f.ms) { mutableStateOf(f.note) }
+        var utr by remember(f.ms) { mutableStateOf(f.settlementUtr) }
+        var bank by remember(f.ms) { mutableStateOf("") }
+        var credited by remember(f.ms) { mutableStateOf(if(f.receivedAmt > 0) f.receivedAmt.toString() else f.financed.toString()) }
+        var dateTxt by remember(f.ms) { mutableStateOf(f.settledDate.ifBlank {
+            SimpleDateFormat("dd-MM-yyyy", Locale.ENGLISH).format(Date()) }) }
+        var batch by remember(f.ms) { mutableStateOf(false) }
+        var picked by remember(f.ms) { mutableStateOf(setOf(f.ms)) }
+        val pendingLoans = loans.filter { it.status == "PENDING" }
+        val allocated = loans.filter { picked.contains(it.ms) }.sumOf { it.financed }
+
         AlertDialog(
             onDismissRequest = { openLoan = null },
             title = { Text(f.lender.ifBlank { "Loan" }) },
@@ -2226,11 +2236,15 @@ fun FinanceScreen() {
                 Text(f.inv + "  \u00b7  " + f.date, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                 Text(f.buyer + "  \u00b7  " + f.phone, fontSize = 10.sp, color = Color.Gray)
                 Spacer(Modifier.height(6.dp))
-                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Financed", fontSize = 10.sp); Text("\u20b9" + inr(f.financed), fontSize = 10.sp, fontWeight = FontWeight.Bold) }
-                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Down payment", fontSize = 10.sp); Text("\u20b9" + inr(f.downCash + f.downCard + f.downUpi), fontSize = 10.sp) }
-                if(f.dbd > 0.5) Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("DBD returned", fontSize = 10.sp); Text("\u20b9" + inr(f.dbd) + " " + f.dbdMode, fontSize = 10.sp, color = Color(0xFFB26A00)) }
+                // what the Delivery Order said, read-only
+                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Disbursement per DO", fontSize = 10.sp); Text("\u20b9" + inr(f.financed), fontSize = 10.sp, fontWeight = FontWeight.Bold) }
+                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Down payment collected", fontSize = 10.sp); Text("\u20b9" + inr(f.downCash + f.downCard + f.downUpi), fontSize = 10.sp) }
                 Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Loan / App ID", fontSize = 10.sp); Text(f.loanId.ifBlank { "\u2014" }, fontSize = 10.sp) }
                 Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Tenure", fontSize = 10.sp); Text(f.tenure.toString() + " months", fontSize = 10.sp) }
+                if(f.settlementUtr.isNotBlank()) Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
+                    Text("Settled by UTR", fontSize = 10.sp, color = Color(0xFF2E7D32))
+                    Text(f.settlementUtr, fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFF2E7D32))
+                }
                 Spacer(Modifier.height(8.dp))
                 Text("Status", fontSize = 10.sp, fontWeight = FontWeight.Bold)
                 listOf("PENDING", "SETTLED", "CANCELLED", "DOA").forEach { st ->
@@ -2240,21 +2254,109 @@ fun FinanceScreen() {
                         Text(st, fontSize = 10.sp, color = if(on) Color.White else Color.Black)
                     }
                 }
-                OutlinedTextField(reason, { reason = it }, label = { Text("Reason / note") }, modifier = Modifier.fillMaxWidth())
-                Text(if(status == "DOA") "DOA: the lender cancels this loan and books a new one against the replacement unit."
-                     else if(status == "CANCELLED") "Cancelled with the lender - do not leave a live loan against a returned product."
-                     else "Settled means the lender has paid the shop.", fontSize = 8.sp, color = Color.Gray)
+
+                if(status == "SETTLED") {
+                    Spacer(Modifier.height(6.dp))
+                    Row(Modifier.fillMaxWidth()) {
+                        OutlinedButton(onClick = { batch = false; picked = setOf(f.ms) }, modifier = Modifier.weight(1f).padding(end = 4.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(containerColor = if(!batch) Color(0xFF1565C0) else Color.Transparent)) {
+                            Text("ONE LOAN", fontSize = 9.sp, color = if(!batch) Color.White else Color.Black)
+                        }
+                        OutlinedButton(onClick = { batch = true }, modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.outlinedButtonColors(containerColor = if(batch) Color(0xFF1565C0) else Color.Transparent)) {
+                            Text("BATCH (TA)", fontSize = 9.sp, color = if(batch) Color.White else Color.Black)
+                        }
+                    }
+                    OutlinedTextField(utr, { utr = it.uppercase() }, label = { Text("UTR / Transaction ID") },
+                        modifier = Modifier.fillMaxWidth(), singleLine = true)
+                    OutlinedTextField(bank, { bank = it }, label = { Text("Bank") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                    Row(Modifier.fillMaxWidth()) {
+                        OutlinedTextField(credited, { credited = it.filter { c -> c.isDigit() || c == '.' } },
+                            label = { Text("Amount credited \u20b9") }, modifier = Modifier.weight(1f), singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                        Spacer(Modifier.width(5.dp))
+                        OutlinedTextField(dateTxt, { dateTxt = it }, label = { Text("Date") }, modifier = Modifier.weight(1f), singleLine = true)
+                    }
+                    if(batch) {
+                        Text("Which loans does this TA cover?", fontSize = 9.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 6.dp))
+                        pendingLoans.take(40).forEach { l ->
+                            val on = picked.contains(l.ms)
+                            Row(Modifier.fillMaxWidth().clickable {
+                                picked = if(on) picked - l.ms else picked + l.ms
+                            }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(checked = on, onCheckedChange = { picked = if(on) picked - l.ms else picked + l.ms })
+                                Column(Modifier.weight(1f)) {
+                                    Text(l.lender + "  " + l.loanId, fontSize = 9.sp, maxLines = 1)
+                                    Text(l.inv, fontSize = 8.sp, color = Color.Gray, maxLines = 1)
+                                }
+                                Text("\u20b9" + inr(l.financed), fontSize = 9.sp)
+                            }
+                        }
+                        val cred = credited.toDoubleOrNull() ?: 0.0
+                        Text("Allocated \u20b9" + inr(allocated) + " of \u20b9" + inr(cred), fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold, color = if(Math.abs(allocated - cred) < 0.5) Color(0xFF2E7D32) else Color.Red)
+                        if(Math.abs(allocated - cred) >= 0.5) Text("The credit must equal the loans it covers, or it will not save.",
+                            fontSize = 8.sp, color = Color.Red)
+                    } else {
+                        val cred = credited.toDoubleOrNull() ?: 0.0
+                        val gap = cred - f.financed
+                        Text(
+                            if(Math.abs(gap) < 0.5) "\u2713 matches the Delivery Order"
+                            else if(gap < 0) "\u26a0 short by \u20b9" + inr(-gap) + " - dealer interest subsidy and fees, recorded as a cost"
+                            else "\u26a0 \u20b9" + inr(gap) + " more than the DO - check before saving",
+                            fontSize = 9.sp, fontWeight = FontWeight.Bold,
+                            color = if(Math.abs(gap) < 0.5) Color(0xFF2E7D32) else Color(0xFFB26A00))
+                    }
+                }
+
+                if(status == "CANCELLED" || status == "DOA") {
+                    Spacer(Modifier.height(6.dp))
+                    listOf("Customer refused", "Loan rejected", "Product returned", "DOA - box opened",
+                           "DO reissued").forEach { r ->
+                        OutlinedButton(onClick = { note = r }, modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(containerColor = if(note == r) Color(0xFFB26A00) else Color.Transparent)) {
+                            Text(r, fontSize = 9.sp, color = if(note == r) Color.White else Color.Black)
+                        }
+                    }
+                    OutlinedTextField(note, { note = it }, label = { Text(if(status == "DOA") "Note, with the replacement IMEI" else "Reason / note") },
+                        modifier = Modifier.fillMaxWidth())
+                    Text(if(status == "DOA") "The lender cancels this loan and books a new one against the replacement unit."
+                         else "Cancelled with the lender - do not leave a live loan against a returned product.",
+                        fontSize = 8.sp, color = Color.Gray)
+                }
             } },
             confirmButton = { TextButton(onClick = {
+                val cred = credited.toDoubleOrNull() ?: 0.0
+                if(status == "SETTLED" && utr.isBlank()) {
+                    Toast.makeText(ctx, "A UTR is needed to mark money as received", Toast.LENGTH_LONG).show(); return@TextButton
+                }
+                if(status == "SETTLED" && batch && Math.abs(allocated - cred) >= 0.5) {
+                    Toast.makeText(ctx, "The credit does not match the loans it covers", Toast.LENGTH_LONG).show(); return@TextButton
+                }
                 scope.launch {
                     withContext(Dispatchers.IO) {
                         try {
-                            db(ctx).writableDatabase.execSQL("UPDATE finance SET status=?, note=? WHERE ms=?",
-                                arrayOf(status, reason, f.ms.toString()))
+                            val dbh = db(ctx).writableDatabase
+                            if(status == "SETTLED") {
+                                val cv = android.content.ContentValues()
+                                cv.put("utr", utr.trim()); cv.put("bank", bank.trim()); cv.put("date", dateTxt.trim())
+                                cv.put("amount", cred); cv.put("mode", if(batch) "TA" else "SINGLE")
+                                cv.put("note", note); cv.put("createdMs", System.currentTimeMillis())
+                                dbh.insertWithOnConflict("settlements", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE)
+                                val targets = if(batch) picked else setOf(f.ms)
+                                for(t in targets) {
+                                    dbh.execSQL("UPDATE finance SET status='SETTLED', settlementUtr=?, receivedAmt=?, settledDate=? WHERE ms=?",
+                                        arrayOf(utr.trim(), cred.toString(), dateTxt.trim(), t.toString()))
+                                }
+                            } else {
+                                dbh.execSQL("UPDATE finance SET status=?, note=? WHERE ms=?",
+                                    arrayOf(status, note, f.ms.toString()))
+                            }
                         } catch(e: Exception) { }
                     }
                     openLoan = null; reload++
-                    Toast.makeText(ctx, "Loan marked " + status, Toast.LENGTH_SHORT).show()
+                    Toast.makeText(ctx, if(status == "SETTLED") "Settled - UTR " + utr.trim() else "Loan marked " + status,
+                        Toast.LENGTH_SHORT).show()
                 }
             }) { Text("SAVE") } },
             dismissButton = { TextButton(onClick = { openLoan = null }) { Text("CANCEL") } })
@@ -3107,8 +3209,7 @@ fun InvoiceScreen(isQuote: Boolean) {
                                 saveFinance(ctx, FinanceRec(billMs, snapInv, snapDate, buyer.name, buyer.phone,
                                     finLender.trim(), finTenure.toIntOrNull() ?: 0, finLoanId.trim(),
                                     snapCash, snapCard, snapUpi, financedAmt,
-                                    0.0, "Cash", disbAmt, "PENDING",
-                                    "DO disbursement \u20b9" + inr(disbAmt) + (if(cardType == "Debit") " \u00b7 debit card" else ""),
+                                    0.0, "Cash", disbAmt, "PENDING", "",
                                     System.currentTimeMillis()))
                             }
                             bumpInvoiceNo(ctx, prefs); clearBill()
@@ -6191,7 +6292,8 @@ data class FinanceRec(val ms: Long, val inv: String, val date: String, val buyer
                       val lender: String, val tenure: Int, val loanId: String,
                       val downCash: Double, val downCard: Double, val downUpi: Double,
                       val financed: Double, val dbd: Double, val dbdMode: String,
-                      val disbursed: Double, val status: String, val note: String, val createdMs: Long)
+                      val disbursed: Double, val status: String, val note: String, val createdMs: Long,
+                      val settlementUtr: String = "", val receivedAmt: Double = 0.0, val settledDate: String = "")
 
 fun saveFinance(ctx: Context, f: FinanceRec) {
     try {
@@ -6216,11 +6318,13 @@ fun loadFinance(ctx: Context, statusFilter: String = ""): List<FinanceRec> {
             "SELECT ms, IFNULL(inv,''), IFNULL(date,''), IFNULL(buyer,''), IFNULL(phone,''), IFNULL(lender,''), " +
             "IFNULL(tenure,0), IFNULL(loanId,''), IFNULL(downCash,0), IFNULL(downCard,0), IFNULL(downUpi,0), " +
             "IFNULL(financed,0), IFNULL(dbd,0), IFNULL(dbdMode,''), IFNULL(disbursed,0), IFNULL(status,'PENDING'), " +
-            "IFNULL(note,''), IFNULL(createdMs,0) FROM finance" + where + " ORDER BY ms DESC", args).use { c ->
+            "IFNULL(note,''), IFNULL(createdMs,0), IFNULL(settlementUtr,''), IFNULL(receivedAmt,0), " +
+            "IFNULL(settledDate,'') FROM finance" + where + " ORDER BY ms DESC", args).use { c ->
             while(c.moveToNext()) out.add(FinanceRec(c.getLong(0), c.getString(1) ?: "", c.getString(2) ?: "",
                 c.getString(3) ?: "", c.getString(4) ?: "", c.getString(5) ?: "", c.getInt(6), c.getString(7) ?: "",
                 c.getDouble(8), c.getDouble(9), c.getDouble(10), c.getDouble(11), c.getDouble(12), c.getString(13) ?: "",
-                c.getDouble(14), c.getString(15) ?: "", c.getString(16) ?: "", c.getLong(17)))
+                c.getDouble(14), c.getString(15) ?: "", c.getString(16) ?: "", c.getLong(17),
+                c.getString(18) ?: "", c.getDouble(19), c.getString(20) ?: ""))
         }
     } catch(e: Exception) { }
     return out
@@ -6721,6 +6825,8 @@ class PenDb(ctx: Context) : android.database.sqlite.SQLiteOpenHelper(ctx, "penkh
     }
     override fun onOpen(db: android.database.sqlite.SQLiteDatabase) {
         super.onOpen(db)
+        healColumns(db, "finance", listOf(
+            "settlementUtr" to "TEXT DEFAULT ''", "receivedAmt" to "REAL DEFAULT 0", "settledDate" to "TEXT DEFAULT ''"))
         healColumns(db, "bills", listOf(
             "cancelled" to "INTEGER DEFAULT 0", "cancelReason" to "TEXT DEFAULT ''",
             "branch" to "TEXT DEFAULT ''", "series" to "TEXT DEFAULT ''",
@@ -6756,6 +6862,9 @@ class PenDb(ctx: Context) : android.database.sqlite.SQLiteOpenHelper(ctx, "penkh
                 modelId INTEGER DEFAULT 0)""")
             db.execSQL("""CREATE TABLE IF NOT EXISTS dist_brands(distributor TEXT, brand TEXT, categories TEXT,
                 PRIMARY KEY(distributor, brand))""")
+            db.execSQL("""CREATE TABLE IF NOT EXISTS settlements(utr TEXT PRIMARY KEY, bank TEXT DEFAULT '',
+                date TEXT DEFAULT '', amount REAL DEFAULT 0, mode TEXT DEFAULT 'SINGLE', note TEXT DEFAULT '',
+                createdMs INTEGER DEFAULT 0)""")
             db.execSQL("""CREATE TABLE IF NOT EXISTS schemes(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT,
                 brand TEXT DEFAULT '', kind TEXT DEFAULT 'SLAB', scope TEXT DEFAULT '', fromMs INTEGER DEFAULT 0,
                 toMs INTEGER DEFAULT 0, perUnit REAL DEFAULT 0, targetQty REAL DEFAULT 0, targetAmt REAL DEFAULT 0,
