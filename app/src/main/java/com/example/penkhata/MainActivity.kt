@@ -93,7 +93,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "9.23 · margin"
+const val APP_VERSION = "9.24 · price protection"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -1921,6 +1921,10 @@ fun SchemeScreen() {
     val schemes by produceState(initialValue = emptyList<Scheme>(), reload) {
         value = withContext(Dispatchers.IO) { loadSchemes(ctx) }
     }
+    val drops by produceState(initialValue = emptyList<PriceDrop>(), reload) {
+        value = withContext(Dispatchers.IO) { loadPriceDrops(ctx) }
+    }
+    var showDrop by remember { mutableStateOf(false) }
     // one read of the year's sales, so every scheme counts against the same rows
     val sales by produceState(initialValue = emptyList<SaleRow>(), reload) {
         val now = System.currentTimeMillis()
@@ -2040,6 +2044,53 @@ fun SchemeScreen() {
                 }
             }) { Text("SAVE") } },
             dismissButton = { TextButton(onClick = { showForm = false; editing = null }) { Text("CANCEL") } })
+    }
+
+    if(showDrop) {
+        var skuTxt by remember { mutableStateOf("") }
+        var modelTxt by remember { mutableStateOf("") }
+        var oldTxt by remember { mutableStateOf("") }
+        var newTxt by remember { mutableStateOf("") }
+        var dateTxt by remember { mutableStateOf(SimpleDateFormat("dd-MM-yyyy", Locale.ENGLISH).format(Date())) }
+        val skuList = remember { loadSkuOptions(ctx) }
+        val atMs = try { SimpleDateFormat("dd-MM-yyyy", Locale.ENGLISH).parse(dateTxt.trim())?.time ?: 0L } catch(e: Exception) { 0L }
+        val held = remember(skuTxt, atMs) { if(skuTxt.isBlank() || atMs == 0L) 0.0 else unitsHeldOn(ctx, skuTxt.trim(), atMs) }
+        val dropAmt = ((oldTxt.toDoubleOrNull() ?: 0.0) - (newTxt.toDoubleOrNull() ?: 0.0)).coerceAtLeast(0.0)
+        AlertDialog(
+            onDismissRequest = { showDrop = false },
+            title = { Text("Price protection") },
+            text = { Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text("A price cut on stock you were already holding.", fontSize = 9.sp, color = Color.Gray)
+                PickerField("SKU", skuTxt, skuList, { skuTxt = it }, Modifier.fillMaxWidth(), allowNew = false)
+                OutlinedTextField(modelTxt, { modelTxt = it }, label = { Text("Model (for the claim)") },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true)
+                Row(Modifier.fillMaxWidth()) {
+                    OutlinedTextField(oldTxt, { oldTxt = it.filter { c -> c.isDigit() || c == '.' } }, label = { Text("Old DP \u20b9") },
+                        modifier = Modifier.weight(1f), singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                    Spacer(Modifier.width(5.dp))
+                    OutlinedTextField(newTxt, { newTxt = it.filter { c -> c.isDigit() || c == '.' } }, label = { Text("New DP \u20b9") },
+                        modifier = Modifier.weight(1f), singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                }
+                OutlinedTextField(dateTxt, { dateTxt = it }, label = { Text("Price fell on (dd-mm-yyyy)") },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true)
+                Spacer(Modifier.height(6.dp))
+                Text("Held on that day: " + held.toInt() + " unit(s)", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                Text("Claim = " + held.toInt() + " \u00d7 \u20b9" + inr(dropAmt) + " = \u20b9" + inr(held * dropAmt),
+                    fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF2E7D32))
+                if(held <= 0.0) Text("No stock of this SKU was in the shop that day, or none was received through a GRN.",
+                    fontSize = 8.sp, color = Color(0xFFB26A00))
+            } },
+            confirmButton = { TextButton(onClick = {
+                if(skuTxt.isBlank() || atMs == 0L) { Toast.makeText(ctx, "Pick a SKU and a date", Toast.LENGTH_SHORT).show(); return@TextButton }
+                scope.launch {
+                    withContext(Dispatchers.IO) {
+                        savePriceDrop(ctx, PriceDrop(0L, skuTxt.trim(), modelTxt.trim(), oldTxt.toDoubleOrNull() ?: 0.0,
+                            newTxt.toDoubleOrNull() ?: 0.0, atMs, held, held * dropAmt, ""))
+                    }
+                    showDrop = false; reload++
+                }
+            }) { Text("SAVE") } },
+            dismissButton = { TextButton(onClick = { showDrop = false }) { Text("CANCEL") } })
     }
 
     val detail = editing
@@ -2179,6 +2230,23 @@ fun SchemeScreen() {
                      "An IMEI uploaded after the scheme period earns nothing.",
                     fontSize = 9.sp, color = Color(0xFFB26A00), fontWeight = FontWeight.Bold)
             }}
+        }
+        Row(Modifier.fillMaxWidth().padding(top = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("PRICE PROTECTION", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFF465046), modifier = Modifier.weight(1f))
+            TextButton(onClick = { showDrop = true }) { Text("+ ADD", fontSize = 9.sp) }
+        }
+        if(drops.isEmpty()) Text("A price cut on stock you were holding. Add one and the app counts the units.",
+            fontSize = 9.sp, color = Color.Gray)
+        drops.forEach { d ->
+            Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(d.sku + (if(d.model.isNotBlank()) "  \u00b7  " + d.model else ""), fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                    Text(SimpleDateFormat("dd-MMM-yyyy", Locale.ENGLISH).format(Date(d.effectiveMs)) + "  \u00b7  " +
+                         d.heldUnits.toInt() + " held  \u00b7  \u20b9" + inr(d.oldDp - d.newDp) + " drop", fontSize = 8.sp, color = Color.Gray)
+                }
+                Text("\u20b9" + inr(d.claimAmt), fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFF2E7D32))
+            }
+            Divider(color = Color(0x14000000))
         }
         if(schemes.isEmpty()) {
             Text("No schemes yet.", fontSize = 11.sp, color = Color.Gray, modifier = Modifier.padding(top = 12.dp))
@@ -6123,6 +6191,59 @@ fun rebuildCustomersFromBills(ctx: Context): Int {
     } catch(e: Exception) { 0 }
 }
 
+// ---------------------------------------------------------------- price protection
+// When a brand cuts the price, it owes the dealer for the stock the dealer was holding on the day
+// of the cut. That is computable: units received before that day and not yet sold on it.
+data class PriceDrop(val id: Long, val sku: String, val model: String, val oldDp: Double, val newDp: Double,
+                     val effectiveMs: Long, val heldUnits: Double, val claimAmt: Double, val note: String)
+
+fun loadSkuOptions(ctx: Context): List<String> {
+    val out = mutableListOf<String>()
+    try {
+        db(ctx).readableDatabase.rawQuery("SELECT sku FROM skus ORDER BY sku", null).use { c ->
+            while(c.moveToNext()) { val v = c.getString(0) ?: ""; if(v.isNotBlank()) out.add(v) }
+        }
+    } catch(e: Exception) { }
+    return out
+}
+
+fun loadPriceDrops(ctx: Context): List<PriceDrop> {
+    val out = mutableListOf<PriceDrop>()
+    try {
+        db(ctx).readableDatabase.rawQuery("SELECT id, IFNULL(sku,''), IFNULL(model,''), IFNULL(oldDp,0), IFNULL(newDp,0), " +
+            "IFNULL(effectiveMs,0), IFNULL(heldUnits,0), IFNULL(claimAmt,0), IFNULL(note,'') FROM price_drops ORDER BY effectiveMs DESC",
+            null).use { c ->
+            while(c.moveToNext()) out.add(PriceDrop(c.getLong(0), c.getString(1) ?: "", c.getString(2) ?: "",
+                c.getDouble(3), c.getDouble(4), c.getLong(5), c.getDouble(6), c.getDouble(7), c.getString(8) ?: ""))
+        }
+    } catch(e: Exception) { }
+    return out
+}
+
+// Units of this SKU that were in the shop on that day: received before it, not sold on or before it.
+fun unitsHeldOn(ctx: Context, sku: String, atMs: Long): Double {
+    var n = 0.0
+    try {
+        db(ctx).readableDatabase.rawQuery(
+            "SELECT COUNT(*) FROM units u JOIN grn g ON g.id = u.grnId " +
+            "WHERE u.sku = ? AND IFNULL(g.createdAt,0) <= ? AND (IFNULL(u.billMs,0) = 0 OR u.billMs >= ?)",
+            arrayOf(sku, atMs.toString(), atMs.toString())).use { c -> if(c.moveToNext()) n = c.getDouble(0) }
+    } catch(e: Exception) { }
+    return n
+}
+
+fun savePriceDrop(ctx: Context, d: PriceDrop): Long {
+    return try {
+        val cv = android.content.ContentValues()
+        cv.put("sku", d.sku); cv.put("model", d.model); cv.put("oldDp", d.oldDp); cv.put("newDp", d.newDp)
+        cv.put("effectiveMs", d.effectiveMs); cv.put("heldUnits", d.heldUnits); cv.put("claimAmt", d.claimAmt)
+        cv.put("note", d.note); cv.put("createdMs", System.currentTimeMillis())
+        val dbh = db(ctx).writableDatabase
+        if(d.id > 0) { dbh.update("price_drops", cv, "id = ?", arrayOf(d.id.toString())); d.id }
+        else dbh.insert("price_drops", null, cv)
+    } catch(e: Exception) { -1L }
+}
+
 // ---------------------------------------------------------------- margin
 // The number a shop actually needs: what came in, minus what it cost, plus what the brand owes,
 // minus what the shop itself gave away. A scheme that pays 3,500 but costs 700 is not 3,500 of income.
@@ -7273,6 +7394,9 @@ class PenDb(ctx: Context) : android.database.sqlite.SQLiteOpenHelper(ctx, "penkh
                 schemeId INTEGER, fromQty REAL DEFAULT 0, toQty REAL DEFAULT 0, perUnit REAL DEFAULT 0)""")
             db.execSQL("""CREATE TABLE IF NOT EXISTS scheme_models(id INTEGER PRIMARY KEY AUTOINCREMENT,
                 schemeId INTEGER, modelCode TEXT DEFAULT '', modelName TEXT DEFAULT '', perUnit REAL DEFAULT 0)""")
+            db.execSQL("""CREATE TABLE IF NOT EXISTS price_drops(id INTEGER PRIMARY KEY AUTOINCREMENT, sku TEXT DEFAULT '',
+                model TEXT DEFAULT '', oldDp REAL DEFAULT 0, newDp REAL DEFAULT 0, effectiveMs INTEGER DEFAULT 0,
+                heldUnits REAL DEFAULT 0, claimAmt REAL DEFAULT 0, note TEXT DEFAULT '', createdMs INTEGER DEFAULT 0)""")
             db.execSQL("""CREATE TABLE IF NOT EXISTS scheme_claims(id INTEGER PRIMARY KEY AUTOINCREMENT,
                 schemeId INTEGER, billMs INTEGER, inv TEXT DEFAULT '', day TEXT DEFAULT '', modelCode TEXT DEFAULT '',
                 imei TEXT DEFAULT '', qty REAL DEFAULT 0, amount REAL DEFAULT 0, status TEXT DEFAULT 'ELIGIBLE',
