@@ -130,8 +130,8 @@ data class BillCalc(
     val taxable: Double, val cgst: Double, val sgst: Double, val igst: Double, val totalTax: Double,
     val roundOff: Double, val grand: Double, val exchange: Double, val discountDivisor: Boolean,
     val cash: Double, val upi: Double, val card: Double, val paid: Double, val balance: Double,
-    val financed: Double = 0.0,
-    val interState: Boolean
+    val interState: Boolean,
+    val financed: Double = 0.0
 )
 
 // Single place where a bill is added up, so the screen and the PDF can never disagree.
