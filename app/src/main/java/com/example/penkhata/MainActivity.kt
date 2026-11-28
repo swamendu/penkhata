@@ -2247,18 +2247,18 @@ fun MarginScreen() {
 
         // the honest line: what the brand owes, minus what the shop gave away
         Card(Modifier.fillMaxWidth().padding(top = 8.dp)) { Column(Modifier.padding(12.dp)) {
-            fun row(k: String, v: Double, bold: Boolean = false, col: Color = Color(0xFF1A1A1A)) {
+            val row: @Composable (String, Double, Boolean, Color) -> Unit = { k, v, bold, col ->
                 Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
                     Text(k, fontSize = if(bold) 11.sp else 10.sp, fontWeight = if(bold) FontWeight.Bold else FontWeight.Normal,
                         color = if(bold) Color(0xFF1A1A1A) else Color.Gray)
-                    Text((if(v < 0) "\\u2212\\u20b9" else "\\u20b9") + inr(Math.abs(v)),
+                    Text((if(v < 0) "\u2212\u20b9" else "\u20b9") + inr(Math.abs(v)),
                         fontSize = if(bold) 12.sp else 10.sp, fontWeight = if(bold) FontWeight.Bold else FontWeight.Normal, color = col)
                 }
             }
-            row("Sales", report.sales)
-            row("Cost of goods", -report.cogs)
+            row("Sales", report.sales, false, Color(0xFF1A1A1A))
+            row("Cost of goods", -report.cogs, false, Color(0xFF1A1A1A))
             row("Gross margin", report.gross, true, Color(0xFF1565C0))
-            if(report.scheme > 0.5) row("Scheme earned from brands", report.scheme)
+            if(report.scheme > 0.5) row("Scheme earned from brands", report.scheme, false, Color(0xFF1A1A1A))
             if(report.dealerShare > 0.5) row("Dealer share you paid", -report.dealerShare, false, Color(0xFFB26A00))
             if(report.subsidy > 0.5) row("Interest subsidy you bore", -report.subsidy, false, Color(0xFFB26A00))
             Divider(Modifier.padding(vertical = 4.dp))
