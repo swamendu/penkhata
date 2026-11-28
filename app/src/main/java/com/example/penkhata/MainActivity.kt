@@ -93,7 +93,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "9.17 · import"
+const val APP_VERSION = "9.18 · sales report"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -1157,6 +1157,7 @@ class MainActivity : FragmentActivity() {
         const val RC_REGISTER = 4206
         const val RC_CAMERA = 4207
         const val RC_IMPORT = 4208
+        const val RC_XLSX_REPORT = 4209
         val pickers = mutableMapOf<Int, (android.net.Uri?) -> Unit>()
     }
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
@@ -1430,6 +1431,7 @@ fun MainAppScreen() {
         "customers" -> CrmScreen()
         "finance" -> FinanceScreen()
         "import" -> ImportScreen()
+        "salesreport" -> SalesReportScreen()
         else -> SettingsScreen(hasPin(prefs), onDataChanged = { dataVersion++ },
             onPinSave = { new -> storePin(prefs, new); hasPinState = hasPin(prefs) }, startTab = settingsStart)
             }}}
@@ -1450,6 +1452,7 @@ fun MainAppScreen() {
                     "customers" to "Customers",
                     "finance" to "Finance",
                     "import" to "Import register",
+                    "salesreport" to "Sales report",
                     "settings" to "Settings"
                 ).forEach { (id, label) ->
                     Text(label, fontSize = 14.sp, modifier = Modifier.fillMaxWidth()
@@ -1747,6 +1750,159 @@ fun BillSheet(ms: Long, onClose: () -> Unit, onChanged: () -> Unit) {
                 Spacer(Modifier.height(30.dp))
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------- sales report screen
+@Composable
+fun SalesReportScreen() {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var monthOffset by rememberSaveable { mutableStateOf(0) }
+    var tab by rememberSaveable { mutableStateOf("daily") }
+    var busy by remember { mutableStateOf(false) }
+
+    val monthStart = remember(monthOffset) {
+        Calendar.getInstance().apply {
+            set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0); add(Calendar.MONTH, monthOffset)
+        }.timeInMillis
+    }
+    val monthEnd = remember(monthOffset) {
+        Calendar.getInstance().apply {
+            set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0); add(Calendar.MONTH, monthOffset + 1)
+        }.timeInMillis
+    }
+    val monthLabel = remember(monthOffset) { SimpleDateFormat("MMMM yyyy", Locale.ENGLISH).format(Date(monthStart)) }
+    val rows by produceState(initialValue = emptyList<SaleRow>(), monthStart) {
+        value = withContext(Dispatchers.IO) { loadSalesRows(ctx, monthStart, monthEnd) }
+    }
+
+    val units = rows.sumOf { it.qty }
+    val value = rows.sumOf { it.amount }
+    val bills = rows.map { it.inv }.distinct().size
+    val brands = remember(rows) { rows.groupBy { it.brand }.toList().sortedByDescending { it.second.sumOf { r -> r.amount } } }
+    val days = remember(rows) { rows.groupBy { it.day }.toList().sortedByDescending { it.first } }
+
+    Column(Modifier.padding(14.dp).verticalScroll(rememberScrollState())) {
+        Text("SALES REPORT", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+        Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = { monthOffset -= 1 }) { Text("\u2039", fontSize = 18.sp) }
+            Text(monthLabel, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            TextButton(onClick = { if(monthOffset < 0) monthOffset += 1 }) { Text("\u203a", fontSize = 18.sp) }
+        }
+        Row(Modifier.fillMaxWidth()) {
+            CrmTile("Units", units.toInt().toString(), Color(0xFF1A1A1A), Modifier.weight(1f))
+            Spacer(Modifier.width(6.dp))
+            CrmTile("Value", "\u20b9" + inr(value), Color(0xFF1A1A1A), Modifier.weight(1f))
+        }
+        Row(Modifier.fillMaxWidth().padding(top = 6.dp)) {
+            CrmTile("Bills", bills.toString(), Color(0xFF1A1A1A), Modifier.weight(1f))
+            Spacer(Modifier.width(6.dp))
+            CrmTile("Average", "\u20b9" + inr(if(units > 0) value / units else 0.0), Color(0xFF2E7D32), Modifier.weight(1f))
+        }
+
+        Row(Modifier.fillMaxWidth().padding(top = 10.dp).horizontalScroll(rememberScrollState())) {
+            listOf("daily" to "Daily", "brands" to "Brands", "log" to "Log").forEach { (id, label) ->
+                val on = tab == id
+                OutlinedButton(onClick = { tab = id }, modifier = Modifier.padding(end = 6.dp),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 2.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(containerColor = if(on) Color(0xFF2E7D32) else Color.Transparent)) {
+                    Text(label, fontSize = 10.sp, color = if(on) Color.White else Color.Black)
+                }
+            }
+        }
+
+        if(rows.isEmpty()) Text("No sales in " + monthLabel + ".", fontSize = 11.sp, color = Color.Gray,
+            modifier = Modifier.padding(top = 12.dp))
+
+        if(tab == "daily") days.forEach { (day, list) ->
+            Row(Modifier.fillMaxWidth().background(Color(0xFFE8EDE8)).padding(vertical = 5.dp, horizontal = 8.dp), Arrangement.SpaceBetween) {
+                Text(day, fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFF465046))
+                Text(list.sumOf { it.qty }.toInt().toString() + " units  \u00b7  \u20b9" + inr(list.sumOf { it.amount }),
+                    fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFF465046))
+            }
+            list.groupBy { it.brand }.toList().sortedByDescending { it.second.sumOf { r -> r.amount } }.forEach { (b, l) ->
+                Row(Modifier.fillMaxWidth().padding(vertical = 4.dp, horizontal = 8.dp), Arrangement.SpaceBetween) {
+                    Text(b, fontSize = 10.sp, modifier = Modifier.weight(1f), maxLines = 1)
+                    Text(l.sumOf { it.qty }.toInt().toString() + "  \u00b7  \u20b9" + inr(l.sumOf { it.amount }), fontSize = 10.sp)
+                }
+            }
+        }
+
+        if(tab == "brands") brands.forEach { (b, l) ->
+            val v = l.sumOf { it.amount }
+            Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
+                    Text(b, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                    Text(l.sumOf { it.qty }.toInt().toString() + " units  \u00b7  \u20b9" + inr(v), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                }
+                Text(if(value > 0) ((v * 100.0 / value).toInt()).toString() + "% of the month" else "", fontSize = 8.sp, color = Color.Gray)
+                val bands = l.groupBy { bandOf(it.unitPrice) }
+                Text(PRICE_BANDS.filter { bands.containsKey(it.first) }
+                    .joinToString("  ") { it.first + " " + bands[it.first]!!.sumOf { r -> r.qty }.toInt() },
+                    fontSize = 8.sp, color = Color(0xFF1565C0))
+            }
+            Divider(color = Color(0x14000000))
+        }
+
+        if(tab == "log") rows.sortedByDescending { it.ms }.forEach { r ->
+            Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(r.brand + "  " + r.model + (if(r.variant.isBlank()) "" else "  " + r.variant), fontSize = 10.sp, maxLines = 1)
+                    Text(r.day + "  \u00b7  " + r.inv, fontSize = 8.sp, color = Color.Gray, maxLines = 1)
+                }
+                Text("\u20b9" + inr(r.amount), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            }
+            Divider(color = Color(0x0F000000))
+        }
+
+        Spacer(Modifier.height(10.dp))
+        Button(onClick = {
+            val intent = createDocIntent("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "Sales_Report_" + SimpleDateFormat("MMM_yyyy", Locale.ENGLISH).format(Date(monthStart)) + ".xlsx")
+            launchPicker(ctx, intent, MainActivity.RC_XLSX_REPORT) { uri ->
+                if(uri == null) return@launchPicker
+                busy = true
+                scope.launch {
+                    val ok = withContext(Dispatchers.IO) {
+                        try {
+                            val data = mutableListOf<List<Any>>()
+                            data.add(listOf("SALES REPORT - " + monthLabel))
+                            data.add(listOf("Units", units.toInt(), "Value", Math.round(value * 100.0) / 100.0, "Bills", bills))
+                            data.add(emptyList())
+                            data.add(listOf("Date", "Brand", "Units", "Value"))
+                            days.sortedBy { it.first }.forEach { (d, l) ->
+                                l.groupBy { it.brand }.forEach { (b, ll) ->
+                                    data.add(listOf(d, b, ll.sumOf { r -> r.qty }.toInt(), Math.round(ll.sumOf { r -> r.amount } * 100.0) / 100.0))
+                                }
+                            }
+                            data.add(emptyList())
+                            data.add(listOf("Brand", "Units", "Revenue", "Share %"))
+                            brands.forEach { (b, l) ->
+                                val v = l.sumOf { it.amount }
+                                data.add(listOf(b, l.sumOf { r -> r.qty }.toInt(), Math.round(v * 100.0) / 100.0,
+                                    if(value > 0) Math.round(v * 1000.0 / value) / 10.0 else 0.0))
+                            }
+                            data.add(emptyList())
+                            data.add(listOf("Date", "Bill", "Brand", "Model", "Variant", "Price", "Qty", "Total"))
+                            rows.sortedByDescending { it.ms }.forEach { r ->
+                                data.add(listOf(r.day, r.inv, r.brand, r.model, r.variant,
+                                    Math.round(r.unitPrice * 100.0) / 100.0, r.qty, Math.round(r.amount * 100.0) / 100.0))
+                            }
+                            ctx.contentResolver.openOutputStream(uri)?.use { it.write(xlsxBytes(data, "Sales")) }
+                            true
+                        } catch(e: Exception) { false }
+                    }
+                    busy = false
+                    Toast.makeText(ctx, if(ok) "Report saved" else "Could not write the file", Toast.LENGTH_LONG).show()
+                }
+            }
+        }, enabled = !busy && rows.isNotEmpty(), modifier = Modifier.fillMaxWidth()) {
+            Text(if(busy) "WRITING..." else "EXPORT XLSX")
+        }
+        Spacer(Modifier.height(40.dp))
     }
 }
 
@@ -5470,6 +5626,120 @@ fun rebuildCustomersFromBills(ctx: Context): Int {
         } finally { w.endTransaction() }
         seen
     } catch(e: Exception) { 0 }
+}
+
+// ---------------------------------------------------------------- sales report
+// One row per unit sold, taken from the bill lines, so the report can be sliced by brand,
+// model, price band and day exactly like the register the shop already uses.
+data class SaleRow(val ms: Long, val day: String, val inv: String, val brand: String, val model: String,
+                   val variant: String, val cls: String, val qty: Double, val unitPrice: Double) {
+    val amount: Double get() = qty * unitPrice
+}
+
+// "OPPO A6X 5G (4/128)" -> OPPO A6X 5G | 4/128 ;  "GALAXY A36 8/128" -> GALAXY A36 | 8/128
+fun splitModelVariant(desc: String): Pair<String, String> {
+    val d = desc.trim()
+    val bracket = Regex("""^(.*?)\s*\(([^)]+)\)\s*$""").find(d)
+    if(bracket != null) return bracket.groupValues[1].trim() to bracket.groupValues[2].trim()
+    val tail = Regex("""^(.*?)\s+(\d{1,3}\s*/\s*\d{1,4})$""").find(d)
+    if(tail != null) return tail.groupValues[1].trim() to tail.groupValues[2].replace(" ", "")
+    return d to ""
+}
+
+fun loadSalesRows(ctx: Context, fromMs: Long, toMs: Long): List<SaleRow> {
+    val out = mutableListOf<SaleRow>()
+    try {
+        db(ctx).readableDatabase.rawQuery(
+            "SELECT ms, IFNULL(inv,''), IFNULL(date,''), IFNULL(lines,'') FROM bills " +
+            "WHERE ms >= ? AND ms < ? AND IFNULL(quote,0) = 0 AND IFNULL(cancelled,0) = 0 ORDER BY ms",
+            arrayOf(fromMs.toString(), toMs.toString())).use { c ->
+            while(c.moveToNext()) {
+                val ms = c.getLong(0); val inv = c.getString(1) ?: ""; val date = c.getString(2) ?: ""
+                val day = date.take(10)
+                val arr = try { org.json.JSONArray(c.getString(3) ?: "[]") } catch(e: Exception) { org.json.JSONArray() }
+                for(i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val desc = o.optString("desc")
+                    val qty = o.optDouble("qty", 1.0)
+                    val rate = o.optDouble("rate", 0.0)
+                    val brand = o.optString("brand").ifBlank { "OTHER" }
+                    val cls = o.optString("cls")
+                    val (model, variant) = splitModelVariant(desc)
+                    out.add(SaleRow(ms, day, inv, brand.uppercase(Locale.ENGLISH), model, variant, cls, qty, rate))
+                }
+            }
+        }
+    } catch(e: Exception) { }
+    return out
+}
+
+// the price bands the register uses
+val PRICE_BANDS = listOf("<10K" to (0.0 to 10000.0), "10-15K" to (10000.0 to 15000.0),
+    "15-20K" to (15000.0 to 20000.0), "20-30K" to (20000.0 to 30000.0), "30-40K" to (30000.0 to 40000.0),
+    "40-70K" to (40000.0 to 70000.0), "70-100K" to (70000.0 to 100000.0), ">100K" to (100000.0 to Double.MAX_VALUE))
+
+fun bandOf(price: Double): String = PRICE_BANDS.firstOrNull { price >= it.second.first && price < it.second.second }?.first ?: ">100K"
+
+// ---------------------------------------------------------------- xlsx writing
+// The smallest xlsx Excel will open: a zip of five XML parts, with inline strings so there is
+// no shared-string table to get wrong.
+fun xlsxBytes(rows: List<List<Any>>, sheetName: String = "Sheet1"): ByteArray {
+    fun esc(v: String): String = v.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
+    fun colName(i: Int): String {
+        var n = i + 1; var s = ""
+        while(n > 0) { val r = (n - 1) % 26; s = ('A' + r) + s; n = (n - 1) / 26 }
+        return s
+    }
+    val sb = StringBuilder()
+    sb.append("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>")
+    sb.append("<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>")
+    for((r, row) in rows.withIndex()) {
+        sb.append("<row r=\"").append(r + 1).append("\">")
+        for((ci, cell) in row.withIndex()) {
+            val ref = colName(ci) + (r + 1)
+            when(cell) {
+                is Number -> sb.append("<c r=\"").append(ref).append("\"><v>").append(cell).append("</v></c>")
+                else -> sb.append("<c r=\"").append(ref).append("\" t=\"inlineStr\"><is><t xml:space=\"preserve\">")
+                    .append(esc(cell.toString())).append("</t></is></c>")
+            }
+        }
+        sb.append("</row>")
+    }
+    sb.append("</sheetData></worksheet>")
+    val sheet = sb.toString()
+    val contentTypes = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" +
+        "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">" +
+        "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>" +
+        "<Default Extension=\"xml\" ContentType=\"application/xml\"/>" +
+        "<Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>" +
+        "<Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>" +
+        "</Types>"
+    val rels = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" +
+        "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">" +
+        "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/>" +
+        "</Relationships>"
+    val workbook = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" +
+        "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" " +
+        "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">" +
+        "<sheets><sheet name=\"" + esc(sheetName.take(28)) + "\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>"
+    val wbRels = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" +
+        "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">" +
+        "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/>" +
+        "</Relationships>"
+    val bos = java.io.ByteArrayOutputStream()
+    java.util.zip.ZipOutputStream(bos).use { zip ->
+        fun put(name: String, body: String) {
+            zip.putNextEntry(java.util.zip.ZipEntry(name))
+            zip.write(body.toByteArray(Charsets.UTF_8))
+            zip.closeEntry()
+        }
+        put("[Content_Types].xml", contentTypes)
+        put("_rels/.rels", rels)
+        put("xl/workbook.xml", workbook)
+        put("xl/_rels/workbook.xml.rels", wbRels)
+        put("xl/worksheets/sheet1.xml", sheet)
+    }
+    return bos.toByteArray()
 }
 
 // ---------------------------------------------------------------- xlsx import
