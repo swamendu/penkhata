@@ -93,7 +93,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "9.12.1 · splash"
+const val APP_VERSION = "9.14 · finance"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -130,6 +130,7 @@ data class BillCalc(
     val taxable: Double, val cgst: Double, val sgst: Double, val igst: Double, val totalTax: Double,
     val roundOff: Double, val grand: Double, val exchange: Double, val discountDivisor: Boolean,
     val cash: Double, val upi: Double, val card: Double, val paid: Double, val balance: Double,
+    val financed: Double = 0.0,
     val interState: Boolean
 )
 
@@ -152,7 +153,7 @@ fun discountAmount(gross: Double, discPct: Double, divisor: Boolean): Double =
     gross - netAfterDiscount(gross, discPct, divisor)
 
 fun computeBill(items: List<InvItem>, billDiscount: Double, exchange: Double, cash: Double, upi: Double, card: Double,
-                sellerState: String, buyerState: String, divisor: Boolean = true): BillCalc {
+                sellerState: String, buyerState: String, divisor: Boolean = true, financed: Double = 0.0): BillCalc {
     var gross = 0.0; var itemDisc = 0.0; var taxable = 0.0; var tax = 0.0
     for(it in items) {
         val g = it.qty * it.rate
@@ -177,7 +178,8 @@ fun computeBill(items: List<InvItem>, billDiscount: Double, exchange: Double, ca
     val grand = rounded - exchange
     return BillCalc(gross, itemDisc, bd, taxableAfter, 
         if(interState) 0.0 else taxAfter / 2, if(interState) 0.0 else taxAfter / 2, if(interState) taxAfter else 0.0, taxAfter,
-        roundOff, grand, exchange, divisor, cash, upi, card, paid, grand - paid, interState)
+        roundOff, grand, exchange, divisor, cash, upi, card, paid, grand - paid - financed.coerceAtLeast(0.0), interState,
+        financed.coerceAtLeast(0.0))
 }
 
 fun fmt(v: Double): String = String.format("%.2f", v)
@@ -1425,6 +1427,7 @@ fun MainAppScreen() {
         "reports" -> GSTReportScreen()
         "history" -> BillsScreen()
         "customers" -> CrmScreen()
+        "finance" -> FinanceScreen()
         else -> SettingsScreen(hasPin(prefs), onDataChanged = { dataVersion++ },
             onPinSave = { new -> storePin(prefs, new); hasPinState = hasPin(prefs) }, startTab = settingsStart)
             }}}
@@ -1443,6 +1446,7 @@ fun MainAppScreen() {
                     "reports" to "Reports",
                     "history" to "Bills",
                     "customers" to "Customers",
+                    "finance" to "Finance",
                     "settings" to "Settings"
                 ).forEach { (id, label) ->
                     Text(label, fontSize = 14.sp, modifier = Modifier.fillMaxWidth()
@@ -1740,6 +1744,99 @@ fun BillSheet(ms: Long, onClose: () -> Unit, onChanged: () -> Unit) {
                 Spacer(Modifier.height(30.dp))
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------- finance screen
+// What the lenders owe the shop, and where each loan stands.
+@Composable
+fun FinanceScreen() {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var reload by remember { mutableStateOf(0) }
+    var filter by rememberSaveable { mutableStateOf("PENDING") }
+    var openLoan by remember { mutableStateOf<FinanceRec?>(null) }
+    val loans by produceState(initialValue = emptyList<FinanceRec>(), reload) {
+        value = withContext(Dispatchers.IO) { loadFinance(ctx) }
+    }
+    val shown = if(filter == "ALL") loans else loans.filter { it.status == filter }
+    val pending = loans.filter { it.status == "PENDING" }.sumOf { it.financed }
+
+    if(openLoan != null) {
+        val f = openLoan!!
+        var status by remember(f.ms) { mutableStateOf(f.status) }
+        var reason by remember(f.ms) { mutableStateOf(f.note) }
+        AlertDialog(
+            onDismissRequest = { openLoan = null },
+            title = { Text(f.lender.ifBlank { "Loan" }) },
+            text = { Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text(f.inv + "  \u00b7  " + f.date, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                Text(f.buyer + "  \u00b7  " + f.phone, fontSize = 10.sp, color = Color.Gray)
+                Spacer(Modifier.height(6.dp))
+                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Financed", fontSize = 10.sp); Text("\u20b9" + inr(f.financed), fontSize = 10.sp, fontWeight = FontWeight.Bold) }
+                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Down payment", fontSize = 10.sp); Text("\u20b9" + inr(f.downCash + f.downCard + f.downUpi), fontSize = 10.sp) }
+                if(f.dbd > 0.5) Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("DBD returned", fontSize = 10.sp); Text("\u20b9" + inr(f.dbd) + " " + f.dbdMode, fontSize = 10.sp, color = Color(0xFFB26A00)) }
+                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Loan / App ID", fontSize = 10.sp); Text(f.loanId.ifBlank { "\u2014" }, fontSize = 10.sp) }
+                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) { Text("Tenure", fontSize = 10.sp); Text(f.tenure.toString() + " months", fontSize = 10.sp) }
+                Spacer(Modifier.height(8.dp))
+                Text("Status", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                listOf("PENDING", "SETTLED", "CANCELLED", "DOA").forEach { st ->
+                    val on = status == st
+                    OutlinedButton(onClick = { status = st }, modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(containerColor = if(on) Color(0xFF2E7D32) else Color.Transparent)) {
+                        Text(st, fontSize = 10.sp, color = if(on) Color.White else Color.Black)
+                    }
+                }
+                OutlinedTextField(reason, { reason = it }, label = { Text("Reason / note") }, modifier = Modifier.fillMaxWidth())
+                Text(if(status == "DOA") "DOA: the lender cancels this loan and books a new one against the replacement unit."
+                     else if(status == "CANCELLED") "Cancelled with the lender - do not leave a live loan against a returned product."
+                     else "Settled means the lender has paid the shop.", fontSize = 8.sp, color = Color.Gray)
+            } },
+            confirmButton = { TextButton(onClick = {
+                scope.launch {
+                    withContext(Dispatchers.IO) {
+                        try {
+                            db(ctx).writableDatabase.execSQL("UPDATE finance SET status=?, note=? WHERE ms=?",
+                                arrayOf(status, reason, f.ms.toString()))
+                        } catch(e: Exception) { }
+                    }
+                    openLoan = null; reload++
+                    Toast.makeText(ctx, "Loan marked " + status, Toast.LENGTH_SHORT).show()
+                }
+            }) { Text("SAVE") } },
+            dismissButton = { TextButton(onClick = { openLoan = null }) { Text("CANCEL") } })
+    }
+
+    Column(Modifier.padding(14.dp).verticalScroll(rememberScrollState())) {
+        Text("FINANCE", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+        Text(loans.size.toString() + " loan(s)  \u00b7  \u20b9" + inr(pending) + " awaited from lenders", fontSize = 10.sp, color = Color.Gray)
+        Row(Modifier.fillMaxWidth().padding(top = 8.dp).horizontalScroll(rememberScrollState())) {
+            listOf("PENDING" to "Awaited", "SETTLED" to "Settled", "CANCELLED" to "Cancelled", "DOA" to "DOA", "ALL" to "All").forEach { (id, label) ->
+                val on = filter == id
+                OutlinedButton(onClick = { filter = id }, modifier = Modifier.padding(end = 6.dp),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(containerColor = if(on) Color(0xFF2E7D32) else Color.Transparent)) {
+                    Text(label, fontSize = 9.sp, maxLines = 1, color = if(on) Color.White else Color.Black)
+                }
+            }
+        }
+        if(shown.isEmpty()) Text("Nothing here.", fontSize = 11.sp, color = Color.Gray, modifier = Modifier.padding(top = 12.dp))
+        shown.forEach { f ->
+            Row(Modifier.fillMaxWidth().clickable { openLoan = f }.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(f.lender.ifBlank { "Lender" }, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                    Text(f.inv + "  \u00b7  " + f.buyer + "  \u00b7  " + f.date, fontSize = 9.sp, color = Color.Gray, maxLines = 1)
+                    Text(f.tenure.toString() + " months" + (if(f.loanId.isNotBlank()) "  \u00b7  " + f.loanId else ""), fontSize = 8.sp, color = Color.Gray, maxLines = 1)
+                }
+                Column(horizontalAlignment = Alignment.End) {
+                    Text("\u20b9" + inr(f.financed), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    Text(f.status, fontSize = 8.sp, fontWeight = FontWeight.Bold,
+                        color = if(f.status == "SETTLED") Color(0xFF2E7D32) else if(f.status == "PENDING") Color(0xFF1565C0) else Color.Red)
+                }
+            }
+            Divider(color = Color(0x14000000))
+        }
+        Spacer(Modifier.height(40.dp))
     }
 }
 
@@ -2165,6 +2262,7 @@ fun InvoiceScreen(isQuote: Boolean) {
         items = emptyList()
         billDisc=""; exchange=""; cash=""; upi=""; card=""; finance=""
         payMode=""; delNote=""
+        finOn = false; finLender = ""; finTenure = "6"; finLoanId = ""; finDbd = ""; finDbdMode = "Cash"
     }
 
     // Pay Mode follows the Cash / UPI / Card amounts, so it never contradicts them.
@@ -2175,8 +2273,13 @@ fun InvoiceScreen(isQuote: Boolean) {
     ).filter{it.isNotBlank()}.joinToString(", ")
     LaunchedEffect(autoPayMode) { if(autoPayMode.isNotBlank() && payMode != autoPayMode) payMode = autoPayMode }
 
-    val calc = computeBill(items, billDisc.toDoubleOrNull() ?: 0.0, exchange.toDoubleOrNull() ?: 0.0,
+    val calcBase = computeBill(items, billDisc.toDoubleOrNull() ?: 0.0, exchange.toDoubleOrNull() ?: 0.0,
         cash.toDoubleOrNull() ?: 0.0, upi.toDoubleOrNull() ?: 0.0, card.toDoubleOrNull() ?: 0.0, sellerState, bState, discountDivisor(prefs))
+    // when the bill is financed, the unpaid part belongs to the lender, not to the customer
+    val financedAmt = if(finOn) (calcBase.grand - calcBase.paid).coerceAtLeast(0.0) else 0.0
+    val calc = if(finOn) computeBill(items, billDisc.toDoubleOrNull() ?: 0.0, exchange.toDoubleOrNull() ?: 0.0,
+        cash.toDoubleOrNull() ?: 0.0, upi.toDoubleOrNull() ?: 0.0, card.toDoubleOrNull() ?: 0.0, sellerState, bState,
+        discountDivisor(prefs), financedAmt) else calcBase
 
     Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
         Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
@@ -2392,7 +2495,38 @@ fun InvoiceScreen(isQuote: Boolean) {
             Text("Charges & Payment", fontWeight=FontWeight.Bold)
             Row { OutlinedTextField(billDisc, {billDisc=it}, label={Text("Bill Discount \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.width(5.dp)); OutlinedTextField(exchange, {exchange=it}, label={Text("Exchange \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })) }
             Row { OutlinedTextField(cash, {cash=it}, label={Text("Cash \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.width(5.dp)); OutlinedTextField(upi, {upi=it}, label={Text("UPI \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })); Spacer(Modifier.width(5.dp)); OutlinedTextField(card, {card=it}, label={Text("Card \u20b9")}, keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number, imeAction=ImeAction.Next), modifier=Modifier.weight(1f), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) })) }
-            OutlinedTextField(finance, {finance=it}, label={Text("Finance / EMI Scheme")}, modifier=Modifier.fillMaxWidth(), keyboardOptions=KeyboardOptions(imeAction=ImeAction.Next), keyboardActions=KeyboardActions(onNext={ focusManager.moveFocus(FocusDirection.Down) }))
+            Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(checked = finOn, onCheckedChange = { finOn = it })
+                Text("Paid by finance (EMI)", fontSize = 11.sp)
+            }
+            if(finOn) Column(Modifier.fillMaxWidth()) {
+                PickerField("Lender", finLender, INDIAN_LENDERS, { finLender = it }, Modifier.fillMaxWidth(), allowNew = true)
+                Row(Modifier.fillMaxWidth()) {
+                    OutlinedTextField(finTenure, { finTenure = it.filter { ch -> ch.isDigit() }.take(2) },
+                        label = { Text("Tenure (months)") }, modifier = Modifier.weight(1f), singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                    Spacer(Modifier.width(5.dp))
+                    OutlinedTextField(finLoanId, { finLoanId = it }, label = { Text("Loan / App ID") },
+                        modifier = Modifier.weight(1.6f), singleLine = true)
+                }
+                val financedNow = (calc.grand - calc.paid).coerceAtLeast(0.0)
+                Text("Financed \u20b9" + inr(financedNow) + "   (invoice \u20b9" + inr(calc.grand) + " minus paid \u20b9" + inr(calc.paid) + ")",
+                    fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFF1565C0))
+                Text("Fixed by the bill. A loan for a different amount is what the lender rejects.",
+                    fontSize = 8.sp, color = Color.Gray)
+                Row(Modifier.fillMaxWidth().padding(top = 4.dp)) {
+                    OutlinedTextField(finDbd, { finDbd = it.filter { ch -> ch.isDigit() || ch == '.' } },
+                        label = { Text("DBD returned \u20b9") }, modifier = Modifier.weight(1f), singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                    Spacer(Modifier.width(5.dp))
+                    OutlinedButton(onClick = { finDbdMode = if(finDbdMode == "Cash") "UPI" else "Cash" }, modifier = Modifier.weight(0.8f)) {
+                        Text(finDbdMode, fontSize = 10.sp)
+                    }
+                }
+                if((finDbd.toDoubleOrNull() ?: 0.0) > 0.0) Text(
+                    "DBD is a cost to the shop, and a compliance risk if the lender audits the file. Recorded, not hidden.",
+                    fontSize = 8.sp, color = Color(0xFFB26A00))
+            }
         }}
         Card(Modifier.padding(vertical=5.dp)) { Column(Modifier.padding(10.dp)) {
             Text("Summary", fontWeight=FontWeight.Bold)
@@ -2449,6 +2583,12 @@ fun InvoiceScreen(isQuote: Boolean) {
                     if(file == null) { Toast.makeText(ctx, "Could not write the PDF", Toast.LENGTH_LONG).show() }
                     else {
                         if(!isQuote) {
+                            if(finOn && finLender.isNotBlank()) {
+                                saveFinance(ctx, FinanceRec(billMs, snapInv, snapDate, buyer.name, buyer.phone,
+                                    finLender.trim(), finTenure.toIntOrNull() ?: 0, finLoanId.trim(),
+                                    snapCash, snapCard, snapUpi, financedAmt,
+                                    finDbd.toDoubleOrNull() ?: 0.0, finDbdMode, 0.0, "PENDING", "", System.currentTimeMillis()))
+                            }
                             bumpInvoiceNo(ctx, prefs); clearBill()
                             scope.launch { withContext(Dispatchers.IO) { deductStock(ctx, snapItems) } }
                         }
@@ -5145,6 +5285,57 @@ fun rebuildCustomersFromBills(ctx: Context): Int {
     } catch(e: Exception) { 0 }
 }
 
+// ---------------------------------------------------------------- finance
+// A financed bill is not a customer debt. The shop is owed by the lender, the loan has its own
+// number, and the amount financed must equal the invoice minus what the customer paid - a
+// mismatch is exactly what a lender blocks, and what turns a sale into a dispute.
+data class FinanceRec(val ms: Long, val inv: String, val date: String, val buyer: String, val phone: String,
+                      val lender: String, val tenure: Int, val loanId: String,
+                      val downCash: Double, val downCard: Double, val downUpi: Double,
+                      val financed: Double, val dbd: Double, val dbdMode: String,
+                      val disbursed: Double, val status: String, val note: String, val createdMs: Long)
+
+fun saveFinance(ctx: Context, f: FinanceRec) {
+    try {
+        val cv = android.content.ContentValues()
+        cv.put("ms", f.ms); cv.put("inv", f.inv); cv.put("date", f.date)
+        cv.put("buyer", f.buyer); cv.put("phone", f.phone)
+        cv.put("lender", f.lender); cv.put("tenure", f.tenure); cv.put("loanId", f.loanId)
+        cv.put("downCash", f.downCash); cv.put("downCard", f.downCard); cv.put("downUpi", f.downUpi)
+        cv.put("financed", f.financed); cv.put("dbd", f.dbd); cv.put("dbdMode", f.dbdMode)
+        cv.put("disbursed", f.disbursed); cv.put("status", f.status); cv.put("note", f.note)
+        cv.put("createdMs", f.createdMs)
+        db(ctx).writableDatabase.insertWithOnConflict("finance", null, cv, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE)
+    } catch(e: Exception) { }
+}
+
+fun loadFinance(ctx: Context, statusFilter: String = ""): List<FinanceRec> {
+    val out = mutableListOf<FinanceRec>()
+    try {
+        val where = if(statusFilter.isBlank()) "" else " WHERE status = ?"
+        val args = if(statusFilter.isBlank()) null else arrayOf(statusFilter)
+        db(ctx).readableDatabase.rawQuery(
+            "SELECT ms, IFNULL(inv,''), IFNULL(date,''), IFNULL(buyer,''), IFNULL(phone,''), IFNULL(lender,''), " +
+            "IFNULL(tenure,0), IFNULL(loanId,''), IFNULL(downCash,0), IFNULL(downCard,0), IFNULL(downUpi,0), " +
+            "IFNULL(financed,0), IFNULL(dbd,0), IFNULL(dbdMode,''), IFNULL(disbursed,0), IFNULL(status,'PENDING'), " +
+            "IFNULL(note,''), IFNULL(createdMs,0) FROM finance" + where + " ORDER BY ms DESC", args).use { c ->
+            while(c.moveToNext()) out.add(FinanceRec(c.getLong(0), c.getString(1) ?: "", c.getString(2) ?: "",
+                c.getString(3) ?: "", c.getString(4) ?: "", c.getString(5) ?: "", c.getInt(6), c.getString(7) ?: "",
+                c.getDouble(8), c.getDouble(9), c.getDouble(10), c.getDouble(11), c.getDouble(12), c.getString(13) ?: "",
+                c.getDouble(14), c.getString(15) ?: "", c.getString(16) ?: "", c.getLong(17)))
+        }
+    } catch(e: Exception) { }
+    return out
+}
+
+// The lenders a shop in India is likely to meet. Free text: anything typed is kept.
+val INDIAN_LENDERS = listOf(
+    "Bajaj Finserv", "HDB Financial", "IDFC First Bank", "Tata Capital", "TVS Credit",
+    "Home Credit", "Chola Finance", "IIFL Finance", "Hero FinCorp", "Piramal Finance",
+    "HDFC Bank Card EMI", "ICICI Bank Card EMI", "SBI Card EMI", "Axis Bank Card EMI",
+    "Kotak Card EMI", "Federal Bank Card EMI", "OneCard EMI", "ShopSe", "ZestMoney"
+)
+
 // ---------------------------------------------------------------- bills browser
 // A lean row: no JSON parsing, so ten thousand of them cost almost nothing to scan.
 data class BillLite(val ms: Long, val inv: String, val date: String, val buyer: String,
@@ -5667,6 +5858,11 @@ class PenDb(ctx: Context) : android.database.sqlite.SQLiteOpenHelper(ctx, "penkh
                 modelId INTEGER DEFAULT 0)""")
             db.execSQL("""CREATE TABLE IF NOT EXISTS dist_brands(distributor TEXT, brand TEXT, categories TEXT,
                 PRIMARY KEY(distributor, brand))""")
+            db.execSQL("""CREATE TABLE IF NOT EXISTS finance(ms INTEGER PRIMARY KEY, inv TEXT, date TEXT, buyer TEXT,
+                phone TEXT, lender TEXT, tenure INTEGER DEFAULT 0, loanId TEXT, downCash REAL DEFAULT 0,
+                downCard REAL DEFAULT 0, downUpi REAL DEFAULT 0, financed REAL DEFAULT 0, dbd REAL DEFAULT 0,
+                dbdMode TEXT DEFAULT '', disbursed REAL DEFAULT 0, status TEXT DEFAULT 'PENDING', note TEXT DEFAULT '',
+                createdMs INTEGER DEFAULT 0)""")
             db.execSQL("""CREATE TABLE IF NOT EXISTS customers(phone TEXT PRIMARY KEY, name TEXT, addr1 TEXT, addr2 TEXT,
                 lmk TEXT, pin TEXT, gst TEXT, state TEXT, firstMs INTEGER DEFAULT 0, lastMs INTEGER DEFAULT 0, bills INTEGER DEFAULT 0)""")
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_cust_name ON customers(name)")
