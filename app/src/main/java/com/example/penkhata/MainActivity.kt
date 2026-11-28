@@ -93,7 +93,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "9.22 · claims"
+const val APP_VERSION = "9.23 · margin"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -1433,6 +1433,7 @@ fun MainAppScreen() {
         "import" -> ImportScreen()
         "salesreport" -> SalesReportScreen()
         "schemes" -> SchemeScreen()
+        "margin" -> MarginScreen()
         else -> SettingsScreen(hasPin(prefs), onDataChanged = { dataVersion++ },
             onPinSave = { new -> storePin(prefs, new); hasPinState = hasPin(prefs) }, startTab = settingsStart)
             }}}
@@ -1455,6 +1456,7 @@ fun MainAppScreen() {
                     "import" to "Import register",
                     "salesreport" to "Sales report",
                     "schemes" to "Schemes",
+                    "margin" to "Margin",
                     "settings" to "Settings"
                 ).forEach { (id, label) ->
                     Text(label, fontSize = 14.sp, modifier = Modifier.fillMaxWidth()
@@ -2197,6 +2199,103 @@ fun SchemeScreen() {
             }
             Divider(color = Color(0x14000000))
         }
+        Spacer(Modifier.height(40.dp))
+    }
+}
+
+// ---------------------------------------------------------------- margin screen
+@Composable
+fun MarginScreen() {
+    val ctx = LocalContext.current
+    var monthOffset by rememberSaveable { mutableStateOf(0) }
+    val monthStart = remember(monthOffset) {
+        Calendar.getInstance().apply {
+            set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0); add(Calendar.MONTH, monthOffset)
+        }.timeInMillis
+    }
+    val monthEnd = remember(monthOffset) {
+        Calendar.getInstance().apply {
+            set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0); add(Calendar.MONTH, monthOffset + 1)
+        }.timeInMillis
+    }
+    val monthLabel = remember(monthOffset) { SimpleDateFormat("MMMM yyyy", Locale.ENGLISH).format(Date(monthStart)) }
+    val report by produceState(initialValue = MarginReport(), monthStart) {
+        value = withContext(Dispatchers.IO) { loadMargin(ctx, monthStart, monthEnd) }
+    }
+
+    Column(Modifier.padding(14.dp).verticalScroll(rememberScrollState())) {
+        Text("MARGIN", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+        Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = { monthOffset -= 1 }) { Text("\u2039", fontSize = 18.sp) }
+            Text(monthLabel, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            TextButton(onClick = { if(monthOffset < 0) monthOffset += 1 }) { Text("\u203a", fontSize = 18.sp) }
+        }
+
+        Row(Modifier.fillMaxWidth()) {
+            CrmTile("Sales", "\u20b9" + inr(report.sales), Color(0xFF1A1A1A), Modifier.weight(1f))
+            Spacer(Modifier.width(6.dp))
+            CrmTile("Gross margin", "\u20b9" + inr(report.gross), Color(0xFF1565C0), Modifier.weight(1f))
+        }
+        Row(Modifier.fillMaxWidth().padding(top = 6.dp)) {
+            CrmTile("Scheme earned", "\u20b9" + inr(report.scheme), Color(0xFF2E7D32), Modifier.weight(1f))
+            Spacer(Modifier.width(6.dp))
+            CrmTile("True margin", "\u20b9" + inr(report.net),
+                if(report.net < 0) Color.Red else Color(0xFF2E7D32), Modifier.weight(1f))
+        }
+
+        // the honest line: what the brand owes, minus what the shop gave away
+        Card(Modifier.fillMaxWidth().padding(top = 8.dp)) { Column(Modifier.padding(12.dp)) {
+            fun row(k: String, v: Double, bold: Boolean = false, col: Color = Color(0xFF1A1A1A)) {
+                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
+                    Text(k, fontSize = if(bold) 11.sp else 10.sp, fontWeight = if(bold) FontWeight.Bold else FontWeight.Normal,
+                        color = if(bold) Color(0xFF1A1A1A) else Color.Gray)
+                    Text((if(v < 0) "\\u2212\\u20b9" else "\\u20b9") + inr(Math.abs(v)),
+                        fontSize = if(bold) 12.sp else 10.sp, fontWeight = if(bold) FontWeight.Bold else FontWeight.Normal, color = col)
+                }
+            }
+            row("Sales", report.sales)
+            row("Cost of goods", -report.cogs)
+            row("Gross margin", report.gross, true, Color(0xFF1565C0))
+            if(report.scheme > 0.5) row("Scheme earned from brands", report.scheme)
+            if(report.dealerShare > 0.5) row("Dealer share you paid", -report.dealerShare, false, Color(0xFFB26A00))
+            if(report.subsidy > 0.5) row("Interest subsidy you bore", -report.subsidy, false, Color(0xFFB26A00))
+            Divider(Modifier.padding(vertical = 4.dp))
+            row("True margin", report.net, true, if(report.net < 0) Color.Red else Color(0xFF2E7D32))
+            if(report.sales > 0) Text("That is " + String.format("%.1f", report.net * 100.0 / report.sales) + "% of sales.",
+                fontSize = 9.sp, color = Color.Gray)
+        }}
+
+        if(report.noCost > 0) Card(Modifier.fillMaxWidth().padding(top = 8.dp)) { Row(Modifier.padding(10.dp)) {
+            Text("\\u26a0 " + report.noCost + " of " + report.bills + " bills carry no cost, so their margin shows as 100%. " +
+                 "Imported history has no purchase price - set it on the stock, or read this report only for bills made here.",
+                fontSize = 9.sp, color = Color(0xFFB26A00))
+        }}
+        if(report.awaiting > 0.5) Text("\\u20b9" + inr(report.awaiting) + " still awaited from lenders - not counted as margin yet.",
+            fontSize = 9.sp, color = Color.Gray, modifier = Modifier.padding(top = 6.dp))
+
+        Text("BY BRAND", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFF465046), modifier = Modifier.padding(top = 12.dp))
+        report.lines.forEach { l ->
+            Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
+                    Text(l.brand, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                    Text("\\u20b9" + inr(l.sales), fontSize = 11.sp)
+                }
+                Text("cost \\u20b9" + inr(l.cogs) + (if(l.scheme > 0.5) "  \\u00b7  scheme +\\u20b9" + inr(l.scheme) else "") +
+                     (if(l.dealerShare > 0.5) "  \\u00b7  dealer \\u2212\\u20b9" + inr(l.dealerShare) else "") +
+                     (if(l.subsidy > 0.5) "  \\u00b7  subsidy \\u2212\\u20b9" + inr(l.subsidy) else ""),
+                    fontSize = 8.sp, color = Color.Gray)
+                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
+                    Text("margin \\u20b9" + inr(l.net) + (if(l.sales > 0) "  (" + String.format("%.1f", l.net * 100.0 / l.sales) + "%)" else ""),
+                        fontSize = 9.sp, fontWeight = FontWeight.Bold, color = if(l.net < 0) Color.Red else Color(0xFF2E7D32))
+                    Text("gross \\u20b9" + inr(l.gross), fontSize = 9.sp, color = Color.Gray)
+                }
+            }
+            Divider(color = Color(0x14000000))
+        }
+        if(report.lines.isEmpty()) Text("No sales in " + monthLabel + ".", fontSize = 11.sp, color = Color.Gray,
+            modifier = Modifier.padding(top = 12.dp))
         Spacer(Modifier.height(40.dp))
     }
 }
@@ -6022,6 +6121,86 @@ fun rebuildCustomersFromBills(ctx: Context): Int {
         } finally { w.endTransaction() }
         seen
     } catch(e: Exception) { 0 }
+}
+
+// ---------------------------------------------------------------- margin
+// The number a shop actually needs: what came in, minus what it cost, plus what the brand owes,
+// minus what the shop itself gave away. A scheme that pays 3,500 but costs 700 is not 3,500 of income.
+data class MarginLine(val brand: String, val sales: Double, val cogs: Double, val scheme: Double,
+                      val dealerShare: Double, val subsidy: Double) {
+    val gross: Double get() = sales - cogs
+    val net: Double get() = gross + scheme - dealerShare - subsidy
+}
+
+data class MarginReport(val lines: List<MarginLine> = emptyList(), val bills: Int = 0, val noCost: Int = 0,
+                        val awaiting: Double = 0.0) {
+    val sales: Double get() = lines.sumOf { it.sales }
+    val cogs: Double get() = lines.sumOf { it.cogs }
+    val scheme: Double get() = lines.sumOf { it.scheme }
+    val dealerShare: Double get() = lines.sumOf { it.dealerShare }
+    val subsidy: Double get() = lines.sumOf { it.subsidy }
+    val gross: Double get() = sales - cogs
+    val net: Double get() = gross + scheme - dealerShare - subsidy
+}
+
+fun loadMargin(ctx: Context, fromMs: Long, toMs: Long): MarginReport {
+    val perBrand = LinkedHashMap<String, MutableList<Double>>()   // sales, cogs, scheme, share, subsidy
+    var bills = 0; var noCost = 0; var awaiting = 0.0
+    try {
+        val schemeByBill = HashMap<Long, Pair<Double, Double>>()
+        db(ctx).readableDatabase.rawQuery(
+            "SELECT c.billMs, IFNULL(SUM(c.amount),0), IFNULL(SUM(c.qty * IFNULL(s.dealerShare,0)),0) " +
+            "FROM scheme_claims c JOIN schemes s ON s.id = c.schemeId GROUP BY c.billMs", null).use { c ->
+            while(c.moveToNext()) schemeByBill[c.getLong(0)] = c.getDouble(1) to c.getDouble(2)
+        }
+        val subsidyByBill = HashMap<Long, Double>()
+        db(ctx).readableDatabase.rawQuery(
+            "SELECT ms, IFNULL(financed,0), IFNULL(receivedAmt,0), IFNULL(status,'PENDING') FROM finance", null).use { c ->
+            while(c.moveToNext()) {
+                val fin = c.getDouble(1); val rec = c.getDouble(2)
+                if((c.getString(3) ?: "PENDING") == "SETTLED") {
+                    if(fin - rec > 0.5) subsidyByBill[c.getLong(0)] = fin - rec
+                } else awaiting += fin
+            }
+        }
+        db(ctx).readableDatabase.rawQuery(
+            "SELECT ms, IFNULL(total,0), IFNULL(cogs,0), IFNULL(lines,'') FROM bills " +
+            "WHERE ms >= ? AND ms < ? AND IFNULL(quote,0) = 0 AND IFNULL(cancelled,0) = 0",
+            arrayOf(fromMs.toString(), toMs.toString())).use { c ->
+            while(c.moveToNext()) {
+                bills++
+                val ms = c.getLong(0); val total = c.getDouble(1); val cogs = c.getDouble(2)
+                if(cogs <= 0.004) noCost++
+                val arr = try { org.json.JSONArray(c.getString(3) ?: "[]") } catch(e: Exception) { org.json.JSONArray() }
+                val lines = mutableListOf<Triple<String, Double, Double>>()   // brand, amount, share
+                var sum = 0.0
+                for(i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val amt = o.optDouble("qty", 1.0) * o.optDouble("rate", 0.0)
+                    val brand = o.optString("brand").ifBlank { "OTHER" }.uppercase(Locale.ENGLISH)
+                    lines.add(Triple(brand, amt, 0.0)); sum += amt
+                }
+                val sch = schemeByBill[ms] ?: (0.0 to 0.0)
+                val sub = subsidyByBill[ms] ?: 0.0
+                for((brand, amt, _) in lines) {
+                    val share = if(sum > 0) amt / sum else 0.0
+                    val row = perBrand.getOrPut(brand) { mutableListOf(0.0, 0.0, 0.0, 0.0, 0.0) }
+                    row[0] += amt
+                    row[1] += cogs * share
+                    row[2] += sch.first * share
+                    row[3] += sch.second * share
+                    row[4] += sub * share
+                }
+                if(lines.isEmpty()) {
+                    val row = perBrand.getOrPut("OTHER") { mutableListOf(0.0, 0.0, 0.0, 0.0, 0.0) }
+                    row[0] += total; row[1] += cogs; row[2] += sch.first; row[3] += sch.second; row[4] += sub
+                }
+            }
+        }
+    } catch(e: Exception) { }
+    val out = perBrand.map { (b, v) -> MarginLine(b, v[0], v[1], v[2], v[3], v[4]) }
+        .sortedByDescending { it.sales }
+    return MarginReport(out, bills, noCost, awaiting)
 }
 
 // ---------------------------------------------------------------- schemes
