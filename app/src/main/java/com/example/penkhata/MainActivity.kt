@@ -6292,7 +6292,8 @@ data class FinanceRec(val ms: Long, val inv: String, val date: String, val buyer
                       val lender: String, val tenure: Int, val loanId: String,
                       val downCash: Double, val downCard: Double, val downUpi: Double,
                       val financed: Double, val dbd: Double, val dbdMode: String,
-                      val disbursed: Double, val status: String, val note: String, val createdMs: Long)
+                      val disbursed: Double, val status: String, val note: String, val createdMs: Long,
+                      val settlementUtr: String = "", val receivedAmt: Double = 0.0, val settledDate: String = "")
 
 fun saveFinance(ctx: Context, f: FinanceRec) {
     try {
@@ -6317,11 +6318,13 @@ fun loadFinance(ctx: Context, statusFilter: String = ""): List<FinanceRec> {
             "SELECT ms, IFNULL(inv,''), IFNULL(date,''), IFNULL(buyer,''), IFNULL(phone,''), IFNULL(lender,''), " +
             "IFNULL(tenure,0), IFNULL(loanId,''), IFNULL(downCash,0), IFNULL(downCard,0), IFNULL(downUpi,0), " +
             "IFNULL(financed,0), IFNULL(dbd,0), IFNULL(dbdMode,''), IFNULL(disbursed,0), IFNULL(status,'PENDING'), " +
-            "IFNULL(note,''), IFNULL(createdMs,0) FROM finance" + where + " ORDER BY ms DESC", args).use { c ->
+            "IFNULL(note,''), IFNULL(createdMs,0), IFNULL(settlementUtr,''), IFNULL(receivedAmt,0), " +
+            "IFNULL(settledDate,'') FROM finance" + where + " ORDER BY ms DESC", args).use { c ->
             while(c.moveToNext()) out.add(FinanceRec(c.getLong(0), c.getString(1) ?: "", c.getString(2) ?: "",
                 c.getString(3) ?: "", c.getString(4) ?: "", c.getString(5) ?: "", c.getInt(6), c.getString(7) ?: "",
                 c.getDouble(8), c.getDouble(9), c.getDouble(10), c.getDouble(11), c.getDouble(12), c.getString(13) ?: "",
-                c.getDouble(14), c.getString(15) ?: "", c.getString(16) ?: "", c.getLong(17)))
+                c.getDouble(14), c.getString(15) ?: "", c.getString(16) ?: "", c.getLong(17),
+                c.getString(18) ?: "", c.getDouble(19), c.getString(20) ?: ""))
         }
     } catch(e: Exception) { }
     return out
