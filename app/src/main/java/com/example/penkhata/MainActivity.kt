@@ -93,7 +93,7 @@ import java.util.zip.ZipOutputStream
 // it, and locking then would replace the screen holding the pending result.
 var pickerInFlight by mutableStateOf(false)
 
-const val APP_VERSION = "9.21 · scheme models"
+const val APP_VERSION = "9.22 · claims"
 
 data class InvItem(val desc: String, val serial: String, val hsn: String, val qty: Double, val rate: Double, val unit: String, val taxRate: Double, val discount: Double = 0.0,
                    val brand: String = "", val cls: String = "")
@@ -2090,6 +2090,50 @@ fun SchemeScreen() {
                     Text("\u20b9" + inr(detail.claimedAmt), fontSize = 10.sp)
                 }
                 Spacer(Modifier.height(8.dp))
+                // the claim list: one row per unit, with the IMEI that has to be uploaded
+                var claims by remember(detail.id) { mutableStateOf(loadClaims(ctx, detail.id)) }
+                var building by remember(detail.id) { mutableStateOf(false) }
+                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
+                    Text("Claim list", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                    TextButton(onClick = {
+                        scope.launch {
+                            building = true
+                            withContext(Dispatchers.IO) { rebuildSchemeClaims(ctx, detail, loadSalesRows(ctx, detail.fromMs, detail.toMs)) }
+                            claims = withContext(Dispatchers.IO) { loadClaims(ctx, detail.id) }
+                            building = false
+                        }
+                    }) { Text(if(building) "BUILDING..." else if(claims.isEmpty()) "BUILD LIST" else "REBUILD", fontSize = 9.sp) }
+                }
+                if(claims.isNotEmpty()) {
+                    Text(claims.size.toString() + " unit(s)  \u00b7  \u20b9" + inr(claims.sumOf { it.amount }) +
+                         "  \u00b7  " + claims.count { it.status == "ELIGIBLE" } + " awaiting upload",
+                        fontSize = 9.sp, color = Color.Gray)
+                    claims.take(12).forEach { cl ->
+                        Row(Modifier.fillMaxWidth().clickable {
+                            val next = when(cl.status) { "ELIGIBLE" -> "UPLOADED"; "UPLOADED" -> "CLAIMED"; "CLAIMED" -> "SETTLED"; else -> "ELIGIBLE" }
+                            scope.launch {
+                                withContext(Dispatchers.IO) { setClaimStatus(ctx, cl.id, next) }
+                                claims = withContext(Dispatchers.IO) { loadClaims(ctx, detail.id) }
+                            }
+                        }.padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text((if(cl.imei.isBlank()) "no IMEI" else cl.imei) + "  \u00b7  " + cl.day, fontSize = 9.sp, maxLines = 1)
+                                Text(cl.inv + (if(cl.modelCode.isNotBlank()) "  \u00b7  " + cl.modelCode else ""), fontSize = 8.sp, color = Color.Gray, maxLines = 1)
+                            }
+                            Text("\u20b9" + inr(cl.amount), fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                            Text(cl.status, fontSize = 7.sp, fontWeight = FontWeight.Bold,
+                                color = when(cl.status) { "SETTLED" -> Color(0xFF2E7D32); "CLAIMED" -> Color(0xFF1565C0);
+                                    "UPLOADED" -> Color(0xFFB26A00); else -> Color.Red },
+                                modifier = Modifier.padding(start = 6.dp))
+                        }
+                    }
+                    if(claims.size > 12) Text("and " + (claims.size - 12) + " more", fontSize = 8.sp, color = Color.Gray)
+                    Text("Tap a row to move it along: eligible, uploaded, claimed, settled.", fontSize = 8.sp, color = Color.Gray)
+                } else {
+                    Text("Build the list to see every unit sold inside this scheme, with the IMEI to upload.",
+                        fontSize = 8.sp, color = Color.Gray)
+                }
+                Spacer(Modifier.height(8.dp))
                 OutlinedTextField(claimedTxt, { claimedTxt = it.filter { c -> c.isDigit() || c == '.' } },
                     label = { Text("Claimed so far \u20b9") }, modifier = Modifier.fillMaxWidth(), singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
@@ -2116,12 +2160,24 @@ fun SchemeScreen() {
 
         val earned = schemes.sumOf { schemeProgress(sales, it).earned }
         val unclaimed = schemes.filter { it.claimedAmt <= 0.5 }.sumOf { schemeProgress(sales, it).earned }
+        val awaiting = remember(schemes, reload) {
+            var n = 0
+            for(sc in schemes) { n += try { loadClaims(ctx, sc.id).count { it.status == "ELIGIBLE" } } catch(e: Exception) { 0 } }
+            n
+        }
         Row(Modifier.fillMaxWidth().padding(top = 8.dp)) {
             CrmTile("Earned", "\u20b9" + inr(earned), Color(0xFF2E7D32), Modifier.weight(1f))
             Spacer(Modifier.width(6.dp))
             CrmTile("Not yet claimed", "\u20b9" + inr(unclaimed), if(unclaimed > 0.5) Color(0xFFB26A00) else Color.Gray, Modifier.weight(1f))
         }
 
+        if(awaiting > 0) {
+            Card(Modifier.fillMaxWidth().padding(top = 8.dp)) { Row(Modifier.padding(10.dp)) {
+                Text("\u26a0 " + awaiting + " unit(s) eligible and not yet uploaded to the brand portal. " +
+                     "An IMEI uploaded after the scheme period earns nothing.",
+                    fontSize = 9.sp, color = Color(0xFFB26A00), fontWeight = FontWeight.Bold)
+            }}
+        }
         if(schemes.isEmpty()) {
             Text("No schemes yet.", fontSize = 11.sp, color = Color.Gray, modifier = Modifier.padding(top = 12.dp))
             Text("Add the slab or target scheme the brand gave you, and the app counts your sales against it.",
@@ -6046,6 +6102,73 @@ fun saveScheme(ctx: Context, s: Scheme): Long {
 data class SchemeProgress(val units: Double, val earned: Double, val slabLabel: String, val nextLabel: String)
 
 // Counts what qualifies: brand and model scope, inside the scheme's own dates.
+data class SchemeClaim(val id: Long, val schemeId: Long, val billMs: Long, val inv: String, val day: String,
+                       val modelCode: String, val imei: String, val qty: Double, val amount: Double,
+                       val status: String, val note: String)
+
+fun loadClaims(ctx: Context, schemeId: Long): List<SchemeClaim> {
+    val out = mutableListOf<SchemeClaim>()
+    try {
+        db(ctx).readableDatabase.rawQuery("SELECT id, schemeId, billMs, IFNULL(inv,''), IFNULL(day,''), IFNULL(modelCode,''), " +
+            "IFNULL(imei,''), IFNULL(qty,0), IFNULL(amount,0), IFNULL(status,'ELIGIBLE'), IFNULL(note,'') FROM scheme_claims " +
+            "WHERE schemeId = ? ORDER BY billMs DESC", arrayOf(schemeId.toString())).use { c ->
+            while(c.moveToNext()) out.add(SchemeClaim(c.getLong(0), c.getLong(1), c.getLong(2), c.getString(3) ?: "",
+                c.getString(4) ?: "", c.getString(5) ?: "", c.getString(6) ?: "", c.getDouble(7), c.getDouble(8),
+                c.getString(9) ?: "ELIGIBLE", c.getString(10) ?: ""))
+        }
+    } catch(e: Exception) { }
+    return out
+}
+
+// Builds the claim list from the bills themselves: one row per unit sold inside the scheme period,
+// carrying the IMEI that has to be uploaded. Statuses already set by the shop are kept, so a rebuild
+// never undoes work - it only adds what is new and drops what no longer qualifies.
+fun rebuildSchemeClaims(ctx: Context, scheme: Scheme, rows: List<SaleRow>): Int {
+    return try {
+        val dbh = db(ctx).writableDatabase
+        val existing = HashMap<String, String>()
+        dbh.rawQuery("SELECT billMs, imei, status FROM scheme_claims WHERE schemeId = ?",
+            arrayOf(scheme.id.toString())).use { c ->
+            while(c.moveToNext()) existing[c.getLong(0).toString() + "|" + (c.getString(1) ?: "")] = c.getString(2) ?: "ELIGIBLE"
+        }
+        val inPeriod = rows.filter { it.ms >= scheme.fromMs && it.ms <= scheme.toMs }
+        val wanted = mutableListOf<Triple<SaleRow, String, Double>>()
+        for(r in inPeriod) {
+            if(scheme.models.isNotEmpty()) {
+                val hit = scheme.models.firstOrNull { m -> m.modelCode.isNotBlank() &&
+                    (r.model + " " + r.variant).contains(m.modelCode, true) }
+                    ?: scheme.models.firstOrNull { m -> m.modelName.isNotBlank() &&
+                        (r.model + " " + r.variant).contains(m.modelName, true) }
+                if(hit != null) wanted.add(Triple(r, hit.modelCode, hit.perUnit))
+            } else {
+                val inScope = (scheme.brand.isBlank() || r.brand.equals(scheme.brand, true)) &&
+                    (scheme.scope.isBlank() || (r.model + " " + r.variant).contains(scheme.scope, true))
+                if(inScope) wanted.add(Triple(r, "", scheme.perUnit))
+            }
+        }
+        dbh.beginTransaction()
+        try {
+            dbh.delete("scheme_claims", "schemeId = ?", arrayOf(scheme.id.toString()))
+            for((r, code, perUnit) in wanted) {
+                val cv = android.content.ContentValues()
+                cv.put("schemeId", scheme.id); cv.put("billMs", r.ms); cv.put("inv", r.inv); cv.put("day", r.day)
+                cv.put("modelCode", code); cv.put("imei", r.serial); cv.put("qty", r.qty)
+                cv.put("amount", r.qty * perUnit)
+                cv.put("status", existing[r.ms.toString() + "|" + r.serial] ?: "ELIGIBLE")
+                cv.put("createdMs", System.currentTimeMillis())
+                dbh.insert("scheme_claims", null, cv)
+            }
+            dbh.setTransactionSuccessful()
+        } finally { dbh.endTransaction() }
+        wanted.size
+    } catch(e: Exception) { -1 }
+}
+
+fun setClaimStatus(ctx: Context, claimId: Long, status: String) {
+    try { db(ctx).writableDatabase.execSQL("UPDATE scheme_claims SET status=? WHERE id=?", arrayOf(status, claimId.toString())) }
+    catch(e: Exception) { }
+}
+
 fun schemeProgress(rows: List<SaleRow>, s: Scheme): SchemeProgress {
     val inPeriod = rows.filter { it.ms >= s.fromMs && it.ms <= s.toMs }
     // a scheme letter pays per model code: match the code inside the bill line, and pay that unit's rate
@@ -6088,7 +6211,8 @@ fun schemeProgress(rows: List<SaleRow>, s: Scheme): SchemeProgress {
 // One row per unit sold, taken from the bill lines, so the report can be sliced by brand,
 // model, price band and day exactly like the register the shop already uses.
 data class SaleRow(val ms: Long, val day: String, val inv: String, val brand: String, val model: String,
-                   val variant: String, val cls: String, val qty: Double, val unitPrice: Double) {
+                   val variant: String, val cls: String, val qty: Double, val unitPrice: Double,
+                   val serial: String = "") {
     val amount: Double get() = qty * unitPrice
 }
 
@@ -6121,7 +6245,8 @@ fun loadSalesRows(ctx: Context, fromMs: Long, toMs: Long): List<SaleRow> {
                     val brand = o.optString("brand").ifBlank { "OTHER" }
                     val cls = o.optString("cls")
                     val (model, variant) = splitModelVariant(desc)
-                    out.add(SaleRow(ms, day, inv, brand.uppercase(Locale.ENGLISH), model, variant, cls, qty, rate))
+                    out.add(SaleRow(ms, day, inv, brand.uppercase(Locale.ENGLISH), model, variant, cls, qty, rate,
+                        o.optString("serial")))
                 }
             }
         }
@@ -6969,6 +7094,10 @@ class PenDb(ctx: Context) : android.database.sqlite.SQLiteOpenHelper(ctx, "penkh
                 schemeId INTEGER, fromQty REAL DEFAULT 0, toQty REAL DEFAULT 0, perUnit REAL DEFAULT 0)""")
             db.execSQL("""CREATE TABLE IF NOT EXISTS scheme_models(id INTEGER PRIMARY KEY AUTOINCREMENT,
                 schemeId INTEGER, modelCode TEXT DEFAULT '', modelName TEXT DEFAULT '', perUnit REAL DEFAULT 0)""")
+            db.execSQL("""CREATE TABLE IF NOT EXISTS scheme_claims(id INTEGER PRIMARY KEY AUTOINCREMENT,
+                schemeId INTEGER, billMs INTEGER, inv TEXT DEFAULT '', day TEXT DEFAULT '', modelCode TEXT DEFAULT '',
+                imei TEXT DEFAULT '', qty REAL DEFAULT 0, amount REAL DEFAULT 0, status TEXT DEFAULT 'ELIGIBLE',
+                note TEXT DEFAULT '', createdMs INTEGER DEFAULT 0)""")
             db.execSQL("""CREATE TABLE IF NOT EXISTS finance(ms INTEGER PRIMARY KEY, inv TEXT, date TEXT, buyer TEXT,
                 phone TEXT, lender TEXT, tenure INTEGER DEFAULT 0, loanId TEXT, downCash REAL DEFAULT 0,
                 downCard REAL DEFAULT 0, downUpi REAL DEFAULT 0, financed REAL DEFAULT 0, dbd REAL DEFAULT 0,
