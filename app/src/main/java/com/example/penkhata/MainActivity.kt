@@ -1810,16 +1810,17 @@ fun ImportScreen() {
             Card(Modifier.padding(vertical = 8.dp)) { Column(Modifier.padding(12.dp)) {
                 Text("2. Check what was found", fontWeight = FontWeight.Bold, fontSize = 12.sp)
                 Spacer(Modifier.height(6.dp))
-                fun line(k: String, v: String, col: Color = Color(0xFF1A1A1A)) {
+                val line: @Composable (String, String, Color) -> Unit = { k, v, col ->
                     Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
-                        Text(k, fontSize = 10.sp, color = Color.Gray); Text(v, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = col)
+                        Text(k, fontSize = 10.sp, color = Color.Gray)
+                        Text(v, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = col)
                     }
                 }
-                line("Bills", p.bills.size.toString())
-                line("Lines", p.lines.toString())
-                line("Customers", p.customers.toString())
-                line("Products", p.products.toString())
-                line("Value", "\u20b9" + inr(p.value))
+                line("Bills", p.bills.size.toString(), Color(0xFF1A1A1A))
+                line("Lines", p.lines.toString(), Color(0xFF1A1A1A))
+                line("Customers", p.customers.toString(), Color(0xFF1A1A1A))
+                line("Products", p.products.toString(), Color(0xFF1A1A1A))
+                line("Value", "\u20b9" + inr(p.value), Color(0xFF1A1A1A))
                 if(p.dupSerials.isNotEmpty()) line("Duplicate serials", p.dupSerials.size.toString(), Color(0xFFB26A00))
                 if(p.zeroValue > 0) line("Zero-value lines", p.zeroValue.toString(), Color(0xFFB26A00))
                 if(p.noBrand > 0) line("Without a brand", p.noBrand.toString() + " (kept as OTHER)", Color(0xFFB26A00))
@@ -1834,8 +1835,7 @@ fun ImportScreen() {
                 }
                 Spacer(Modifier.height(8.dp))
                 if(busy) {
-                    LinearProgressIndicator(progress = { if(progress.second > 0) progress.first.toFloat() / progress.second else 0f },
-                        modifier = Modifier.fillMaxWidth())
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                     Text(progress.first.toString() + " of " + progress.second, fontSize = 9.sp, color = Color.Gray)
                 } else Button(onClick = {
                     busy = true; progress = 0 to p.bills.size
